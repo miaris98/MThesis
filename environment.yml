@@ -1,0 +1,14 @@
+name: carla_rl
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - carla>=0.9.15
+      - numpy
+      - pillow
+      - opencv-python
+      - torch
+      - gymnasium

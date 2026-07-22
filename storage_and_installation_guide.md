@@ -6,7 +6,7 @@ Due to limited space on the primary partition (`C:`), all major environments, de
 
 - **`E:\RL_CARLA-main.zip`**: This is **not** the Carla Simulator itself. It is a repository containing the Reinforcement Learning agent (SAC) and the Gym environment wrapper.
 - **Carla Simulator Engine**: You must download the actual simulator separately. 
-- **Version Compatibility**: While the `RL_CARLA` codebase was originally written for **Carla 0.9.6** (which is outdated and requires legacy Python 3.5/3.6), we recommend downloading **Carla 0.9.15** (or **0.9.16**) for Windows 11. Modern versions provide native Windows 11 stability, better Vulkan graphics driver performance, and compatibility with modern Python versions (3.7 / 3.8 / 3.10) for your RL libraries.
+- **Version Compatibility**: While the `RL_CARLA` codebase was originally written for **Carla 0.9.6** (which is outdated and requires legacy Python 3.5/3.6), we use **Carla 0.9.15** (or **0.9.16**) for Windows 11. Modern versions provide native Windows 11 stability, better Vulkan graphics driver performance, and compatibility with **Python 3.10**.
 
 ## 1. Directory Structure on External Storage
 
@@ -18,7 +18,22 @@ We recommend creating a unified directory structure on your external drive:
     └── RL_Environments/        # Place training checkpoints and large datasets here
 ```
 
-## 2. Setting up the Carla Environment Variable
+## 2. Conda Environment Setup (`carla_rl`)
+
+To save space on `C:`, you can also configure Conda to create environments directly on your external drive (`E:\`):
+
+```powershell
+# Create environment with Python 3.10
+conda create -n carla_rl python=3.10 -y
+
+# Activate environment
+conda activate carla_rl
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+## 3. Setting up the Carla Environment Variable
 
 After extracting Carla on your external storage drive, configure your terminal or user environment variables so the scripts can locate it automatically.
 
@@ -40,5 +55,5 @@ set CARLA_ROOT=E:\Carla\CarlaSimulator
 4. Set **Variable name** to `CARLA_ROOT` and **Variable value** to your installation directory (e.g., `E:\Carla\CarlaSimulator`).
 5. Restart your terminal or IDE for the change to take effect.
 
-## 3. How the Runner Script Detects the Installation
+## 4. How the Runner Script Detects the Installation
 The runner script `carla_runner.py` is configured to automatically check for installations on drives `C:`, `D:`, `E:`, `F:`, and `G:` under `<Drive>:\Carla` or `<Drive>:\carla`. If installed in these directories, it will launch without requiring command-line configuration.

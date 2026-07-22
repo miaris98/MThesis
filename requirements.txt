@@ -1,0 +1,6 @@
+carla>=0.9.15
+numpy
+pillow
+opencv-python
+torch
+gymnasium

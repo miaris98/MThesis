@@ -1,31 +1,43 @@
-# Running Carla Simulator in Headless or Vulkan Mode
+# Running Carla Simulator in Headless or Vulkan Mode via Docker
 
-This plan outlines the steps to build a utility or script to start/manage the Carla simulator engine in headless (off-screen rendering) or Vulkan modes, which is essential for training reinforcement learning (RL) models efficiently.
+This plan outlines how we will run and manage the Carla simulator engine inside a Docker container with GPU/Vulkan pass-through on Windows 11 using WSL2, which is ideal for isolating training environments for reinforcement learning.
 
 ## User Review Required
 
-> [!IMPORTANT]
-> - **Carla Installation Path (External Storage)**: Due to disk space limitations on `C:`, Carla Simulator must be installed on the external storage drive (e.g., `E:\Carla\CarlaSimulator`).
-> - **Carla Version Compatibility**: Although the RL wrapper codebase (`RL_CARLA-main.zip`) was originally targeted for Carla 0.9.6, we will target Carla 0.9.15 (or 0.9.16) for Windows 11 compatibility and modern Python support.
-> - **GPU/Driver Requirements**: Headless running via Vulkan/Off-Screen rendering requires correct display driver configurations (especially on Windows vs Linux, though we are on Windows here).
+> [!WARNING]
+> **Windows + Docker GPU Pass-through Limitations**: 
+> Running Vulkan inside WSL2 Docker requires:
+> 1. Docker Desktop with the WSL2 backend enabled.
+> 2. Latest Nvidia Graphics Drivers installed on the Windows host.
+> 3. NVIDIA Container Toolkit installed inside the WSL2 kernel.
+> 
+> If Vulkan drivers fail to pass through cleanly, we may need to fall back to OpenGL or native Windows execution.
 
 ## Proposed Changes
 
-We will create a python runner/utility script to manage the Carla simulator process.
+We will create a Docker integration within the python runner script to start/stop the simulator using Docker commands.
 
-### Carla Runner Utility
+### 1. Update Carla Runner Utility
 
-#### [NEW] [carla_runner.py](file:///c:/Users/miari/Desktop/MThesis/carla_runner.py)
-Create a helper script that allows starting, monitoring, and stopping the Carla simulator with custom command-line options.
+#### [MODIFY] [carla_runner.py](file:///c:/Users/miari/Desktop/MThesis/carla_runner.py)
+Extend `CarlaRunner` to support running Carla via Docker. It will construct and execute the `docker run` command, mapping the appropriate ports and sharing GPU resources.
 
-Key flags to support:
-- `-RenderOffScreen`: Run offscreen (headless)
-- `-vulkan` / `-dx12`: Select graphics API
-- `-carla-port=PORT`: Custom port configuration
-- `-quality-level=Low`: Lower quality settings to speed up simulator ticks during RL training
+Example Docker Command to be generated:
+```powershell
+docker run --gpus all --privileged --net=host -d carlasim/carla:0.9.15 ./CarlaUE4.sh -RenderOffScreen -vulkan -carla-port=2000 -quality-level=Low
+```
+
+### 2. Update Documentation & Guide
+
+#### [NEW] [docker_setup_guide.md](file:///c:/Users/miari/Desktop/MThesis/docker_setup_guide.md)
+Document the steps to configure Windows 11, WSL2, Docker Desktop, and NVIDIA Container Toolkit to ensure GPU and Vulkan pass-through work correctly.
 
 ## Verification Plan
 
 ### Manual Verification
-- Execute `python carla_runner.py --headless --vulkan --port 2000` and check if the Carla process starts without opening a window and responds on port 2000.
-- Verify using a simple client connection script (e.g., `carla.Client('localhost', 2000)`) to check simulator connectivity.
+1. Run `docker pull carlasim/carla:0.9.15` to verify access to the image.
+2. Launch the simulator using the updated script:
+   ```powershell
+   python carla_runner.py --use-docker --headless --graphics vulkan --port 2000
+   ```
+3. Run `python test_connection.py --port 2000` to confirm connection.
