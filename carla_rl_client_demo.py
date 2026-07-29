@@ -14,6 +14,7 @@ def main():
     parser.add_argument("--output-dir", type=str, default="output_screenshots", help="Directory to save screenshots")
     parser.add_argument("--img-width", type=int, default=640, help="Camera width")
     parser.add_argument("--img-height", type=int, default=480, help="Camera height")
+    parser.add_argument("--no-camera", action="store_true", help="Disable camera sensor (for headless -nullrhi server mode)")
     
     args = parser.parse_args()
 
@@ -54,26 +55,27 @@ def main():
         actor_list.append(vehicle)
         print(f"Spawned Vehicle '{vehicle.type_id}' (ID: {vehicle.id}) at {spawn_point.location}")
 
-        # 2. Attach RGB Camera Sensor
-        camera_bp = blueprint_library.find("sensor.camera.rgb")
-        camera_bp.set_attribute("image_size_x", str(args.img_width))
-        camera_bp.set_attribute("image_size_y", str(args.img_height))
-        camera_bp.set_attribute("fov", "90")
-        
-        # Position camera slightly above and in front of the vehicle center
-        camera_transform = carla.Transform(carla.Location(x=1.5, z=2.4))
-        camera = world.spawn_actor(camera_bp, camera_transform, attach_to=vehicle)
-        actor_list.append(camera)
+        # 2. Attach RGB Camera Sensor (if enabled)
+        if not args.no_camera:
+            camera_bp = blueprint_library.find("sensor.camera.rgb")
+            camera_bp.set_attribute("image_size_x", str(args.img_width))
+            camera_bp.set_attribute("image_size_y", str(args.img_height))
+            camera_bp.set_attribute("fov", "90")
+            
+            # Position camera slightly above and in front of the vehicle center
+            camera_transform = carla.Transform(carla.Location(x=1.5, z=2.4))
+            camera = world.spawn_actor(camera_bp, camera_transform, attach_to=vehicle)
+            actor_list.append(camera)
 
-        def camera_callback(image):
-            # Convert raw CARLA image buffer to uint8 RGB array
-            array = np.frombuffer(image.raw_data, dtype=np.uint8)
-            array = np.reshape(array, (image.height, image.width, 4))
-            array = array[:, :, :3] # Drop alpha channel (BGRA -> BGR)
-            latest_image_data["frame"] = image.frame
-            latest_image_data["array"] = array
+            def camera_callback(image):
+                # Convert raw CARLA image buffer to uint8 RGB array
+                array = np.frombuffer(image.raw_data, dtype=np.uint8)
+                array = np.reshape(array, (image.height, image.width, 4))
+                array = array[:, :, :3] # Drop alpha channel (BGRA -> BGR)
+                latest_image_data["frame"] = image.frame
+                latest_image_data["array"] = array
 
-        camera.listen(camera_callback)
+            camera.listen(camera_callback)
 
         # 3. Attach Collision Sensor
         collision_bp = blueprint_library.find("sensor.other.collision")
