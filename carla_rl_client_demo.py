@@ -32,8 +32,10 @@ def main():
 
     try:
         import carla
-    except ImportError:
-        print("Error: 'carla' python package is not installed. Please install from /workspace/carla/PythonAPI/carla/dist/ or set CARLA_ROOT.")
+    except ImportError as e:
+        print(f"Error importing carla: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
     os.makedirs(args.output_dir, exist_ok=True)

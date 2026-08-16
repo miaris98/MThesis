@@ -24,9 +24,11 @@ def main():
 
     try:
         import carla
-    except ImportError:
-        print("Error: The 'carla' python package is not installed.")
-        print("Please install it from /workspace/carla/PythonAPI/carla/dist/ or set CARLA_ROOT.")
+    except ImportError as e:
+        print(f"Error importing carla: {e}")
+        import traceback
+        traceback.print_exc()
+        print("Please check your python version and CARLA_ROOT path.")
         sys.exit(1)
         
     print(f"Connecting to Carla simulator at {args.host}:{args.port}...")
