@@ -24,7 +24,7 @@ def main():
     carla_root = os.environ.get("CARLA_ROOT", "/workspace/carla")
     carla_dist_path = os.path.join(carla_root, "PythonAPI", "carla", "dist")
     if os.path.exists(carla_dist_path):
-        eggs = glob.glob(os.path.join(carla_dist_path, "carla-*.egg"))
+        eggs = glob.glob(os.path.join(carla_dist_path, "carla-*-py3*.egg"))
         wheels = glob.glob(os.path.join(carla_dist_path, "carla-*.whl"))
         for p in wheels + eggs:
             if p not in sys.path:

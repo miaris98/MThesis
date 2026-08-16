@@ -60,10 +60,10 @@ Add `CARLA_ROOT` and `PYTHONPATH` to your environment so Python auto-loads the C
 
 ```bash
 export CARLA_ROOT=/workspace/carla
-export PYTHONPATH=/workspace/carla/PythonAPI/carla/dist/carla-0.9.15-py3.7-linux-x86_64.egg:/workspace/carla/PythonAPI/carla:$PYTHONPATH
+export PYTHONPATH=$(ls /workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg | tail -n 1):/workspace/carla/PythonAPI/carla:$PYTHONPATH
 
 echo "export CARLA_ROOT=/workspace/carla" >> ~/.bashrc
-echo "export PYTHONPATH=/workspace/carla/PythonAPI/carla/dist/carla-0.9.15-py3.7-linux-x86_64.egg:/workspace/carla/PythonAPI/carla:\$PYTHONPATH" >> ~/.bashrc
+echo "export PYTHONPATH=\$(ls /workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg | tail -n 1):/workspace/carla/PythonAPI/carla:\$PYTHONPATH" >> ~/.bashrc
 ```
 
 ### Step E: Clone & Sync your GitHub Repository

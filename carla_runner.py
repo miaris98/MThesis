@@ -166,7 +166,7 @@ class CarlaRunner:
                 except Exception:
                     pass
 
-            egg_files = glob.glob(os.path.join(carla_dir, "PythonAPI", "carla", "dist", "carla-*.egg"))
+            egg_files = glob.glob(os.path.join(carla_dir, "PythonAPI", "carla", "dist", "carla-*-py3*.egg"))
             egg_path = egg_files[0] if egg_files else ""
             pythonpath = f"{egg_path}:{carla_dir}/PythonAPI/carla" if egg_path else f"{carla_dir}/PythonAPI/carla"
 
