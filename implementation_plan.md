@@ -17,18 +17,21 @@ We provide Python utilities and documentation for both Docker modes and native e
 ### 1. CARLA Runner Utility & RL Client
 
 #### [MODIFY] [carla_runner.py](file:///c:/Users/miari/Desktop/MThesis/carla_runner.py)
-Utility to manage CARLA simulator execution via Docker or native execution, setting ports, headless mode, and graphics API flags.
+Utility to manage CARLA simulator execution via Docker or native execution on Windows/Linux, supporting `-RenderOffScreen`, `-nosound`, ports, auto-detection of `CarlaUE4.sh` under `/workspace/carla` or `CARLA_ROOT`, and graphics API flags.
 
 #### [NEW] [carla_rl_client_demo.py](file:///c:/Users/miari/Desktop/MThesis/carla_rl_client_demo.py)
 Client script that connects to CARLA, spawns an actor with RGB camera and collision sensors, executes steering/throttle actions, computes step rewards, and logs camera screenshots.
 
 ### 2. Documentation & Setup Guides
 
+#### [NEW] [vastai_setup_guide.md](file:///c:/Users/miari/Desktop/MThesis/vastai_setup_guide.md)
+Comprehensive cloud setup guide for running CARLA natively inside a Vast.ai PyTorch Development Environment instance (#47104842 RTX 3080 10GB), avoiding nested Docker limits and desktop GUI VRAM overhead.
+
 #### [MODIFY] [storage_and_installation_guide.md](file:///c:/Users/miari/Desktop/MThesis/storage_and_installation_guide.md)
 Document external drive (`E:\`) storage configuration, `carla_rl` Conda environment setup (Python 3.10), and Docker storage relocation.
 
 #### [MODIFY] [walkthrough.md](file:///c:/Users/miari/Desktop/MThesis/walkthrough.md)
-Complete guide for starting CARLA Docker containers, native execution, Conda setup, and running the RL step-reward demo.
+Complete guide for starting CARLA Docker containers, native execution, Conda setup, Vast.ai cloud deployment, and running the RL step-reward demo.
 
 ## Verification Plan
 

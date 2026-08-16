@@ -5,13 +5,14 @@ import sys
 import argparse
 
 class CarlaRunner:
-    def __init__(self, carla_path=None, port=2000, headless=True, graphics_api="vulkan", quality_level="Low", use_docker=False, docker_image="carlasim/carla:0.9.15"):
+    def __init__(self, carla_path=None, port=2000, headless=True, graphics_api="vulkan", quality_level="Low", nosound=True, use_docker=False, docker_image="carlasim/carla:0.9.15"):
         self.use_docker = use_docker
         self.docker_image = docker_image
         self.port = port
         self.headless = headless
         self.graphics_api = graphics_api.lower()
         self.quality_level = quality_level
+        self.nosound = nosound
         self.carla_path = carla_path or (None if use_docker else self._detect_carla_path())
         self.process = None
         self.container_name = f"carla_server_{self.port}"
@@ -20,16 +21,33 @@ class CarlaRunner:
         # Check environment variable
         carla_root = os.environ.get("CARLA_ROOT")
         if carla_root:
-            exe_path = os.path.join(carla_root, "CarlaUE4.exe")
+            exe_path = os.path.join(carla_root, "CarlaUE4.sh")
             if os.path.exists(exe_path):
                 return exe_path
-            # Maybe it's a Linux package structure or other
+            exe_path_win = os.path.join(carla_root, "CarlaUE4.exe")
+            if os.path.exists(exe_path_win):
+                return exe_path_win
+            # Binaries fallback
             exe_path_bin = os.path.join(carla_root, "CarlaUE4", "Binaries", "Win64", "CarlaUE4-Win64-Shipping.exe")
             if os.path.exists(exe_path_bin):
                 return exe_path_bin
 
+        # Common Linux / Vast.ai installation folders
+        possible_dirs_linux = [
+            "/workspace/carla",
+            "/workspace/CARLA_0.9.15",
+            "/workspace/CARLA_0.9.16",
+            os.path.expanduser("~/carla_simulator"),
+            os.path.expanduser("~/CARLA_0.9.15"),
+            os.path.expanduser("~/Carla"),
+        ]
+        for pdir in possible_dirs_linux:
+            sh_path = os.path.join(pdir, "CarlaUE4.sh")
+            if os.path.exists(sh_path):
+                return sh_path
+
         # Common Windows installation folders (including external drives)
-        possible_dirs = [
+        possible_dirs_win = [
             r"C:\Carla",
             r"C:\carla",
             r"D:\Carla",
@@ -40,10 +58,9 @@ class CarlaRunner:
             r"F:\carla",
             r"G:\Carla",
             r"G:\carla",
-            os.path.expanduser("~/Carla"),
         ]
         
-        for pdir in possible_dirs:
+        for pdir in possible_dirs_win:
             if os.path.exists(pdir):
                 for root, dirs, files in os.walk(pdir):
                     if "CarlaUE4.exe" in files:
@@ -90,6 +107,9 @@ class CarlaRunner:
         elif self.graphics_api == "opengl":
             cmd.append("-opengl")
 
+        if self.nosound:
+            cmd.append("-nosound")
+
         if self.quality_level:
             cmd.append(f"-quality-level={self.quality_level}")
 
@@ -121,6 +141,9 @@ class CarlaRunner:
             cmd.append("-dx12")
         elif self.graphics_api == "opengl":
             cmd.append("-opengl")
+
+        if self.nosound:
+            cmd.append("-nosound")
 
         if self.quality_level:
             cmd.append(f"-quality-level={self.quality_level}")
@@ -174,6 +197,8 @@ if __name__ == "__main__":
     parser.add_argument("--no-headless", action="store_false", dest="headless", help="Run with a visual window")
     parser.add_argument("--graphics", type=str, default="vulkan", choices=["vulkan", "dx12", "opengl"], help="Graphics API to use")
     parser.add_argument("--quality", type=str, default="Low", choices=["Low", "Epic"], help="Quality level")
+    parser.add_argument("--nosound", action="store_true", default=True, help="Disable sound output (recommended for cloud/headless)")
+    parser.add_argument("--sound", action="store_false", dest="nosound", help="Enable sound output")
     parser.add_argument("--docker", action="store_true", help="Run CARLA inside Docker container")
     parser.add_argument("--image", type=str, default="carlasim/carla:0.9.15", help="Docker image name")
 
@@ -185,6 +210,7 @@ if __name__ == "__main__":
         headless=args.headless,
         graphics_api=args.graphics,
         quality_level=args.quality,
+        nosound=args.nosound,
         use_docker=args.docker,
         docker_image=args.image
     )

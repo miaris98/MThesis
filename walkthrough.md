@@ -7,6 +7,7 @@ This document outlines the repository tools, Conda environment setup, and three 
 2. **[carla_rl_client_demo.py](file:///c:/Users/miari/Desktop/MThesis/carla_rl_client_demo.py)**: Client script to connect to CARLA, spawn a vehicle with RGB camera and collision sensors, step through throttle/steer control actions, compute RL rewards, and save camera screenshots.
 3. **[environment.yml](file:///c:/Users/miari/Desktop/MThesis/environment.yml)** & **[requirements.txt](file:///c:/Users/miari/Desktop/MThesis/requirements.txt)**: Conda environment definition (Python 3.10) and dependencies (`carla>=0.9.15`, `torch`, `numpy`, `pillow`, `gymnasium`).
 4. **[test_connection.py](file:///c:/Users/miari/Desktop/MThesis/test_connection.py)**: Client script to test basic connection and fetch map/server metadata.
+5. **[vastai_setup_guide.md](file:///c:/Users/miari/Desktop/MThesis/vastai_setup_guide.md)**: Detailed setup & deployment guide for running CARLA natively on Vast.ai cloud GPU instances.
 
 ---
 

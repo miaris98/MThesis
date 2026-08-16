@@ -6,7 +6,8 @@ Due to limited space on the primary partition (`C:`), all major environments, de
 
 - **`E:\RL_CARLA-main.zip`**: This is **not** the Carla Simulator itself. It is a repository containing the Reinforcement Learning agent (SAC) and the Gym environment wrapper.
 - **Carla Simulator Engine**: You must download or run the actual simulator image/package (`carlasim/carla:0.9.15`).
-- **Version Compatibility**: While the legacy `RL_CARLA` codebase was originally written for **Carla 0.9.6** (legacy Python 3.5/3.6), we use **Carla 0.9.15** (or **0.9.16**) for Windows 11. Modern versions provide native Windows 11 stability, better Vulkan graphics driver performance, and compatibility with **Python 3.10**.
+- **Version Compatibility**: While the legacy `RL_CARLA` codebase was originally written for **Carla 0.9.6** (legacy Python 3.5/3.6), we use **Carla 0.9.15** (or **0.9.16**) for Windows 11 and Linux. Modern versions provide native stability, better Vulkan graphics driver performance, and compatibility with **Python 3.10**.
+- **Cloud Deployment (Vast.ai)**: For training on cloud GPU instances (Vast.ai), see the dedicated [vastai_setup_guide.md](file:///c:/Users/miari/Desktop/MThesis/vastai_setup_guide.md).
 
 ## 1. Directory Structure on External Storage
 
