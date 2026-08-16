@@ -163,8 +163,8 @@ class CarlaGymEnv(gym.Env):
         """Callback for incoming RGB camera images."""
         array = np.frombuffer(image.raw_data, dtype=np.uint8)
         array = np.reshape(array, (image.height, image.width, 4))
-        # Convert BGRA to RGB
-        self.latest_image = array[:, :, :3][:, :, ::-1]
+        # Convert BGRA to RGB with contiguous memory stride
+        self.latest_image = np.ascontiguousarray(array[:, :, :3][:, :, ::-1])
 
     def _on_collision(self, event):
         """Callback for collision events."""

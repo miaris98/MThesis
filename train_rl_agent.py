@@ -144,7 +144,7 @@ def train():
         for step in range(args.rollout_steps):
             global_step += 1
             
-            img_tensor = torch.tensor(obs["image"], dtype=torch.uint8).unsqueeze(0).to(device)
+            img_tensor = torch.tensor(obs["image"].copy(), dtype=torch.uint8).unsqueeze(0).to(device)
             spd_tensor = torch.tensor(obs["speed"], dtype=torch.float32).unsqueeze(0).to(device)
 
             with torch.no_grad():
@@ -187,7 +187,7 @@ def train():
 
         # 2. Compute Generalized Advantage Estimation (GAE)
         with torch.no_grad():
-            next_img = torch.tensor(obs["image"], dtype=torch.uint8).unsqueeze(0).to(device)
+            next_img = torch.tensor(obs["image"].copy(), dtype=torch.uint8).unsqueeze(0).to(device)
             next_spd = torch.tensor(obs["speed"], dtype=torch.float32).unsqueeze(0).to(device)
             next_val = agent.get_action_and_value(next_img, next_spd)[3].squeeze(0)
 
