@@ -160,15 +160,17 @@ def record_multiview_eval(
     finally:
         print("Cleaning up actors and stopping video writer...")
         video_writer.release()
-        for actor in reversed(actor_list):
-            if actor is not None:
-                try:
-                    if hasattr(actor, "stop"):
-                        actor.stop()
-                    if actor.is_alive:
-                        actor.destroy()
-                except Exception:
-                    pass
+        # Stop camera listeners
+        for s in [rgb_cam, depth_cam, sem_cam]:
+            try:
+                s.stop()
+            except Exception:
+                pass
+
+        # Batch destroy all actors safely on server
+        if actor_list:
+            destroy_cmds = [carla.command.DestroyActor(a.id) for a in actor_list if a is not None]
+            client.apply_batch(destroy_cmds)
         
         settings = world.get_settings()
         settings.synchronous_mode = False
