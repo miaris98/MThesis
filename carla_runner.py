@@ -166,11 +166,17 @@ class CarlaRunner:
                 except Exception:
                     pass
 
+            egg_files = glob.glob(os.path.join(carla_dir, "PythonAPI", "carla", "dist", "carla-*.egg"))
+            egg_path = egg_files[0] if egg_files else ""
+            pythonpath = f"{egg_path}:{carla_dir}/PythonAPI/carla" if egg_path else f"{carla_dir}/PythonAPI/carla"
+
             carla_cmd_str = " ".join([f"'{arg}'" if " " in arg else arg for arg in cmd])
-            full_su_cmd = f"export CARLA_ROOT='{carla_dir}' && {carla_cmd_str}"
+            full_su_cmd = f"export CARLA_ROOT='{carla_dir}' && export PYTHONPATH='{pythonpath}':$PYTHONPATH && {carla_cmd_str}"
             cmd = ["su", "carlauser", "-c", full_su_cmd]
 
-        print(f"Launching native Carla Simulator: {' '.join(cmd)}")
+            print(f"Launching native Carla Simulator: su carlauser -c \"{full_su_cmd}\"")
+        else:
+            print(f"Launching native Carla Simulator: {' '.join(cmd)}")
         
         self.process = subprocess.Popen(
             cmd,

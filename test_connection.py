@@ -9,11 +9,24 @@ def main():
     
     args = parser.parse_args()
     
+    import glob
+    import os
+
+    # Auto-add local CARLA 0.9.15 client package from PythonAPI dist
+    carla_root = os.environ.get("CARLA_ROOT", "/workspace/carla")
+    carla_dist_path = os.path.join(carla_root, "PythonAPI", "carla", "dist")
+    if os.path.exists(carla_dist_path):
+        eggs = glob.glob(os.path.join(carla_dist_path, "carla-*.egg"))
+        wheels = glob.glob(os.path.join(carla_dist_path, "carla-*.whl"))
+        for p in wheels + eggs:
+            if p not in sys.path:
+                sys.path.insert(0, p)
+
     try:
         import carla
     except ImportError:
         print("Error: The 'carla' python package is not installed.")
-        print("Please install it (e.g. 'pip install carla') or add it to your python path.")
+        print("Please install it from /workspace/carla/PythonAPI/carla/dist/ or set CARLA_ROOT.")
         sys.exit(1)
         
     print(f"Connecting to Carla simulator at {args.host}:{args.port}...")

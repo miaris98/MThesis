@@ -46,15 +46,24 @@ rm CARLA_0.9.15.tar.gz
 ### Step C: Install CARLA Client & RL Dependencies
 The PyTorch Development template already has `torch`, `torchvision`, and CUDA pre-configured. Install the remaining requirements:
 
-```bash
-pip install carla==0.9.16 gymnasium numpy pillow opencv-python tensorboard
-```
+# 1. Uninstall any PyPI carla version (0.9.16) to avoid version mismatch
+pip uninstall -y carla
 
-### Step D: Set Environment Variable
-Add `CARLA_ROOT` to your environment so scripts auto-detect the simulator path:
+# 2. Install RL dependencies
+pip install gymnasium numpy pillow opencv-python tensorboard
+
+# 3. Extract official CARLA 0.9.15 PythonAPI C++ bindings into Python site-packages:
+python3 -c "import site, glob, os, zipfile, sysconfig; site_dir=site.getsitepackages()[0]; egg=glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-0.9.15-*.egg')[-1]; zipfile.ZipFile(egg).extractall(site_dir); cdir=os.path.join(site_dir,'carla'); ext=sysconfig.get_config_var('EXT_SUFFIX'); so=glob.glob(os.path.join(cdir,'libcarla.*.so')); os.symlink(so[0], os.path.join(cdir,f'libcarla{ext}')) if (so and not os.path.exists(os.path.join(cdir,f'libcarla{ext}'))) else None; print('CARLA 0.9.15 extracted successfully')"
+
+### Step D: Set Environment Variables
+Add `CARLA_ROOT` and `PYTHONPATH` to your environment so Python auto-loads the CARLA 0.9.15 API:
+
 ```bash
 export CARLA_ROOT=/workspace/carla
+export PYTHONPATH=/workspace/carla/PythonAPI/carla/dist/carla-0.9.15-py3.7-linux-x86_64.egg:/workspace/carla/PythonAPI/carla:$PYTHONPATH
+
 echo "export CARLA_ROOT=/workspace/carla" >> ~/.bashrc
+echo "export PYTHONPATH=/workspace/carla/PythonAPI/carla/dist/carla-0.9.15-py3.7-linux-x86_64.egg:/workspace/carla/PythonAPI/carla:\$PYTHONPATH" >> ~/.bashrc
 ```
 
 ### Step E: Clone & Sync your GitHub Repository
