@@ -241,9 +241,14 @@ class CarlaGymEnv(gym.Env):
     def _cleanup(self):
         """Destroy spawned actors cleanly."""
         for actor in reversed(self.actor_list):
-            if actor is not None and actor.is_alive:
-                actor.stop() if hasattr(actor, "stop") else None
-                actor.destroy()
+            if actor is not None:
+                try:
+                    if hasattr(actor, "stop"):
+                        actor.stop()
+                    if actor.is_alive:
+                        actor.destroy()
+                except Exception:
+                    pass
         self.actor_list.clear()
 
     def close(self):

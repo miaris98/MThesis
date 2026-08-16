@@ -161,8 +161,14 @@ def record_multiview_eval(
         print("Cleaning up actors and stopping video writer...")
         video_writer.release()
         for actor in reversed(actor_list):
-            if actor is not None and actor.is_alive:
-                actor.destroy()
+            if actor is not None:
+                try:
+                    if hasattr(actor, "stop"):
+                        actor.stop()
+                    if actor.is_alive:
+                        actor.destroy()
+                except Exception:
+                    pass
         
         settings = world.get_settings()
         settings.synchronous_mode = False
