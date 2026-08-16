@@ -43,21 +43,20 @@ tar -xvf CARLA_0.9.15.tar.gz -C /workspace/carla
 rm CARLA_0.9.15.tar.gz
 ```
 
-### Step C: Install CARLA Client & RL Dependencies
-The PyTorch Development template already has `torch`, `torchvision`, and CUDA pre-configured. Install the remaining requirements:
+### Step C: Create Python 3.8 Environment & Install Dependencies
+> **Crucial Note**: CARLA 0.9.15 C++ Boost bindings were natively compiled for **Python 3.7 and 3.8**. Set up a dedicated Python 3.8 environment:
 
-# 1. Install missing C++ shared libraries (libtiff5) required by CARLA
+```bash
+# 1. Install missing C++ shared libraries (libtiff5)
 apt-get update && (apt-get install -y libtiff5 2>/dev/null || apt-get install -y libtiff-dev 2>/dev/null)
-python3 -c "import os, glob; tiffs=glob.glob('/usr/lib/**/libtiff.so*', recursive=True) + glob.glob('/venv/**/libtiff.so*', recursive=True); (os.symlink(tiffs[0], '/usr/lib/x86_64-linux-gnu/libtiff.so.5') if tiffs and not os.path.exists('/usr/lib/x86_64-linux-gnu/libtiff.so.5') else None)"
 
-# 2. Uninstall any PyPI carla version (0.9.16) to avoid version mismatch
-pip uninstall -y carla
+# 2. Create and activate Python 3.8 Conda environment
+conda create -n carla_py38 python=3.8 -y
+conda activate carla_py38  # (or source /opt/conda/bin/activate carla_py38)
 
-# 3. Install RL dependencies
-pip install gymnasium numpy pillow opencv-python tensorboard
-
-# 3. Extract official CARLA 0.9.15 PythonAPI C++ bindings into Python site-packages:
-python -c "import site, glob, zipfile, os, sysconfig; target=site.getsitepackages()[0]; archive=glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-0.9.15-py3*.egg')[0]; zipfile.ZipFile(archive).extractall(target); cdir=os.path.join(target, 'carla'); ext=sysconfig.get_config_var('EXT_SUFFIX'); so=glob.glob(cdir + '/libcarla*.so')[0]; os.symlink(so, os.path.join(cdir, 'libcarla' + ext)) if not os.path.exists(os.path.join(cdir, 'libcarla' + ext)) else None; print('CARLA 0.9.15 installed successfully into', target)"
+# 3. Install RL dependencies & PyTorch (pin setuptools<80 for CARLA's pkg_resources dependency)
+pip install "setuptools<80" gymnasium numpy pillow opencv-python tensorboard torch torchvision
+```
 
 ### Step D: Set Environment Variables
 Add `CARLA_ROOT` and `PYTHONPATH` to your environment so Python auto-loads the CARLA 0.9.15 API:
@@ -157,3 +156,70 @@ python carla_rl_client_demo.py --host 127.0.0.1 --port 2000 --steps 50 --img-wid
 ```
 
 ---
+
+## 6. Video Rendering & Interactive JupyterLab Visualization
+
+### Step A: Generate MP4 Driving Video from Screenshots
+Convert captured simulation frames into an MP4 video using `ffmpeg`:
+
+```bash
+apt-get install -y ffmpeg
+ffmpeg -framerate 10 -i /workspace/output_screenshots/step_%03d.png -c:v libx264 -pix_fmt yuv420p /workspace/output_screenshots/driving_demo.mp4
+```
+
+### Step B: Launch JupyterLab on Vast.ai
+Start JupyterLab inside the `carla_py38` environment:
+
+```bash
+conda activate carla_py38
+pip install jupyterlab ipywidgets
+jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token=''
+```
+
+### Step C: Access JupyterLab & View Media Inline
+1. **Local SSH Tunnel** (run in local Windows PowerShell):
+   ```powershell
+   ssh -p <PORT> -L 8888:localhost:8888 root@<VAST_IP>
+   ```
+2. Open `http://localhost:8888` in your local web browser.
+3. Display screenshots and play videos directly inside notebook cells:
+
+```python
+# Display Screenshot
+from IPython.display import Image, display
+display(Image(filename='/workspace/output_screenshots/step_025.png'))
+
+# Play MP4 Video Inline
+from IPython.display import Video
+Video('/workspace/output_screenshots/driving_demo.mp4', embed=True, width=640)
+```
+
+---
+
+## 7. Deep RL Agent Training & Multi-Sensor Traffic Simulation
+
+### Step A: Train PPO Deep RL Agent with PyTorch & TensorBoard
+Run full Actor-Critic PPO policy updates with NatureCNN feature extraction:
+
+```bash
+conda activate carla_py38
+python train_rl_agent.py --host 127.0.0.1 --port 2000 --total-steps 1000 --rollout-steps 250 --log-dir /workspace/runs --checkpoint-dir /workspace/checkpoints
+```
+
+### Step B: Monitor Training Metrics via TensorBoard
+1. **Launch TensorBoard on Vast.ai**:
+   ```bash
+   tensorboard --logdir=/workspace/runs --port=6006 --host=0.0.0.0
+   ```
+2. **Local SSH Tunnel** (run in local Windows PowerShell):
+   ```powershell
+   ssh -p <PORT> -L 6006:localhost:6006 root@<VAST_IP>
+   ```
+3. Open `http://localhost:6006` to monitor Policy Loss, Value Loss, Episode Rewards, and Driving Speeds in real time.
+
+### Step C: Multi-Sensor Traffic Evaluation & Split-Screen Video
+Spawn 20+ NPC AI vehicles via `TrafficManager` and record synchronized RGB + Depth + Semantic Segmentation multi-view video:
+
+```bash
+python record_eval_video.py --host 127.0.0.1 --port 2000 --steps 150 --output-video /workspace/output_screenshots/driving_multiview.mp4
+```
