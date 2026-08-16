@@ -17,8 +17,7 @@ def main():
     carla_dist_path = os.path.join(carla_root, "PythonAPI", "carla", "dist")
     if os.path.exists(carla_dist_path):
         eggs = glob.glob(os.path.join(carla_dist_path, "carla-*-py3*.egg"))
-        wheels = glob.glob(os.path.join(carla_dist_path, "carla-*.whl"))
-        for p in wheels + eggs:
+        for p in eggs:
             if p not in sys.path:
                 sys.path.insert(0, p)
 

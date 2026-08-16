@@ -46,14 +46,18 @@ rm CARLA_0.9.15.tar.gz
 ### Step C: Install CARLA Client & RL Dependencies
 The PyTorch Development template already has `torch`, `torchvision`, and CUDA pre-configured. Install the remaining requirements:
 
-# 1. Uninstall any PyPI carla version (0.9.16) to avoid version mismatch
+# 1. Install missing C++ shared libraries (libtiff5) required by CARLA
+apt-get update && (apt-get install -y libtiff5 2>/dev/null || apt-get install -y libtiff-dev 2>/dev/null)
+python3 -c "import os, glob; tiffs=glob.glob('/usr/lib/**/libtiff.so*', recursive=True) + glob.glob('/venv/**/libtiff.so*', recursive=True); (os.symlink(tiffs[0], '/usr/lib/x86_64-linux-gnu/libtiff.so.5') if tiffs and not os.path.exists('/usr/lib/x86_64-linux-gnu/libtiff.so.5') else None)"
+
+# 2. Uninstall any PyPI carla version (0.9.16) to avoid version mismatch
 pip uninstall -y carla
 
-# 2. Install RL dependencies
+# 3. Install RL dependencies
 pip install gymnasium numpy pillow opencv-python tensorboard
 
 # 3. Extract official CARLA 0.9.15 PythonAPI C++ bindings into Python site-packages:
-python3 -c "import site, glob, os, zipfile, sysconfig; site_dir=site.getsitepackages()[0]; egg=glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-0.9.15-*.egg')[-1]; zipfile.ZipFile(egg).extractall(site_dir); cdir=os.path.join(site_dir,'carla'); ext=sysconfig.get_config_var('EXT_SUFFIX'); so=glob.glob(os.path.join(cdir,'libcarla.*.so')); os.symlink(so[0], os.path.join(cdir,f'libcarla{ext}')) if (so and not os.path.exists(os.path.join(cdir,f'libcarla{ext}'))) else None; print('CARLA 0.9.15 extracted successfully')"
+python -c "import site, glob, zipfile, os, sysconfig; target=site.getsitepackages()[0]; archive=glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-0.9.15-py3*.egg')[0]; zipfile.ZipFile(archive).extractall(target); cdir=os.path.join(target, 'carla'); ext=sysconfig.get_config_var('EXT_SUFFIX'); so=glob.glob(cdir + '/libcarla*.so')[0]; os.symlink(so, os.path.join(cdir, 'libcarla' + ext)) if not os.path.exists(os.path.join(cdir, 'libcarla' + ext)) else None; print('CARLA 0.9.15 installed successfully into', target)"
 
 ### Step D: Set Environment Variables
 Add `CARLA_ROOT` and `PYTHONPATH` to your environment so Python auto-loads the CARLA 0.9.15 API:
