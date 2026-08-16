@@ -47,7 +47,7 @@ rm CARLA_0.9.15.tar.gz
 The PyTorch Development template already has `torch`, `torchvision`, and CUDA pre-configured. Install the remaining requirements:
 
 ```bash
-pip install carla==0.9.15 gymnasium numpy pillow opencv-python tensorboard
+pip install carla==0.9.16 gymnasium numpy pillow opencv-python tensorboard
 ```
 
 ### Step D: Set Environment Variable
@@ -57,23 +57,49 @@ export CARLA_ROOT=/workspace/carla
 echo "export CARLA_ROOT=/workspace/carla" >> ~/.bashrc
 ```
 
+### Step E: Clone & Sync your GitHub Repository
+Your repository (`miaris98/MThesis`) is **Public**, which means you can clone it directly without setting up SSH keys or authentication tokens:
+
+```bash
+cd /workspace
+git clone https://github.com/miaris98/MThesis.git
+cd /workspace/MThesis
+```
+
+> **Development Workflow**:
+> 1. Edit code on your local PC, then commit & push to GitHub:
+>    ```bash
+>    git add . && git commit -m "Updated RL agent" && git push
+>    ```
+> 2. On your Vast.ai SSH terminal, pull updates instantly:
+>    ```bash
+>    cd /workspace/MThesis && git pull
+>    ```
+> *(Note: If you ever change the repo visibility to Private in the future, clone using a Personal Access Token: `git clone https://<PAT_TOKEN>@github.com/miaris98/MThesis.git`)*
+
 ---
 
 ## 3. Running CARLA Engine Headless
 
-### Option 1: Using `carla_runner.py` (Automated)
-Run the included runner script to start CARLA in headless mode with graphics rendering enabled and audio disabled:
+> **Important Note for Vast.ai (Root Execution)**:
+> Unreal Engine security rules refuse to run directly as `root` (`Stderr: Refusing to run with the root privileges.`).
+> - `carla_runner.py` automatically detects `root` and wraps the execution using Linux `unshare -U` (no manual configuration required).
+> - For manual binary execution as `root`, prepend `unshare -U` before `./CarlaUE4.sh`.
+
+### Option 1: Using `carla_runner.py` (Automated - Recommended)
+Run the included runner script to start CARLA in headless mode with graphics rendering enabled and audio disabled (auto-bypasses root restrictions):
 
 ```bash
 python carla_runner.py --headless --nosound --graphics vulkan --port 2000
 ```
 
 ### Option 2: Direct Command Line (Manual / Background `tmux`)
-You can launch CARLA directly inside a `tmux` or `screen` session:
+You can launch CARLA directly inside a `tmux` or `screen` session using `unshare -U`:
 
 ```bash
 cd /workspace/carla
-./CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low
+chmod -R a+rwX /workspace/carla
+unshare -U ./CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low
 ```
 
 ---

@@ -148,6 +148,17 @@ class CarlaRunner:
         if self.quality_level:
             cmd.append(f"-quality-level={self.quality_level}")
 
+        # Handle root execution on Linux (Unreal Engine safety check bypass)
+        if sys.platform != "win32" and hasattr(os, "geteuid") and os.geteuid() == 0:
+            print("Notice: Running as root. Wrapping launcher with 'unshare -U' to bypass Unreal Engine root restriction...")
+            carla_dir = os.path.dirname(self.carla_path)
+            if os.path.exists(carla_dir):
+                try:
+                    subprocess.run(["chmod", "-R", "a+rwX", carla_dir], stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+            cmd = ["unshare", "-U"] + cmd
+
         print(f"Launching native Carla Simulator: {' '.join(cmd)}")
         
         self.process = subprocess.Popen(
