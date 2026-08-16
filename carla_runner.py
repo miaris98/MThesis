@@ -150,14 +150,25 @@ class CarlaRunner:
 
         # Handle root execution on Linux (Unreal Engine safety check bypass)
         if sys.platform != "win32" and hasattr(os, "geteuid") and os.geteuid() == 0:
-            print("Notice: Running as root. Wrapping launcher with 'unshare -U' to bypass Unreal Engine root restriction...")
-            carla_dir = os.path.dirname(self.carla_path)
+            print("Notice: Running as root. Setting up 'carlauser' and launching via 'su' to bypass Unreal Engine root restriction...")
+            carla_dir = os.path.dirname(self.carla_path) if self.carla_path else "/workspace/carla"
+            
+            # Ensure user 'carlauser' exists
+            res = subprocess.run(["id", "-u", "carlauser"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if res.returncode != 0:
+                subprocess.run(["useradd", "-m", "-s", "/bin/bash", "carlauser"], stderr=subprocess.DEVNULL)
+
+            # Grant permissions to CARLA directory
             if os.path.exists(carla_dir):
                 try:
+                    subprocess.run(["chown", "-R", "carlauser:carlauser", carla_dir], stderr=subprocess.DEVNULL)
                     subprocess.run(["chmod", "-R", "a+rwX", carla_dir], stderr=subprocess.DEVNULL)
                 except Exception:
                     pass
-            cmd = ["unshare", "-U"] + cmd
+
+            carla_cmd_str = " ".join([f"'{arg}'" if " " in arg else arg for arg in cmd])
+            full_su_cmd = f"export CARLA_ROOT='{carla_dir}' && {carla_cmd_str}"
+            cmd = ["su", "carlauser", "-c", full_su_cmd]
 
         print(f"Launching native Carla Simulator: {' '.join(cmd)}")
         

@@ -82,24 +82,27 @@ cd /workspace/MThesis
 ## 3. Running CARLA Engine Headless
 
 > **Important Note for Vast.ai (Root Execution)**:
-> Unreal Engine security rules refuse to run directly as `root` (`Stderr: Refusing to run with the root privileges.`).
-> - `carla_runner.py` automatically detects `root` and wraps the execution using Linux `unshare -U` (no manual configuration required).
-> - For manual binary execution as `root`, prepend `unshare -U` before `./CarlaUE4.sh`.
+> Unreal Engine security rules refuse to run directly as `root` (`Stderr: Refusing to run with the root privileges.`), and Docker containers on Vast.ai restrict user namespaces (`unshare`).
+> - `carla_runner.py` automatically detects `root`, creates a `carlauser` account, and launches CARLA via `su` (no manual configuration required).
+> - For manual binary execution as `root`, create a non-root user and run via `su carlauser`.
 
 ### Option 1: Using `carla_runner.py` (Automated - Recommended)
-Run the included runner script to start CARLA in headless mode with graphics rendering enabled and audio disabled (auto-bypasses root restrictions):
+Run the included runner script to start CARLA in headless mode with graphics rendering enabled and audio disabled (auto-creates `carlauser` & bypasses root restrictions):
 
 ```bash
 python carla_runner.py --headless --nosound --graphics vulkan --port 2000
 ```
 
 ### Option 2: Direct Command Line (Manual / Background `tmux`)
-You can launch CARLA directly inside a `tmux` or `screen` session using `unshare -U`:
+You can launch CARLA directly inside a `tmux` or `screen` session:
 
 ```bash
-cd /workspace/carla
-chmod -R a+rwX /workspace/carla
-unshare -U ./CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low
+# 1. One-time setup: Create non-root user & fix folder ownership
+useradd -m -s /bin/bash carlauser
+chown -R carlauser:carlauser /workspace/carla
+
+# 2. Launch CARLA as carlauser
+su carlauser -c "/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low"
 ```
 
 ---
