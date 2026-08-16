@@ -193,4 +193,24 @@ def record_multiview_eval(
             pass
 
 if __name__ == "__main__":
-    record_multiview_eval()
+    import argparse
+    parser = argparse.ArgumentParser(description="Record Multi-Sensor Evaluation Video in CARLA.")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="CARLA host IP")
+    parser.add_argument("--port", type=int, default=2000, help="CARLA port")
+    parser.add_argument("--steps", type=int, default=150, help="Number of simulation steps to record")
+    parser.add_argument("--img-width", type=int, default=400, help="Camera width per view")
+    parser.add_argument("--img-height", type=int, default=300, help="Camera height per view")
+    parser.add_argument("--output-video", type=str, default="/workspace/output_screenshots/driving_multiview.mp4", help="Output MP4 path")
+    parser.add_argument("--npc-vehicles", type=int, default=20, help="Number of NPC traffic vehicles")
+
+    args = parser.parse_args()
+
+    record_multiview_eval(
+        host=args.host,
+        port=args.port,
+        steps=args.steps,
+        img_width=args.img_width,
+        img_height=args.img_height,
+        output_video=args.output_video,
+        num_npc_vehicles=args.npc_vehicles
+    )
