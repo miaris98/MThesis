@@ -176,7 +176,21 @@ def record_multiview_eval(
         settings = world.get_settings()
         settings.synchronous_mode = False
         world.apply_settings(settings)
-        print(f"--- Evaluation Complete! Video saved to: {os.path.abspath(output_video)} ---")
+        print(f"--- Evaluation Complete! Raw Video saved to: {os.path.abspath(output_video)} ---")
+
+        # Convert to H.264 HTML5 browser-compatible video via ffmpeg
+        h264_video = output_video.replace(".mp4", "_h264.mp4")
+        try:
+            import subprocess
+            subprocess.run([
+                "ffmpeg", "-y", "-i", output_video,
+                "-vcodec", "libx264", "-pix_fmt", "yuv420p",
+                h264_video
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if os.path.exists(h264_video):
+                print(f"--- H.264 Web Browser Video saved to: {os.path.abspath(h264_video)} ---")
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     record_multiview_eval()
