@@ -25,7 +25,8 @@ def record_multiview_eval(
     img_width=400,
     img_height=300,
     output_video="/workspace/output_screenshots/driving_multiview.mp4",
-    num_npc_vehicles=20
+    num_npc_vehicles=20,
+    checkpoint="/workspace/checkpoints/ppo_carla_best.pth"
 ):
     print(f"--- Starting Multi-Sensor Evaluation & Video Recording ---")
     print(f"Connecting to CARLA at {host}:{port}...")
@@ -67,8 +68,27 @@ def record_multiview_eval(
         ego_spawn = random.choice(spawn_points)
         ego_vehicle = world.try_spawn_actor(ego_bp, ego_spawn)
 
-    ego_vehicle.set_autopilot(True, traffic_manager.get_port())
     actor_list.append(ego_vehicle)
+
+    # 5. Load Trained PyTorch PPO Model or Fallback to Autopilot
+    agent = None
+    device = None
+    if checkpoint and os.path.exists(checkpoint):
+        try:
+            import torch
+            from train_rl_agent import ActorCriticPPO
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            agent = ActorCriticPPO(action_dim=3).to(device)
+            agent.load_state_dict(torch.load(checkpoint, map_location=device))
+            agent.eval()
+            print(f"Driving vehicle using Trained PyTorch PPO Policy Model: {checkpoint} (Device: {device})")
+            ego_vehicle.set_autopilot(False)
+        except Exception as e:
+            print(f"Warning: Could not load checkpoint ({e}). Defaulting to Autopilot.")
+            ego_vehicle.set_autopilot(True, traffic_manager.get_port())
+    else:
+        print("Driving vehicle using CARLA Autopilot (Pass --checkpoint to evaluate PyTorch policy model).")
+        ego_vehicle.set_autopilot(True, traffic_manager.get_port())
 
     # 5. Attach 3 Synchronized Multi-Sensors to Ego Vehicle
     # Sensor 1: RGB Camera
@@ -143,6 +163,21 @@ def record_multiview_eval(
             v = ego_vehicle.get_velocity()
             speed_kmh = 3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2)
 
+            # Apply actions from trained PyTorch PPO policy if loaded
+            if agent is not None:
+                rgb_resized = cv2.resize(frames["rgb"][:, :, ::-1], (256, 256))
+                img_tensor = torch.tensor(rgb_resized.copy(), dtype=torch.uint8).unsqueeze(0).to(device)
+                spd_tensor = torch.tensor([speed_kmh], dtype=torch.float32).unsqueeze(0).to(device)
+                with torch.no_grad():
+                    action, _, _, _ = agent.get_action_and_value(img_tensor, spd_tensor)
+                act = action.cpu().numpy()[0]
+                control = carla.VehicleControl(
+                    steer=float(np.clip(act[0], -1.0, 1.0)),
+                    throttle=float(np.clip(act[1], 0.0, 1.0)),
+                    brake=float(np.clip(act[2], 0.0, 1.0))
+                )
+                ego_vehicle.apply_control(control)
+
             # Combine 3 views horizontally: [RGB Camera | Depth Camera | Semantic Segmentation]
             combined = np.hstack((frames["rgb"], frames["depth"], frames["sem"]))
 
@@ -202,6 +237,7 @@ if __name__ == "__main__":
     parser.add_argument("--img-height", type=int, default=300, help="Camera height per view")
     parser.add_argument("--output-video", type=str, default="/workspace/output_screenshots/driving_multiview.mp4", help="Output MP4 path")
     parser.add_argument("--npc-vehicles", type=int, default=20, help="Number of NPC traffic vehicles")
+    parser.add_argument("--checkpoint", type=str, default="/workspace/checkpoints/ppo_carla_best.pth", help="Path to PyTorch PPO model checkpoint")
 
     args = parser.parse_args()
 
@@ -212,5 +248,6 @@ if __name__ == "__main__":
         img_width=args.img_width,
         img_height=args.img_height,
         output_video=args.output_video,
-        num_npc_vehicles=args.npc_vehicles
+        num_npc_vehicles=args.npc_vehicles,
+        checkpoint=args.checkpoint
     )
