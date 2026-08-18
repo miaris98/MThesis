@@ -27,19 +27,27 @@ fi
 
 # --- 1. System Packages & Monitoring Utilities ---
 echo -e "\n${CYAN}[1/7] Installing system libraries and monitoring tools...${NC}"
+export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y \
-    libtiff5 \
-    libtiff-dev \
-    libgl1-mesa-glx \
+
+# Install standard packages (using modern libgl1 and libglx-mesa0 for Ubuntu 22.04 / 24.04 Noble)
+apt-get install -y --no-install-recommends \
+    libgl1 \
+    libglx-mesa0 \
+    libvulkan1 \
     ffmpeg \
     tmux \
     wget \
     git \
     curl \
     htop \
-    btop \
-    nvtop 2>/dev/null || apt-get install -y libtiff-dev libgl1-mesa-glx ffmpeg tmux wget git curl htop btop
+    btop 2>/dev/null || apt-get install -y ffmpeg tmux wget git curl htop
+
+# Try installing libtiff versions safely (libtiff6 on Ubuntu 24.04, libtiff5 on 20.04/22.04, or libtiff-dev)
+apt-get install -y libtiff6 2>/dev/null || apt-get install -y libtiff5 2>/dev/null || apt-get install -y libtiff-dev 2>/dev/null || true
+
+# Try installing nvtop if available in repository
+apt-get install -y nvtop 2>/dev/null || true
 
 echo -e "${GREEN}✓ System dependencies installed successfully.${NC}"
 
@@ -84,16 +92,18 @@ elif [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
     source "$HOME/miniconda3/etc/profile.d/conda.sh"
 elif [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
     source "$HOME/anaconda3/etc/profile.d/conda.sh"
+elif command -v conda &>/dev/null; then
+    eval "$(conda shell.bash hook 2>/dev/null || true)"
 fi
 
-if conda env list | grep -q "carla_py38"; then
+if conda env list 2>/dev/null | grep -q "carla_py38"; then
     echo -e "${GREEN}✓ Conda environment 'carla_py38' already exists.${NC}"
 else
     echo -e "${YELLOW}--> Creating conda environment 'carla_py38' with Python 3.8...${NC}"
     conda create -n carla_py38 python=3.8 -y
 fi
 
-conda activate carla_py38
+conda activate carla_py38 2>/dev/null || source /opt/conda/bin/activate carla_py38 2>/dev/null || source activate carla_py38 2>/dev/null
 
 echo -e "${YELLOW}--> Installing Python libraries & PyTorch...${NC}"
 conda install -y ipykernel
