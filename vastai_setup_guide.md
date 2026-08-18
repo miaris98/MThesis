@@ -1,225 +1,281 @@
-# CARLA Simulator & RL Training Guide (Vast.ai Cloud Deployment)
+# CARLA Simulator & PPO Training Guide (Vast.ai Jupyter Template End-to-End)
 
-This guide provides step-by-step instructions for running the **CARLA Simulator Engine** natively inside a **Vast.ai PyTorch Development Instance** and training Reinforcement Learning (RL) agents.
-
----
-
-## 1. Cloud Architecture & Strategy Overview
-
-| Parameter | Configuration / Specification |
-| :--- | :--- |
-| **Provider & Template** | **Vast.ai** — PyTorch Development Environment (SSH terminal + root access) |
-| **Instance Hardware** | Instance `#47104842` — **RTX 3080 (10 GB VRAM)** @ ~$0.088/hr |
-| **CARLA Package** | Linux Native Tarball (`CARLA_0.9.15.tar.gz`) stored in `/workspace/carla` |
-| **Execution Mode** | Headless native execution (`./CarlaUE4.sh -RenderOffScreen -nosound -vulkan`) |
-| **Why Avoid Desktop UI?** | Avoids ~1.5–2 GB unnecessary X11/GUI VRAM overhead |
-| **Why Avoid Docker-in-Docker?** | Prevents nested container GPU driver pass-through issues and storage bottlenecks inside Vast.ai |
+This guide provides an **end-to-end, copy-pasteable workflow** for setting up a brand new **Vast.ai instance** (using the default Jupyter Notebook / PyTorch template), launching the CARLA 0.9.15 simulator headlessly, training a PPO Deep RL Agent, monitoring training metrics via TensorBoard & Jupyter Notebooks, and tracking system resources (GPU/CPU/RAM) with interactive tools like **`nvitop`**, **`btop`**, and **`tmux`**.
 
 ---
 
-## 2. Step-by-Step Vast.ai Instance Setup
+## 1. Instance Creation Requirements (Vast.ai Console)
 
-### Step A: Connect to Instance via SSH
-Once your Vast.ai instance is started, connect using the provided SSH string:
+When renting an instance on Vast.ai:
+* **Template**: Select **PyTorch** or **Jupyter Notebook** (Default Docker image: `pytorch/pytorch` or Vast PyTorch image).
+* **GPU Selection**: Choose an **RTX 3080, RTX 3090, or RTX 4090** (At least **10 GB VRAM**).
+* **Disk Space Allocation**: Set container disk allocation to **at least 40 GB** (CARLA 0.9.15 uncompressed is ~16 GB + PyTorch/dependencies).
+
+---
+
+## 2. How to Access Your New Instance
+
+You have **two ways** to access your instance:
+
+### Option A: Via JupyterLab Web Interface (Easiest)
+1. In the Vast.ai **Instances** dashboard, click **"Open"** or **"Jupyter"**.
+2. Once JupyterLab opens in your browser, go to **File** $\to$ **New** $\to$ **Terminal** (or click the **Terminal** tile on the Launcher page).
+
+### Option B: Via SSH Command Line
+Copy the SSH connection command provided in your Vast.ai instance dashboard and run it in Windows PowerShell or Terminal:
 ```bash
 ssh -p <PORT> root@<VAST_IP_ADDRESS>
 ```
 
-### Step B: Download & Extract CARLA 0.9.15 to `/workspace`
-Vast.ai mounts persistent disk storage at `/workspace`. Always install CARLA inside `/workspace` so data persists across instance restarts.
+---
+
+## 3. One-Time End-to-End Setup (Run inside Terminal)
+
+### Option A: 1-Command Automated Setup (Recommended)
+Clone the repository and run the automated setup script to configure packages, CARLA, Python 3.8, Jupyter kernel, monitoring tools, and launch the CARLA server:
 
 ```bash
-# Create target directory
+cd /workspace
+git clone https://github.com/miaris98/MThesis.git
+cd /workspace/MThesis
+bash setup_vastai.sh
+```
+
+---
+
+### Option B: Step-by-Step Manual Setup
+
+If you prefer executing the steps manually, run the following commands sequentially:
+
+#### Step 3.1: Install System Shared Libraries, Monitoring Tools & Utilities
+```bash
+apt-get update && apt-get install -y \
+    libtiff5 \
+    libtiff-dev \
+    libgl1-mesa-glx \
+    ffmpeg \
+    tmux \
+    wget \
+    git \
+    htop \
+    btop \
+    nvtop
+```
+
+#### Step 3.2: Download & Extract CARLA 0.9.15 to `/workspace`
+> `/workspace` is the persistent storage volume on Vast.ai.
+```bash
 mkdir -p /workspace/carla
 cd /workspace
 
 # Download CARLA 0.9.15 Linux package
 wget https://carla-releases.s3.us-east-005.backblazeb2.com/Linux/CARLA_0.9.15.tar.gz
 
-# Extract package to /workspace/carla
+# Extract package to /workspace/carla (takes ~1-2 mins)
 tar -xvf CARLA_0.9.15.tar.gz -C /workspace/carla
 
-# Clean up tarball to save disk space
+# Remove tarball to save disk space
 rm CARLA_0.9.15.tar.gz
 ```
 
-### Step C: Create Python 3.8 Environment & Install Dependencies
-> **Crucial Note**: CARLA 0.9.15 C++ Boost bindings were natively compiled for **Python 3.7 and 3.8**. Set up a dedicated Python 3.8 environment:
-
+#### Step 3.3: Create Python 3.8 Environment & Install Dependencies
+CARLA 0.9.15 requires **Python 3.8**.
 ```bash
-# 1. Install missing C++ shared libraries (libtiff5)
-apt-get update && (apt-get install -y libtiff5 2>/dev/null || apt-get install -y libtiff-dev 2>/dev/null)
-
-# 2. Create and activate Python 3.8 Conda environment
+# 1. Create Python 3.8 conda environment
 conda create -n carla_py38 python=3.8 -y
-conda activate carla_py38  # (or source /opt/conda/bin/activate carla_py38)
 
-# 3. Install RL dependencies & PyTorch (pin setuptools<80 for CARLA's pkg_resources dependency)
-pip install "setuptools<80" gymnasium numpy pillow opencv-python tensorboard torch torchvision
+# 2. Activate environment
+source /opt/conda/bin/activate carla_py38
+
+# 3. Register environment as a Jupyter Kernel
+conda install -y ipykernel
+python -m ipykernel install --user --name=carla_py38 --display-name "Python 3.8 (CARLA RL)"
+
+# 4. Install PyTorch & RL packages (pin setuptools<80 for CARLA compatibility)
+pip install "setuptools<80" gymnasium numpy pillow opencv-python tensorboard torch torchvision jupyterlab ipywidgets
+
+# 5. Install nvitop (PyTorch process-aware GPU monitoring tool)
+pip install nvitop
 ```
 
-### Step D: Set Environment Variables
-Add `CARLA_ROOT` and `PYTHONPATH` to your environment so Python auto-loads the CARLA 0.9.15 API:
-
+#### Step 3.4: Configure Environment Variables
 ```bash
 export CARLA_ROOT=/workspace/carla
 export PYTHONPATH=$(ls /workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg | tail -n 1):/workspace/carla/PythonAPI/carla:$PYTHONPATH
 
-echo "export CARLA_ROOT=/workspace/carla" >> ~/.bashrc
-echo "export PYTHONPATH=\$(ls /workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg | tail -n 1):/workspace/carla/PythonAPI/carla:\$PYTHONPATH" >> ~/.bashrc
+echo 'export CARLA_ROOT=/workspace/carla' >> ~/.bashrc
+echo 'export PYTHONPATH=$(ls /workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg | tail -n 1):/workspace/carla/PythonAPI/carla:$PYTHONPATH' >> ~/.bashrc
 ```
 
-### Step E: Clone & Sync your GitHub Repository
-Your repository (`miaris98/MThesis`) is **Public**, which means you can clone it directly without setting up SSH keys or authentication tokens:
-
-```bash
-cd /workspace
-git clone https://github.com/miaris98/MThesis.git
-cd /workspace/MThesis
-```
-
-> **Development Workflow**:
-> 1. Edit code on your local PC, then commit & push to GitHub:
->    ```bash
->    git add . && git commit -m "Updated RL agent" && git push
->    ```
-> 2. On your Vast.ai SSH terminal, pull updates instantly:
->    ```bash
->    cd /workspace/MThesis && git pull
->    ```
-> *(Note: If you ever change the repo visibility to Private in the future, clone using a Personal Access Token: `git clone https://<PAT_TOKEN>@github.com/miaris98/MThesis.git`)*
 
 ---
 
-## 3. Running CARLA Engine Headless
+## 4. Launch CARLA Engine Headless in Background & Save Logs
 
-> **Important Note for Vast.ai (Root Execution)**:
-> Unreal Engine security rules refuse to run directly as `root` (`Stderr: Refusing to run with the root privileges.`), and Docker containers on Vast.ai restrict user namespaces (`unshare`).
-> - `carla_runner.py` automatically detects `root`, creates a `carlauser` account, and launches CARLA via `su` (no manual configuration required).
-> - For manual binary execution as `root`, create a non-root user and run via `su carlauser`.
+Unreal Engine security rules refuse to launch directly as `root`. We create a dedicated non-root user `carlauser` and launch CARLA in a background `tmux` window while saving log outputs to `/workspace/carla_server.log`.
 
-### Option 1: Using `carla_runner.py` (Automated - Recommended)
-Run the included runner script to start CARLA in headless mode with graphics rendering enabled and audio disabled (auto-creates `carlauser` & bypasses root restrictions):
-
+### Step 4.1: Create Non-Root User & Set Permissions
 ```bash
-python carla_runner.py --headless --nosound --graphics vulkan --port 2000
-```
-
-### Option 2: Direct Command Line (Manual / Background `tmux`)
-You can launch CARLA directly inside a `tmux` or `screen` session:
-
-```bash
-# 1. One-time setup: Create non-root user & fix folder ownership
 useradd -m -s /bin/bash carlauser
 chown -R carlauser:carlauser /workspace/carla
-
-# 2. Launch CARLA as carlauser
-su carlauser -c "/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low"
 ```
 
----
-
-## 4. VRAM Budget & Optimization for RTX 3080 (10 GB)
-
-Running both CARLA and PyTorch deep RL training loops (e.g., SAC / PPO) on a single 10 GB VRAM GPU requires careful memory budgeting:
-
-```text
-+-------------------------------------------------------------+
-|               RTX 3080 VRAM (10 GB Total)                   |
-+------------------------------------+------------------------+
-|  CARLA 0.9.15 Offscreen Vulkan     |  PyTorch RL Training   |
-|  Low Quality Shaders & Physics     |  SAC/PPO Replay Buffer |
-|  (~3.8 GB - 4.5 GB)                |  (~4.0 GB - 4.8 GB)    |
-+------------------------------------+------------------------+
-|             Remaining VRAM Safety Headroom (~1.0 GB)       |
-+-------------------------------------------------------------+
-```
-
-### Recommended Optimization Guidelines:
-1. **Camera Observation Resolution**: Use `160x120` or `256x256` for RGB camera sensors instead of full HD (e.g. `python carla_rl_client_demo.py --img-width 160 --img-height 120`).
-2. **Quality Level**: Keep `-quality-level=Low` on the CARLA server to reduce shadow map and texture VRAM allocations.
-3. **PyTorch Batch Size**: Use batch sizes of `128` or `256` during policy updates.
-4. **Upgrade Path**: If your agent uses multiple cameras/LiDAR or larger CNN backbones (e.g., ResNet-18), upgrade to an **RTX 3090 (24 GB VRAM)** on Vast.ai.
-
----
-
-## 5. Running the RL Client Demo & Verification
-
-Test your deployment by executing the client script:
-
+### Step 4.2: Start CARLA in a Background `tmux` Session with Logging
 ```bash
-# 1. Verify CARLA Connection
+tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1"
+```
+
+### Step 4.3: Verify CARLA Connection & View Logs
+Wait ~10 seconds for the server to load, then test the connection:
+```bash
+source /opt/conda/bin/activate carla_py38
+cd /workspace/MThesis
 python test_connection.py --host 127.0.0.1 --port 2000
+```
+*Expected Output*: `Successfully connected to CARLA Server! Map: Town10HD_Opt`
 
-# 2. Run RL Client Demo (50 Steps + Screenshot Capture)
-python carla_rl_client_demo.py --host 127.0.0.1 --port 2000 --steps 50 --img-width 256 --img-height 256 --output-dir /workspace/output_screenshots
+* **To check CARLA server logs live**:
+  ```bash
+  tail -f /workspace/carla_server.log
+  ```
+
+---
+
+## 5. GPU, CPU, RAM & Process Monitoring Tools
+
+To monitor your system resources while running CARLA and PyTorch side-by-side:
+
+| Tool | Focus | Command | When to Use |
+| :--- | :--- | :--- | :--- |
+| **`nvitop`** | **PyTorch & CUDA** | `nvitop` | **Best for RL**: Shows GPU memory footprint per PyTorch script, active CUDA kernels, and process IDs. |
+| **`btop`** | **System Dashboard** | `btop` | **Best All-In-One**: Beautiful interactive UI for CPU core loads, System RAM, GPU, and Disk I/O. |
+| **`nvtop`** | **GPU Charts** | `nvtop` | Visual real-time graphs of GPU compute usage, VRAM consumption, and power draw over time. |
+| **`htop`** | **CPU / RAM** | `htop` | Standard lightweight monitor for CPU threads, memory usage, and background processes. |
+
+### Background GPU Usage Logging to CSV
+If you want to log GPU memory and compute usage automatically over time for post-training analysis:
+```bash
+nvidia-smi --query-gpu=timestamp,utilization.gpu,utilization.memory,memory.used,memory.free --format=csv -l 5 > /workspace/gpu_usage.csv &
 ```
 
 ---
 
-## 6. Video Rendering & Interactive JupyterLab Visualization
+## 6. Recommended `tmux` Multi-Pane Monitoring Dashboard
 
-### Step A: Generate MP4 Driving Video from Screenshots
-Convert captured simulation frames into an MP4 video using `ffmpeg`:
+Instead of switching between terminal tabs, set up a 3-pane `tmux` dashboard session to view **RL Training**, **GPU Memory (`nvitop`)**, and **System Resources (`btop`)** simultaneously.
 
+### Option A: One-Command Automated Script (Recommended)
+You can run the included helper script directly inside your repository:
 ```bash
-apt-get install -y ffmpeg
-ffmpeg -framerate 10 -i /workspace/output_screenshots/step_%03d.png -c:v libx264 -pix_fmt yuv420p /workspace/output_screenshots/driving_demo.mp4
+bash /workspace/MThesis/start_dashboard.sh
 ```
 
-### Step B: Launch JupyterLab on Vast.ai
-Start JupyterLab inside the `carla_py38` environment:
-
+### Option B: Manual Command Sequence
 ```bash
-conda activate carla_py38
-pip install jupyterlab ipywidgets
-jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token=''
+# Create a new tmux session named 'dashboard'
+tmux new-session -d -s dashboard
+
+# Split session vertically into two main panes
+tmux split-window -v -t dashboard
+
+# Split bottom pane horizontally into two sub-panes
+tmux split-window -h -t dashboard.1
+
+# Pane 0 (Top): Prepare for RL Training
+tmux send-keys -t dashboard.0 "source /opt/conda/bin/activate carla_py38 && cd /workspace/MThesis" C-m
+
+# Pane 1 (Bottom-Left): Launch nvitop for GPU monitoring
+tmux send-keys -t dashboard.1 "nvitop" C-m
+
+# Pane 2 (Bottom-Right): Launch btop for CPU/RAM monitoring
+tmux send-keys -t dashboard.2 "btop" C-m
+
+# Attach to the multi-pane dashboard
+tmux attach -t dashboard
 ```
 
-### Step C: Access JupyterLab & View Media Inline
-1. **Local SSH Tunnel** (run in local Windows PowerShell):
-   ```powershell
-   ssh -p <PORT> -L 8888:localhost:8888 root@<VAST_IP>
-   ```
-2. Open `http://localhost:8888` in your local web browser.
-3. Display screenshots and play videos directly inside notebook cells:
+> **`tmux` Navigation Cheat-Sheet**:
+> * Switch between panes: Press `Ctrl + B`, then use **Arrow Keys**.
+> * Detach from dashboard (keep everything running): Press `Ctrl + B`, then `D`.
+> * Re-attach to dashboard later: `tmux attach -t dashboard`.
+
+---
+
+## 7. Train PPO Deep RL Agent
+
+Run the PPO continuous control policy training loop in CARLA (inside Pane 0 or a standard terminal):
+
+```bash
+source /opt/conda/bin/activate carla_py38
+cd /workspace/MThesis
+
+# Run PPO RL Training (2,000 total steps)
+python train_rl_agent.py --host 127.0.0.1 --port 2000 --total-steps 2000 --rollout-steps 250 --log-dir /workspace/runs --checkpoint-dir /workspace/checkpoints
+```
+
+---
+
+## 8. Monitor Training Metrics with TensorBoard
+
+### Step 8.1: Start TensorBoard Server
+Inside your terminal, launch TensorBoard in the background:
+```bash
+tensorboard --logdir=/workspace/runs --port=6006 --host=0.0.0.0 &
+```
+
+### Step 8.2: Open TensorBoard in Local Browser
+* **Option A (Vast.ai Open Ports)**: In the Vast.ai dashboard, click **"Open Port"** for `6006`.
+* **Option B (SSH Tunnel)**: Run on local Windows PowerShell:
+  ```powershell
+  ssh -p <PORT> -L 6006:localhost:6006 root@<VAST_IP>
+  ```
+  Then navigate to `http://localhost:6006` in your local web browser to view real-time Policy Loss, Value Loss, and Episode Rewards.
+
+---
+
+## 9. Record & Play Evaluation Video in Jupyter Notebook
+
+### Step 9.1: Record Evaluation Video
+Generate multi-view video (RGB + Depth + Semantic Segmentation) with traffic:
+```bash
+source /opt/conda/bin/activate carla_py38
+cd /workspace/MThesis
+python record_eval_video.py --host 127.0.0.1 --port 2000 --steps 150 --output-video /workspace/output_screenshots/driving_multiview.mp4
+```
+
+### Step 9.2: Play Video inside Jupyter Notebook Cell
+1. In JupyterLab, open a new `.ipynb` notebook.
+2. Select Kernel: **`Python 3.8 (CARLA RL)`** (top right dropdown).
+3. Paste and run the following code cell:
 
 ```python
-# Display Screenshot
-from IPython.display import Image, display
-display(Image(filename='/workspace/output_screenshots/step_025.png'))
-
-# Play MP4 Video Inline
 from IPython.display import Video
-Video('/workspace/output_screenshots/driving_demo.mp4', embed=True, width=640)
+
+# Play recorded driving video inline
+Video('/workspace/output_screenshots/driving_multiview.mp4', embed=True, width=720)
 ```
 
 ---
 
-## 7. Deep RL Agent Training & Multi-Sensor Traffic Simulation
+## 10. Quick Cheat-Sheet for Subsequent Server Restarts
 
-### Step A: Train PPO Deep RL Agent with PyTorch & TensorBoard
-Run full Actor-Critic PPO policy updates with NatureCNN feature extraction:
-
-```bash
-conda activate carla_py38
-python train_rl_agent.py --host 127.0.0.1 --port 2000 --total-steps 1000 --rollout-steps 250 --log-dir /workspace/runs --checkpoint-dir /workspace/checkpoints
-```
-
-### Step B: Monitor Training Metrics via TensorBoard
-1. **Launch TensorBoard on Vast.ai**:
-   ```bash
-   tensorboard --logdir=/workspace/runs --port=6006 --host=0.0.0.0
-   ```
-2. **Local SSH Tunnel** (run in local Windows PowerShell):
-   ```powershell
-   ssh -p <PORT> -L 6006:localhost:6006 root@<VAST_IP>
-   ```
-3. Open `http://localhost:6006` to monitor Policy Loss, Value Loss, Episode Rewards, and Driving Speeds in real time.
-
-### Step C: Multi-Sensor Traffic Evaluation & Split-Screen Video
-Spawn 20+ NPC AI vehicles via `TrafficManager` and record synchronized RGB + Depth + Semantic Segmentation multi-view video:
+If your Vast.ai instance is paused/restarted, the environment is preserved in `/workspace`. Run these commands to resume:
 
 ```bash
-python record_eval_video.py --host 127.0.0.1 --port 2000 --steps 150 --output-video /workspace/output_screenshots/driving_multiview.mp4
+# 1. Activate environment & Navigate to repo
+source /opt/conda/bin/activate carla_py38
+cd /workspace/MThesis
+git pull
+
+# 2. Start CARLA Server in background with logging
+tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1"
+
+# 3. Check connection
+python test_connection.py
+
+# 4. Launch nvitop or btop in background monitor window
+nvitop
+
+# 5. Start PPO Training
+python train_rl_agent.py --total-steps 5000
 ```
