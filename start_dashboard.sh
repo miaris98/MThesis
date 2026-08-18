@@ -14,8 +14,10 @@ fi
 
 echo "Creating new 3-pane monitoring dashboard..."
 
-# 1. Create main session
+# 1. Create main session with mouse support enabled
 tmux new-session -d -s $SESSION_NAME
+tmux set-option -t $SESSION_NAME mouse on
+tmux set-option -g mouse on
 
 # 2. Split vertically into two main sections (Top & Bottom)
 tmux split-window -v -t $SESSION_NAME

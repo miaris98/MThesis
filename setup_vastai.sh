@@ -49,6 +49,9 @@ apt-get install -y libtiff6 2>/dev/null || apt-get install -y libtiff5 2>/dev/nu
 # Try installing nvtop if available in repository
 apt-get install -y nvtop 2>/dev/null || true
 
+# Enable mouse support in tmux globally (allows clicking to switch panes and scrolling)
+echo "set -g mouse on" >> ~/.tmux.conf
+
 echo -e "${GREEN}✓ System dependencies installed successfully.${NC}"
 
 # --- 2. Download & Extract CARLA 0.9.15 ---
