@@ -63,8 +63,10 @@ apt-get update && apt-get install -y \
 
 # Install libtiff (libtiff6 on Ubuntu 24.04 Noble, libtiff5 on older releases)
 apt-get install -y libtiff6 2>/dev/null || apt-get install -y libtiff5 2>/dev/null || apt-get install -y libtiff-dev 2>/dev/null || true
+[ -f /usr/lib/x86_64-linux-gnu/libtiff.so.6 ] && ln -sf /usr/lib/x86_64-linux-gnu/libtiff.so.6 /usr/lib/x86_64-linux-gnu/libtiff.so.5 && ldconfig
 apt-get install -y nvtop 2>/dev/null || true
 ```
+
 
 #### Step 3.2: Download & Extract CARLA 0.9.15 to `/workspace`
 > `/workspace` is the persistent storage volume on Vast.ai.

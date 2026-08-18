@@ -46,6 +46,16 @@ apt-get install -y --no-install-recommends \
 # Try installing libtiff versions safely (libtiff6 on Ubuntu 24.04, libtiff5 on 20.04/22.04, or libtiff-dev)
 apt-get install -y libtiff6 2>/dev/null || apt-get install -y libtiff5 2>/dev/null || apt-get install -y libtiff-dev 2>/dev/null || true
 
+# Fix libtiff.so.5 requirement for CARLA on Ubuntu 24.04 (Noble)
+if [ ! -f "/usr/lib/x86_64-linux-gnu/libtiff.so.5" ]; then
+    if [ -f "/usr/lib/x86_64-linux-gnu/libtiff.so.6" ]; then
+        ln -sf /usr/lib/x86_64-linux-gnu/libtiff.so.6 /usr/lib/x86_64-linux-gnu/libtiff.so.5
+    elif [ -f "/usr/lib/x86_64-linux-gnu/libtiff.so" ]; then
+        ln -sf /usr/lib/x86_64-linux-gnu/libtiff.so /usr/lib/x86_64-linux-gnu/libtiff.so.5
+    fi
+    ldconfig 2>/dev/null || true
+fi
+
 # Try installing nvtop if available in repository
 apt-get install -y nvtop 2>/dev/null || true
 
