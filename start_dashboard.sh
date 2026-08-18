@@ -23,11 +23,20 @@ tmux split-window -v -t $SESSION_NAME
 # 3. Split bottom pane horizontally into two sub-panes (Left & Right)
 tmux split-window -h -t $SESSION_NAME.1
 
+# Find Conda activation path dynamically
+CONDA_ACTIVATE="conda activate carla_py38"
+for p in "/workspace/miniconda" "/opt/conda" "$HOME/miniconda3" "$HOME/anaconda3" "/root/miniconda3" "/usr/local/miniconda3"; do
+    if [ -f "$p/etc/profile.d/conda.sh" ]; then
+        CONDA_ACTIVATE="source $p/etc/profile.d/conda.sh && conda activate carla_py38"
+        break
+    fi
+done
+
 # 4. Pane 0 (Top): Set up Python 3.8 environment for RL Training
-tmux send-keys -t $SESSION_NAME.0 "source /opt/conda/bin/activate carla_py38 && cd /workspace/MThesis" C-m
+tmux send-keys -t $SESSION_NAME.0 "$CONDA_ACTIVATE && cd /workspace/MThesis" C-m
 
 # 5. Pane 1 (Bottom-Left): Launch nvitop for GPU/PyTorch monitoring
-tmux send-keys -t $SESSION_NAME.1 "nvitop" C-m
+tmux send-keys -t $SESSION_NAME.1 "$CONDA_ACTIVATE && nvitop || nvtop || watch -n 1 nvidia-smi" C-m
 
 # 6. Pane 2 (Bottom-Right): Launch btop or htop for CPU/RAM monitoring
 if command -v btop &> /dev/null; then

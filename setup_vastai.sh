@@ -85,16 +85,36 @@ chown -R carlauser:carlauser "$CARLA_DIR"
 # --- 4. Python 3.8 Conda Environment & Dependencies ---
 echo -e "\n${CYAN}[4/7] Setting up Python 3.8 Conda environment ('carla_py38')...${NC}"
 
-# Locate conda
-if [ -f "/opt/conda/etc/profile.d/conda.sh" ]; then
-    source "/opt/conda/etc/profile.d/conda.sh"
-elif [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
-    source "$HOME/miniconda3/etc/profile.d/conda.sh"
-elif [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
-    source "$HOME/anaconda3/etc/profile.d/conda.sh"
+# Locate or auto-install Conda
+CONDA_PROFILE=""
+for p in "/opt/conda" "/workspace/miniconda" "$HOME/miniconda3" "$HOME/anaconda3" "/root/miniconda3" "/usr/local/miniconda3"; do
+    if [ -f "$p/etc/profile.d/conda.sh" ]; then
+        CONDA_PROFILE="$p/etc/profile.d/conda.sh"
+        break
+    fi
+done
+
+if [ -z "$CONDA_PROFILE" ] && ! command -v conda &>/dev/null; then
+    echo -e "${YELLOW}--> Conda not detected. Installing Miniconda to /workspace/miniconda...${NC}"
+    mkdir -p /workspace/miniconda
+    wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /workspace/miniconda.sh
+    bash /workspace/miniconda.sh -b -u -p /workspace/miniconda
+    rm -f /workspace/miniconda.sh
+    CONDA_PROFILE="/workspace/miniconda/etc/profile.d/conda.sh"
+    /workspace/miniconda/bin/conda init bash
+fi
+
+if [ -n "$CONDA_PROFILE" ]; then
+    source "$CONDA_PROFILE"
+    if ! grep -q "$CONDA_PROFILE" ~/.bashrc; then
+        echo "source $CONDA_PROFILE" >> ~/.bashrc
+    fi
 elif command -v conda &>/dev/null; then
     eval "$(conda shell.bash hook 2>/dev/null || true)"
 fi
+
+# Install nvitop globally if pip exists
+pip install nvitop 2>/dev/null || true
 
 if conda env list 2>/dev/null | grep -q "carla_py38"; then
     echo -e "${GREEN}✓ Conda environment 'carla_py38' already exists.${NC}"
