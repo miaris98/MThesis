@@ -240,19 +240,34 @@ class CarlaGymEnv(gym.Env):
 
     def _cleanup(self):
         """Destroy spawned actors cleanly via server batch command."""
-        if hasattr(self, "camera_sensor") and self.camera_sensor is not None:
+        for sensor in [self.camera_sensor, self.collision_sensor]:
+            if sensor is not None:
+                try:
+                    if sensor.is_listening:
+                        sensor.stop()
+                except Exception:
+                    pass
+                try:
+                    sensor.destroy()
+                except Exception:
+                    pass
+
+        if self.vehicle is not None:
             try:
-                self.camera_sensor.stop()
+                self.vehicle.destroy()
             except Exception:
                 pass
-                
+
         if self.client and self.actor_list:
-            destroy_cmds = [carla.command.DestroyActor(a.id) for a in self.actor_list if a is not None]
+            destroy_cmds = [carla.command.DestroyActor(a.id) for a in self.actor_list if a is not None and a.is_alive]
             try:
-                self.client.apply_batch(destroy_cmds)
+                self.client.apply_batch_sync(destroy_cmds)
             except Exception:
                 pass
         self.actor_list.clear()
+        self.camera_sensor = None
+        self.collision_sensor = None
+        self.vehicle = None
 
     def close(self):
         """Close environment and clean up CARLA settings."""

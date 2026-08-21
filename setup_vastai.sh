@@ -143,9 +143,12 @@ conda install -y ipykernel
 python -m ipykernel install --user --name=carla_py38 --display-name "Python 3.8 (CARLA RL)"
 
 pip install --upgrade pip
-pip install "setuptools<80" gymnasium numpy pillow opencv-python tensorboard torch torchvision jupyterlab ipywidgets nvitop
+pip install "setuptools<80" gymnasium gym numpy pillow opencv-python tensorboard torch torchvision jupyterlab ipywidgets nvitop scipy matplotlib
 
-echo -e "${GREEN}✓ Python environment and Jupyter kernel configured.${NC}"
+echo -e "${YELLOW}--> Installing EasyCarla-RL directly into Python environment...${NC}"
+pip install git+https://github.com/silverwingsbot/EasyCarla-RL.git
+
+echo -e "${GREEN}✓ Python environment, EasyCarla-RL package, and Jupyter kernel configured.${NC}"
 
 # --- 5. Configure Environment Variables ---
 echo -e "\n${CYAN}[5/7] Configuring environment variables (~/.bashrc)...${NC}"

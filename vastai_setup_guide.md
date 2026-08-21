@@ -98,10 +98,11 @@ conda install -y ipykernel
 python -m ipykernel install --user --name=carla_py38 --display-name "Python 3.8 (CARLA RL)"
 
 # 4. Install PyTorch & RL packages (pin setuptools<80 for CARLA compatibility)
-pip install "setuptools<80" gymnasium numpy pillow opencv-python tensorboard torch torchvision jupyterlab ipywidgets
+pip install "setuptools<80" gymnasium gym numpy pillow opencv-python tensorboard torch torchvision jupyterlab ipywidgets scipy matplotlib
 
-# 5. Install nvitop (PyTorch process-aware GPU monitoring tool)
+# 5. Install nvitop & EasyCarla-RL package directly from GitHub
 pip install nvitop
+pip install git+https://github.com/silverwingsbot/EasyCarla-RL.git
 ```
 
 #### Step 3.4: Configure Environment Variables
