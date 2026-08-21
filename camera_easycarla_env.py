@@ -71,10 +71,10 @@ class CameraEasyCarlaEnv(gym.Env):
         
         # Pre-connect to CARLA to unstick server if left in synchronous mode by a previous process
         port = params.get('port', 2000)
+        self.carla_client = carla.Client('127.0.0.1', port)
+        self.carla_client.set_timeout(60.0)
         try:
-            temp_client = carla.Client('127.0.0.1', port)
-            temp_client.set_timeout(5.0)
-            temp_world = temp_client.get_world()
+            temp_world = self.carla_client.get_world()
             try:
                 temp_world.tick()
             except Exception:
@@ -151,6 +151,10 @@ class CameraEasyCarlaEnv(gym.Env):
                 pass
             self.camera_sensor = None
 
+        if not hasattr(self.easy_env, 'ego') or self.easy_env.ego is None:
+            print("Warning: Ego vehicle is None, skipping camera attachment.")
+            return
+
         world = self.easy_env.world
         bp_library = world.get_blueprint_library()
         cam_bp = bp_library.find("sensor.camera.rgb")
@@ -172,7 +176,7 @@ class CameraEasyCarlaEnv(gym.Env):
 
     def _get_speed_kmh(self):
         """Calculate ego vehicle speed in km/h."""
-        if self.easy_env.ego is None:
+        if not hasattr(self.easy_env, 'ego') or self.easy_env.ego is None:
             return 0.0
         vel = self.easy_env.ego.get_velocity()
         return 3.6 * math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)
@@ -211,8 +215,8 @@ class CameraEasyCarlaEnv(gym.Env):
         # Call underlying EasyCarla reset with 60s timeout & automatic retry logic
         for attempt in range(3):
             try:
-                if hasattr(self.easy_env, 'world') and self.easy_env.world is not None:
-                    self.easy_env.world.get_client().set_timeout(60.0)
+                if hasattr(self, 'carla_client') and self.carla_client is not None:
+                    self.carla_client.set_timeout(60.0)
                 self.easy_env.reset()
                 break
             except Exception as e:
