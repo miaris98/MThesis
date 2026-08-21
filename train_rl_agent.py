@@ -6,12 +6,71 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torchvision.models as models
 from torch.distributions import Normal
 from torch.utils.tensorboard import SummaryWriter
 
 from carla_gym_env import CarlaGymEnv
+from camera_easycarla_env import CameraEasyCarlaEnv
 
-# --- PyTorch Neural Network Architecture ---
+# --- PyTorch Neural Network Architectures ---
+
+class PretrainedVisionFeatureExtractor(nn.Module):
+    """
+    ImageNet Pretrained ResNet Feature Extractor for 256x256 RGB Images + Speed State.
+    Supports backbone freezing for fast, sample-efficient RL training.
+    """
+    def __init__(self, backbone_name="resnet18", features_dim=512, freeze_backbone=True):
+        super(PretrainedVisionFeatureExtractor, self).__init__()
+        self.freeze_backbone = freeze_backbone
+
+        if backbone_name == "resnet34":
+            weights = models.ResNet34_Weights.DEFAULT
+            resnet = models.resnet34(weights=weights)
+            backbone_out_dim = 512
+        else:
+            # Default: ResNet18
+            weights = models.ResNet18_Weights.DEFAULT
+            resnet = models.resnet18(weights=weights)
+            backbone_out_dim = 512
+
+        # Remove the final 1000-class FC classification layer
+        self.backbone = nn.Sequential(*list(resnet.children())[:-1]) # -> Outputs (N, 512, 1, 1)
+
+        # Freeze backbone parameters if requested
+        if self.freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+
+        # ImageNet normalization statistics
+        self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+
+        # Linear projector for visual vector + speed scalar
+        self.fc = nn.Sequential(
+            nn.Linear(backbone_out_dim + 1, features_dim),
+            nn.ReLU()
+        )
+
+    def forward(self, image, speed):
+        # Normalize image pixel values [0, 255] -> [0, 1]
+        img_x = image.float() / 255.0
+        # Permute (N, H, W, C) -> (N, C, H, W)
+        if img_x.ndim == 4 and img_x.shape[-1] == 3:
+            img_x = img_x.permute(0, 3, 1, 2)
+
+        # Standard ImageNet normalization
+        img_normalized = (img_x - self.mean) / self.std
+
+        if self.freeze_backbone:
+            with torch.no_grad():
+                conv_out = self.backbone(img_normalized).flatten(start_dim=1)
+        else:
+            conv_out = self.backbone(img_normalized).flatten(start_dim=1)
+
+        speed_x = speed.float().view(-1, 1) / 50.0 # Normalize speed by 50 km/h scale
+        combined = torch.cat([conv_out, speed_x], dim=1)
+        return self.fc(combined)
 
 class CNNFeatureExtractor(nn.Module):
     """NatureCNN-style architecture for extracting features from 256x256 RGB images + speed state."""
@@ -47,11 +106,19 @@ class CNNFeatureExtractor(nn.Module):
 
 class ActorCriticPPO(nn.Module):
     """PPO Actor-Critic Policy Network for Continuous Driving Control."""
-    def __init__(self, action_dim=3, features_dim=512):
+    def __init__(self, action_dim=3, features_dim=512, backbone_name="resnet18", freeze_backbone=True, use_pretrained=True):
         super(ActorCriticPPO, self).__init__()
-        self.encoder = CNNFeatureExtractor(in_channels=3, features_dim=features_dim)
         
-        # Actor Head: Outputs mean action [steering, throttle, brake]
+        if use_pretrained:
+            self.encoder = PretrainedVisionFeatureExtractor(
+                backbone_name=backbone_name,
+                features_dim=features_dim,
+                freeze_backbone=freeze_backbone
+            )
+        else:
+            self.encoder = CNNFeatureExtractor(in_channels=3, features_dim=features_dim)
+
+        # Actor Head: Outputs mean action [throttle/brake or steer]
         self.actor_mean = nn.Sequential(
             nn.Linear(features_dim, 128),
             nn.ReLU(),
@@ -92,6 +159,13 @@ def train():
     parser = argparse.ArgumentParser(description="Train PPO Deep RL Agent in CARLA Simulator.")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="CARLA host IP")
     parser.add_argument("--port", type=int, default=2000, help="CARLA port")
+    parser.add_argument("--env-type", type=str, default="camera_easycarla", choices=["camera_easycarla", "carla_gym"], help="Environment type")
+    parser.add_argument("--backbone", type=str, default="resnet18", choices=["resnet18", "resnet34"], help="Pretrained vision backbone")
+    parser.add_argument("--freeze-backbone", action="store_true", default=True, help="Freeze vision backbone parameters")
+    parser.add_argument("--no-freeze-backbone", action="store_false", dest="freeze_backbone", help="Fine-tune vision backbone parameters")
+    parser.add_argument("--use-pretrained", action="store_true", default=True, help="Use pretrained vision backbone")
+    parser.add_argument("--no-pretrained", action="store_false", dest="use_pretrained", help="Train CNN from scratch")
+    
     parser.add_argument("--total-steps", type=int, default=2000, help="Total training steps")
     parser.add_argument("--rollout-steps", type=int, default=250, help="Steps per PPO rollout buffer")
     parser.add_argument("--ppo-epochs", type=int, default=4, help="PPO optimization epochs per rollout")
@@ -108,17 +182,51 @@ def train():
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"--- Starting PPO Deep RL Training ---")
-    print(f"Device: {device} | Total Steps: {args.total_steps} | Rollout Steps: {args.rollout_steps}")
+    print(f"==============================================================")
+    print(f"   🚀 Starting Camera-Only PPO Deep RL Training               ")
+    print(f"==============================================================")
+    print(f"Device: {device} | Environment: {args.env_type}")
+    print(f"Vision Backbone: {args.backbone.upper()} (Pretrained: {args.use_pretrained}, Frozen: {args.freeze_backbone})")
+    print(f"Total Steps: {args.total_steps} | Rollout Buffer: {args.rollout_steps}")
     print(f"TensorBoard Logs: {os.path.abspath(args.log_dir)}")
 
     writer = SummaryWriter(args.log_dir)
     
-    # Initialize Gymnasium Environment
-    env = CarlaGymEnv(host=args.host, port=args.port, img_width=256, img_height=256, max_steps=250)
+    # Initialize Selected Environment
+    if args.env_type == "camera_easycarla":
+        easy_params = {
+            'number_of_vehicles': 10,
+            'number_of_walkers': 0,
+            'dt': 0.05,
+            'ego_vehicle_filter': 'vehicle.tesla.model3',
+            'surrounding_vehicle_spawned_randomly': True,
+            'port': args.port,
+            'town': 'Town10HD_Opt',
+            'max_time_episode': args.rollout_steps,
+            'max_waypoints': 12,
+            'visualize_waypoints': False,
+            'desired_speed': 8,
+            'max_ego_spawn_times': 200,
+            'view_mode': 'top',
+            'traffic': 'off',
+            'lidar_max_range': 50.0,
+            'max_nearby_vehicles': 5,
+            'img_width': 256,
+            'img_height': 256,
+        }
+        env = CameraEasyCarlaEnv(params=easy_params)
+    else:
+        env = CarlaGymEnv(host=args.host, port=args.port, img_width=256, img_height=256, max_steps=args.rollout_steps)
     
     # Initialize PPO Policy & Optimizer
-    agent = ActorCriticPPO(action_dim=3).to(device)
+    agent = ActorCriticPPO(
+        action_dim=3,
+        features_dim=512,
+        backbone_name=args.backbone,
+        freeze_backbone=args.freeze_backbone,
+        use_pretrained=args.use_pretrained
+    ).to(device)
+
     optimizer = optim.Adam(agent.parameters(), lr=args.lr)
 
     obs, _ = env.reset()
@@ -164,14 +272,16 @@ def train():
 
             obs = next_obs
             current_ep_reward += reward
-            current_ep_speeds.append(info["speed_kmh"])
+            speed_val = info.get("speed_kmh", obs["speed"][0])
+            current_ep_speeds.append(speed_val)
 
             if done:
                 episode_rewards.append(current_ep_reward)
                 avg_speed = np.mean(current_ep_speeds)
                 episode_speeds.append(avg_speed)
 
-                print(f"[Step {global_step:04d}/{args.total_steps}] Episode Finished | Reward: {current_ep_reward:+.2f} | Avg Speed: {avg_speed:.1f} km/h | Collided: {info['has_collided']}")
+                collided_status = info.get("is_collision", info.get("has_collided", False))
+                print(f"[Step {global_step:04d}/{args.total_steps}] Episode Finished | Reward: {current_ep_reward:+.2f} | Avg Speed: {avg_speed:.1f} km/h | Collided: {collided_status}")
                 writer.add_scalar("Reward/Episode", current_ep_reward, global_step)
                 writer.add_scalar("Speed/Avg_kmh", avg_speed, global_step)
 

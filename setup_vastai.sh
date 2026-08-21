@@ -202,7 +202,7 @@ echo -e "${GREEN}   🎉 SETUP COMPLETE! You are ready to train RL agents!      
 echo -e "${GREEN}==============================================================${NC}"
 echo -e "Quick Commands:"
 echo -e "  1. Launch 3-Pane Dashboard:  ${CYAN}bash $SCRIPT_DIR/start_dashboard.sh${NC}"
-echo -e "  2. Train PPO Agent:          ${CYAN}python $SCRIPT_DIR/train_rl_agent.py --total-steps 2000${NC}"
+echo -e "  2. Train Camera PPO Agent:   ${CYAN}python $SCRIPT_DIR/train_rl_agent.py --env-type camera_easycarla --backbone resnet18 --total-steps 2000${NC}"
 echo -e "  3. Start TensorBoard:        ${CYAN}tensorboard --logdir=/workspace/runs --port=6006 --host=0.0.0.0 &${NC}"
 echo -e "  4. View CARLA Server Logs:   ${CYAN}tail -f /workspace/carla_server.log${NC}"
 echo -e "==============================================================\n"

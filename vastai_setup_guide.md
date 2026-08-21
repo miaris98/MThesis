@@ -208,16 +208,23 @@ tmux attach -t dashboard
 
 ---
 
-## 7. Train PPO Deep RL Agent
+## 7. Train Camera-Only PPO Deep RL Agent (Pretrained ResNet)
 
-Run the PPO continuous control policy training loop in CARLA (inside Pane 0 or a standard terminal):
+Run the camera-only PPO continuous control policy training loop in CARLA (inside Pane 0 or a standard terminal):
 
 ```bash
 source /opt/conda/bin/activate carla_py38
 cd /workspace/MThesis
 
-# Run PPO RL Training (2,000 total steps)
-python train_rl_agent.py --host 127.0.0.1 --port 2000 --total-steps 2000 --rollout-steps 250 --log-dir /workspace/runs --checkpoint-dir /workspace/checkpoints
+# Run Camera-Only PPO RL Training with Pretrained ResNet-18 Vision Backbone (2,000 total steps)
+python train_rl_agent.py \
+    --env-type camera_easycarla \
+    --backbone resnet18 \
+    --freeze-backbone \
+    --total-steps 2000 \
+    --rollout-steps 250 \
+    --log-dir /workspace/runs \
+    --checkpoint-dir /workspace/checkpoints
 ```
 
 ---
