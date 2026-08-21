@@ -89,9 +89,15 @@ class PretrainedVisionFeatureExtractor(nn.Module):
                 cams_normalized = (cams - self.mean) / self.std
                 if self.freeze_backbone:
                     with torch.no_grad():
-                        conv_out = self.backbone(cams_normalized).flatten(start_dim=1)
+                        conv_chunks = []
+                        for chunk in torch.split(cams_normalized, 32, dim=0):
+                            conv_chunks.append(self.backbone(chunk).flatten(start_dim=1))
+                        conv_out = torch.cat(conv_chunks, dim=0)
                 else:
-                    conv_out = self.backbone(cams_normalized).flatten(start_dim=1)
+                    conv_chunks = []
+                    for chunk in torch.split(cams_normalized, 32, dim=0):
+                        conv_chunks.append(self.backbone(chunk).flatten(start_dim=1))
+                    conv_out = torch.cat(conv_chunks, dim=0)
                 # Reshape from (3*N, D) -> 3 chunks of (N, D) -> concat to (N, 3*D)
                 left_out, center_out, right_out = torch.chunk(conv_out, 3, dim=0)
                 visual_features = torch.cat([left_out, center_out, right_out], dim=1)
@@ -101,17 +107,30 @@ class PretrainedVisionFeatureExtractor(nn.Module):
                 img_normalized = (img_perm - self.mean) / self.std
                 if self.freeze_backbone:
                     with torch.no_grad():
-                        single_out = self.backbone(img_normalized).flatten(start_dim=1)
+                        conv_chunks = []
+                        for chunk in torch.split(img_normalized, 32, dim=0):
+                            conv_chunks.append(self.backbone(chunk).flatten(start_dim=1))
+                        single_out = torch.cat(conv_chunks, dim=0)
                 else:
-                    single_out = self.backbone(img_normalized).flatten(start_dim=1)
+                    conv_chunks = []
+                    for chunk in torch.split(img_normalized, 32, dim=0):
+                        conv_chunks.append(self.backbone(chunk).flatten(start_dim=1))
+                    single_out = torch.cat(conv_chunks, dim=0)
                 visual_features = single_out.repeat(1, self.num_cameras)
         else:
             img_normalized = (img_x - self.mean) / self.std
             if self.freeze_backbone:
                 with torch.no_grad():
-                    visual_features = self.backbone(img_normalized).flatten(start_dim=1).repeat(1, self.num_cameras)
+                    conv_chunks = []
+                    for chunk in torch.split(img_normalized, 32, dim=0):
+                        conv_chunks.append(self.backbone(chunk).flatten(start_dim=1))
+                    single_out = torch.cat(conv_chunks, dim=0)
             else:
-                visual_features = self.backbone(img_normalized).flatten(start_dim=1).repeat(1, self.num_cameras)
+                conv_chunks = []
+                for chunk in torch.split(img_normalized, 32, dim=0):
+                    conv_chunks.append(self.backbone(chunk).flatten(start_dim=1))
+                single_out = torch.cat(conv_chunks, dim=0)
+            visual_features = single_out.repeat(1, self.num_cameras)
 
         speed_x = speed.float().view(-1, 1) / 50.0  # Normalize speed by 50 km/h scale
         combined = torch.cat([visual_features, speed_x], dim=1)
@@ -146,14 +165,25 @@ class CNNFeatureExtractor(nn.Module):
                 img_center = img_x[:, :, H:2*H, :]
                 img_right = img_x[:, :, 2*H:, :]
                 cams = torch.cat([img_left, img_center, img_right], dim=0).permute(0, 3, 1, 2)
-                conv_out = self.conv(cams)
+                conv_chunks = []
+                for chunk in torch.split(cams, 32, dim=0):
+                    conv_chunks.append(self.conv(chunk))
+                conv_out = torch.cat(conv_chunks, dim=0)
                 left_out, center_out, right_out = torch.chunk(conv_out, 3, dim=0)
                 visual_features = torch.cat([left_out, center_out, right_out], dim=1)
             else:
                 img_perm = img_x.permute(0, 3, 1, 2)
-                visual_features = self.conv(img_perm).repeat(1, self.num_cameras)
+                conv_chunks = []
+                for chunk in torch.split(img_perm, 32, dim=0):
+                    conv_chunks.append(self.conv(chunk))
+                single_out = torch.cat(conv_chunks, dim=0)
+                visual_features = single_out.repeat(1, self.num_cameras)
         else:
-            visual_features = self.conv(img_x).repeat(1, self.num_cameras)
+            conv_chunks = []
+            for chunk in torch.split(img_x, 32, dim=0):
+                conv_chunks.append(self.conv(chunk))
+            single_out = torch.cat(conv_chunks, dim=0)
+            visual_features = single_out.repeat(1, self.num_cameras)
 
         speed_x = speed.float().view(-1, 1) / 50.0
         combined = torch.cat([visual_features, speed_x], dim=1)
@@ -237,45 +267,54 @@ class ERFNetFeatureExtractor(nn.Module):
                 img_center = img_x[:, :, H:2*H, :]
                 img_right = img_x[:, :, 2*H:, :]
                 cams = torch.cat([img_left, img_center, img_right], dim=0).permute(0, 3, 1, 2)
-                if self.freeze_backbone:
-                    with torch.no_grad():
-                        x = self.initial_block(cams)
+                def _forward_erfnet(tensor_input):
+                    chunks = []
+                    for chunk in torch.split(tensor_input, 32, dim=0):
+                        x = self.initial_block(chunk)
                         for layer in self.layers:
                             x = layer(x)
-                        conv_out = self.pool(x).flatten(start_dim=1)
+                        chunks.append(self.pool(x).flatten(start_dim=1))
+                    return torch.cat(chunks, dim=0)
+
+                if self.freeze_backbone:
+                    with torch.no_grad():
+                        conv_out = _forward_erfnet(cams)
                 else:
-                    x = self.initial_block(cams)
-                    for layer in self.layers:
-                        x = layer(x)
-                    conv_out = self.pool(x).flatten(start_dim=1)
+                    conv_out = _forward_erfnet(cams)
                 left_out, center_out, right_out = torch.chunk(conv_out, 3, dim=0)
                 visual_features = torch.cat([left_out, center_out, right_out], dim=1)
             else:
                 img_perm = img_x.permute(0, 3, 1, 2)
-                if self.freeze_backbone:
-                    with torch.no_grad():
-                        x = self.initial_block(img_perm)
+                def _forward_erfnet(tensor_input):
+                    chunks = []
+                    for chunk in torch.split(tensor_input, 32, dim=0):
+                        x = self.initial_block(chunk)
                         for layer in self.layers:
                             x = layer(x)
-                        single_out = self.pool(x).flatten(start_dim=1)
+                        chunks.append(self.pool(x).flatten(start_dim=1))
+                    return torch.cat(chunks, dim=0)
+
+                if self.freeze_backbone:
+                    with torch.no_grad():
+                        single_out = _forward_erfnet(img_perm)
                 else:
-                    x = self.initial_block(img_perm)
-                    for layer in self.layers:
-                        x = layer(x)
-                    single_out = self.pool(x).flatten(start_dim=1)
+                    single_out = _forward_erfnet(img_perm)
                 visual_features = single_out.repeat(1, self.num_cameras)
         else:
-            if self.freeze_backbone:
-                with torch.no_grad():
-                    x = self.initial_block(img_x)
+            def _forward_erfnet(tensor_input):
+                chunks = []
+                for chunk in torch.split(tensor_input, 32, dim=0):
+                    x = self.initial_block(chunk)
                     for layer in self.layers:
                         x = layer(x)
-                    single_out = self.pool(x).flatten(start_dim=1)
+                    chunks.append(self.pool(x).flatten(start_dim=1))
+                return torch.cat(chunks, dim=0)
+
+            if self.freeze_backbone:
+                with torch.no_grad():
+                    single_out = _forward_erfnet(img_x)
             else:
-                x = self.initial_block(img_x)
-                for layer in self.layers:
-                    x = layer(x)
-                single_out = self.pool(x).flatten(start_dim=1)
+                single_out = _forward_erfnet(img_x)
             visual_features = single_out.repeat(1, self.num_cameras)
 
         speed_x = speed.float().view(-1, 1) / 50.0
@@ -593,37 +632,47 @@ def train():
         # Normalize Advantages
         b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-        # 3. Optimize PPO Policy & Value Networks with AMP Mixed Precision
+        # 3. Optimize PPO Policy & Value Networks with Minibatch Updates & AMP Mixed Precision
         policy_losses = []
         value_losses = []
+        minibatch_size = 64
+        b_inds = np.arange(args.rollout_steps)
 
         for epoch in range(args.ppo_epochs):
-            autocast_ctx = torch.amp.autocast('cuda', enabled=torch.cuda.is_available()) if hasattr(torch, 'amp') and hasattr(torch.amp, 'autocast') else torch.cuda.amp.autocast(enabled=torch.cuda.is_available())
-            with autocast_ctx:
-                _, new_log_prob, entropy, new_value = agent.get_action_and_value(b_images, b_speeds, b_actions)
-                logratio = new_log_prob - b_log_probs
-                ratio = logratio.exp()
+            np.random.shuffle(b_inds)
+            for start in range(0, args.rollout_steps, minibatch_size):
+                end = start + minibatch_size
+                mb_inds = b_inds[start:end]
 
-                # PPO Clipped Surrogate Loss
-                pg_loss1 = -b_advantages * ratio
-                pg_loss2 = -b_advantages * torch.clamp(ratio, 1.0 - args.clip_coef, 1.0 + args.clip_coef)
-                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+                autocast_ctx = torch.amp.autocast('cuda', enabled=torch.cuda.is_available()) if hasattr(torch, 'amp') and hasattr(torch.amp, 'autocast') else torch.cuda.amp.autocast(enabled=torch.cuda.is_available())
+                with autocast_ctx:
+                    _, new_log_prob, entropy, new_value = agent.get_action_and_value(b_images[mb_inds], b_speeds[mb_inds], b_actions[mb_inds])
+                    logratio = new_log_prob - b_log_probs[mb_inds]
+                    ratio = logratio.exp()
 
-                # Value Loss
-                v_loss = 0.5 * ((new_value - b_returns) ** 2).mean()
+                    # PPO Clipped Surrogate Loss
+                    pg_loss1 = -b_advantages[mb_inds] * ratio
+                    pg_loss2 = -b_advantages[mb_inds] * torch.clamp(ratio, 1.0 - args.clip_coef, 1.0 + args.clip_coef)
+                    pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-                # Combined Total Loss with exploration entropy bonus
-                total_loss = pg_loss + 0.5 * v_loss - args.ent_coef * entropy.mean()
+                    # Value Loss
+                    v_loss = 0.5 * ((new_value - b_returns[mb_inds]) ** 2).mean()
 
-            optimizer.zero_grad()
-            scaler.scale(total_loss).backward()
-            scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(agent.parameters(), max_norm=0.5)
-            scaler.step(optimizer)
-            scaler.update()
+                    # Combined Total Loss with exploration entropy bonus
+                    total_loss = pg_loss + 0.5 * v_loss - args.ent_coef * entropy.mean()
 
-            policy_losses.append(pg_loss.item())
-            value_losses.append(v_loss.item())
+                optimizer.zero_grad()
+                scaler.scale(total_loss).backward()
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(agent.parameters(), max_norm=0.5)
+                scaler.step(optimizer)
+                scaler.update()
+
+                policy_losses.append(pg_loss.item())
+                value_losses.append(v_loss.item())
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         writer.add_scalar("Loss/Policy", np.mean(policy_losses), global_step)
         writer.add_scalar("Loss/Value", np.mean(value_losses), global_step)
