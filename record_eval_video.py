@@ -6,6 +6,7 @@ import glob
 import random
 import numpy as np
 import cv2
+import torch
 
 # Auto-add local CARLA 0.9.15 client package if present
 carla_root = os.environ.get("CARLA_ROOT", "/workspace/carla")
@@ -19,45 +20,47 @@ if os.path.exists(carla_dist_path):
         sys.path.insert(0, os.path.join(carla_root, "PythonAPI", "carla"))
 
 import carla
+from camera_easycarla_env import CameraEasyCarlaEnv
+from train_rl_agent import ActorCriticPPO
 
 
-def draw_hud(canvas, x_offset, y_offset, panel_w, panel_h, model_rgb, speed_kmh, throttle, steer, brake, step, total_steps, backbone_name):
-    """Draw a rich telemetry and model-input dashboard panel."""
-    # Dark panel background
-    cv2.rectangle(canvas, (x_offset, y_offset), (x_offset + panel_w, y_offset + panel_h), (25, 28, 36), -1)
-    cv2.rectangle(canvas, (x_offset, y_offset), (x_offset + panel_w, y_offset + panel_h), (55, 65, 81), 2)
+def draw_hud(canvas, x_offset, y_offset, panel_w, panel_h, model_rgb_256, speed_kmh, throttle, steer, brake, step, total_steps, episode_count, ep_reward, ep_avg_speed, backbone_name, status_str="Active"):
+    """Draw clean telemetry panel showing exact model inputs and policy outputs."""
+    # Dark card background
+    cv2.rectangle(canvas, (x_offset, y_offset), (x_offset + panel_w, y_offset + panel_h), (22, 27, 34), -1)
+    cv2.rectangle(canvas, (x_offset, y_offset), (x_offset + panel_w, y_offset + panel_h), (48, 54, 61), 2)
 
-    # Panel Header
-    cv2.putText(canvas, "MODEL INPUT & TELEMETRY", (x_offset + 20, y_offset + 30),
-                cv2.FONT_HERSHEY_DUPLEX, 0.65, (255, 255, 255), 1, cv2.LINE_AA)
-    cv2.line(canvas, (x_offset + 20, y_offset + 40), (x_offset + panel_w - 20, y_offset + 40), (75, 85, 99), 1)
+    # 1. Section Header: Model Inputs
+    cv2.putText(canvas, "MODEL SENSOR INPUTS", (x_offset + 20, y_offset + 28),
+                cv2.FONT_HERSHEY_DUPLEX, 0.60, (255, 255, 255), 1, cv2.LINE_AA)
+    cv2.line(canvas, (x_offset + 20, y_offset + 38), (x_offset + panel_w - 20, y_offset + 38), (65, 75, 90), 1)
 
-    # 1. Model Input: 256x256 Front RGB Camera Feed
-    cv2.putText(canvas, "Input 1: Front Camera (256x256 RGB)", (x_offset + 20, y_offset + 65),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.48, (209, 213, 219), 1, cv2.LINE_AA)
+    # Input 1: Front RGB Camera Feed (256x256)
+    cv2.putText(canvas, "Input 1: Front Camera (256x256 RGB)", (x_offset + 20, y_offset + 60),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.46, (209, 213, 219), 1, cv2.LINE_AA)
     
-    cam_box_x = x_offset + (panel_w - 256) // 2
-    cam_box_y = y_offset + 80
-    if model_rgb is not None:
-        canvas[cam_box_y:cam_box_y + 256, cam_box_x:cam_box_x + 256] = model_rgb
-    cv2.rectangle(canvas, (cam_box_x - 2, cam_box_y - 2), (cam_box_x + 258, cam_box_y + 258), (59, 130, 246), 2)
+    cam_x = x_offset + (panel_w - 256) // 2
+    cam_y = y_offset + 72
+    if model_rgb_256 is not None:
+        canvas[cam_y:cam_y + 256, cam_x:cam_x + 256] = model_rgb_256
+    cv2.rectangle(canvas, (cam_x - 2, cam_y - 2), (cam_x + 258, cam_y + 258), (34, 197, 94), 2)
 
-    # 2. Model Input: Speed State
-    info_y = cam_box_y + 280
-    cv2.putText(canvas, "Input 2: Speed Kinematics", (x_offset + 20, info_y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.48, (209, 213, 219), 1, cv2.LINE_AA)
+    # Input 2: Speed Kinematics
+    spd_y = cam_y + 278
+    cv2.putText(canvas, "Input 2: Speed Kinematics", (x_offset + 20, spd_y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.46, (209, 213, 219), 1, cv2.LINE_AA)
     
-    speed_text = f"{speed_kmh:.1f} km/h"
-    norm_speed_text = f"(Normalized: {speed_kmh/50.0:.2f})"
-    cv2.putText(canvas, speed_text, (x_offset + 30, info_y + 32),
-                cv2.FONT_HERSHEY_DUPLEX, 0.9, (16, 185, 129), 2, cv2.LINE_AA)
-    cv2.putText(canvas, norm_speed_text, (x_offset + 190, info_y + 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (156, 163, 175), 1, cv2.LINE_AA)
+    speed_text = f"{speed_kmh:4.1f} km/h"
+    norm_text = f"Normalized: {speed_kmh/50.0:.2f}"
+    cv2.putText(canvas, speed_text, (x_offset + 25, spd_y + 35),
+                cv2.FONT_HERSHEY_DUPLEX, 1.1, (16, 185, 129), 2, cv2.LINE_AA)
+    cv2.putText(canvas, norm_text, (x_offset + 230, spd_y + 32),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.50, (156, 163, 175), 1, cv2.LINE_AA)
 
-    # 3. Model Output: Policy Action Controls
-    action_y = info_y + 70
-    cv2.line(canvas, (x_offset + 20, action_y - 15), (x_offset + panel_w - 20, action_y - 15), (75, 85, 99), 1)
-    cv2.putText(canvas, f"Policy Actions ({backbone_name.upper()} Backbone)", (x_offset + 20, action_y + 5),
+    # 2. Section Header: Policy Actions
+    act_y = spd_y + 65
+    cv2.line(canvas, (x_offset + 20, act_y - 12), (x_offset + panel_w - 20, act_y - 12), (65, 75, 90), 1)
+    cv2.putText(canvas, f"MODEL POLICY ACTIONS ({backbone_name.upper()})", (x_offset + 20, act_y + 8),
                 cv2.FONT_HERSHEY_DUPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
 
     bar_w = 200
@@ -65,15 +68,15 @@ def draw_hud(canvas, x_offset, y_offset, panel_w, panel_h, model_rgb, speed_kmh,
     bar_x = x_offset + 110
 
     # Throttle Bar
-    t_y = action_y + 35
+    t_y = act_y + 32
     cv2.putText(canvas, "Throttle:", (x_offset + 20, t_y + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (209, 213, 219), 1, cv2.LINE_AA)
     cv2.rectangle(canvas, (bar_x, t_y), (bar_x + bar_w, t_y + bar_h), (55, 65, 81), -1)
     fill_t = int(bar_w * np.clip(throttle, 0.0, 1.0))
     cv2.rectangle(canvas, (bar_x, t_y), (bar_x + fill_t, t_y + bar_h), (34, 197, 94), -1)
-    cv2.putText(canvas, f"{throttle*100:.0f}%", (bar_x + bar_w + 10, t_y + 13), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (34, 197, 94), 1, cv2.LINE_AA)
+    cv2.putText(canvas, f"{throttle*100:3.0f}%", (bar_x + bar_w + 10, t_y + 13), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (34, 197, 94), 1, cv2.LINE_AA)
 
-    # Steer Bar (Center-indexed)
-    s_y = t_y + 30
+    # Steer Bar (Centered)
+    s_y = t_y + 28
     cv2.putText(canvas, "Steer:", (x_offset + 20, s_y + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (209, 213, 219), 1, cv2.LINE_AA)
     cv2.rectangle(canvas, (bar_x, s_y), (bar_x + bar_w, s_y + bar_h), (55, 65, 81), -1)
     center_x = bar_x + bar_w // 2
@@ -83,28 +86,29 @@ def draw_hud(canvas, x_offset, y_offset, panel_w, panel_h, model_rgb, speed_kmh,
         cv2.rectangle(canvas, (center_x, s_y), (center_x + steer_px, s_y + bar_h), (59, 130, 246), -1)
     else:
         cv2.rectangle(canvas, (center_x + steer_px, s_y), (center_x, s_y + bar_h), (249, 115, 22), -1)
-    cv2.line(canvas, (center_x, s_y - 2), (center_x, s_y + bar_h + 2), (255, 255, 255), 1)
+    cv2.line(canvas, (center_x, s_y - 2), (center_x, s_y + bar_h + 2), (255, 255, 255), 2)
     cv2.putText(canvas, f"{steer:+.2f}", (bar_x + bar_w + 10, s_y + 13), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (59, 130, 246), 1, cv2.LINE_AA)
 
     # Brake Bar
-    b_y = s_y + 30
+    b_y = s_y + 28
     cv2.putText(canvas, "Brake:", (x_offset + 20, b_y + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (209, 213, 219), 1, cv2.LINE_AA)
     cv2.rectangle(canvas, (bar_x, b_y), (bar_x + bar_w, b_y + bar_h), (55, 65, 81), -1)
     fill_b = int(bar_w * np.clip(brake, 0.0, 1.0))
     cv2.rectangle(canvas, (bar_x, b_y), (bar_x + fill_b, b_y + bar_h), (239, 68, 68), -1)
-    cv2.putText(canvas, f"{brake*100:.0f}%", (bar_x + bar_w + 10, b_y + 13), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (239, 68, 68), 1, cv2.LINE_AA)
+    cv2.putText(canvas, f"{brake*100:3.0f}%", (bar_x + bar_w + 10, b_y + 13), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (239, 68, 68), 1, cv2.LINE_AA)
 
-    # Step & Evaluation Progress Footer
-    foot_y = panel_h - 25
-    cv2.line(canvas, (x_offset + 20, foot_y - 15), (x_offset + panel_w - 20, foot_y - 15), (75, 85, 99), 1)
-    cv2.putText(canvas, f"Evaluation Step: {step:03d}/{total_steps}  |  20 FPS Fixed Delta",
-                (x_offset + 20, foot_y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (156, 163, 175), 1, cv2.LINE_AA)
+    # 3. Episode & Status Footer
+    foot_y = panel_h - 40
+    cv2.line(canvas, (x_offset + 20, foot_y - 10), (x_offset + panel_w - 20, foot_y - 10), (65, 75, 90), 1)
+    cv2.putText(canvas, f"Episode: #{episode_count}  |  Reward: {ep_reward:+.1f}  |  Avg Speed: {ep_avg_speed:.1f} km/h",
+                (x_offset + 20, foot_y + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (245, 158, 11) if ep_reward >= 0 else (239, 68, 68), 1, cv2.LINE_AA)
+    cv2.putText(canvas, f"Step: {step:04d}/{total_steps}  |  Status: {status_str}",
+                (x_offset + 20, foot_y + 32), cv2.FONT_HERSHEY_SIMPLEX, 0.43, (156, 163, 175), 1, cv2.LINE_AA)
 
 
 def record_eval_video(
-    host="127.0.0.1",
     port=2000,
-    steps=300,
+    steps=600,
     output_video="/workspace/output_screenshots/driving_eval_model_input.mp4",
     num_npc_vehicles=3,
     checkpoint="/workspace/checkpoints/ppo_carla_best.pth",
@@ -112,118 +116,92 @@ def record_eval_video(
     town="Town10HD_Opt"
 ):
     print(f"==============================================================")
-    print(f"   🎥 Starting CARLA PPO Model Evaluation & Video Recording   ")
+    print(f"   🎥 Starting CARLA PPO Driving Evaluation & Video Studio   ")
     print(f"==============================================================")
     print(f"Checkpoint: {checkpoint}")
-    print(f"Backbone: {backbone.upper()} | Map: {town} | Recording Steps: {steps}")
+    print(f"Vision Backbone: {backbone.upper()} | Map: {town} | Total Steps: {steps}")
     print(f"Output Video: {output_video}")
 
-    client = carla.Client(host, port)
-    client.set_timeout(60.0)
-    
-    # Verify current world
-    world = client.get_world()
-    cur_map = world.get_map().name
-    if town not in cur_map:
-        print(f"Switching map to {town}...")
-        world = client.load_world(town)
-    
-    # 1. Enable Synchronous Simulation Mode (20 FPS / 50ms)
-    settings = world.get_settings()
-    settings.synchronous_mode = True
-    settings.fixed_delta_seconds = 0.05
-    world.apply_settings(settings)
+    # 1. Instantiate the Exact Training Environment (CameraEasyCarlaEnv)
+    easy_params = {
+        'number_of_vehicles': num_npc_vehicles,
+        'number_of_walkers': 0,
+        'display_size': 256,
+        'max_past_step': 1,
+        'dt': 0.05,
+        'discrete': False,
+        'discrete_acc': [-3.0, 1.5, 3.0],
+        'discrete_steer': [-0.2, 0.0, 0.2],
+        'continuous_accel_range': [-3.0, 3.0],
+        'continuous_steer_range': [-0.3, 0.3],
+        'ego_vehicle_filter': 'vehicle.lincoln.mkz_2020',
+        'port': port,
+        'town': town,
+        'max_time_episode': 250,
+        'max_waypoints': 12,
+        'visualize_waypoints': False,
+        'desired_speed': 8,
+        'max_ego_spawn_times': 200,
+        'view_mode': 'follow',
+        'traffic': 'off',
+        'lidar_max_range': 50.0,
+        'max_nearby_vehicles': 5,
+        'surrounding_vehicle_spawned_randomly': True,
+        'img_width': 256,
+        'img_height': 256,
+    }
 
-    # 2. Setup TrafficManager for surrounding NPC vehicles
-    traffic_manager = client.get_trafficmanager(port + 6000)
-    traffic_manager.set_synchronous_mode(True)
-    traffic_manager.set_global_distance_to_leading_vehicle(3.0)
-
-    actor_list = []
-    blueprint_library = world.get_blueprint_library()
-    spawn_points = world.get_map().get_spawn_points()
-
-    # 3. Spawn Surrounding NPC Vehicles
-    print(f"Spawning {num_npc_vehicles} surrounding NPC traffic vehicles...")
-    for _ in range(num_npc_vehicles):
-        sp = random.choice(spawn_points)
-        npc_bp = random.choice(blueprint_library.filter("vehicle.*"))
-        npc = world.try_spawn_actor(npc_bp, sp)
-        if npc is not None:
-            npc.set_autopilot(True, traffic_manager.get_port())
-            actor_list.append(npc)
-
-    # 4. Spawn Ego Vehicle
-    ego_bp = blueprint_library.find("vehicle.lincoln.mkz_2020")
-    if ego_bp is None:
-        ego_bp = blueprint_library.find("vehicle.tesla.model3")
-    
-    ego_spawn = random.choice(spawn_points)
-    ego_vehicle = world.try_spawn_actor(ego_bp, ego_spawn)
-    while ego_vehicle is None:
-        ego_spawn = random.choice(spawn_points)
-        ego_vehicle = world.try_spawn_actor(ego_bp, ego_spawn)
-
-    actor_list.append(ego_vehicle)
-    ego_vehicle.set_autopilot(False)
-
-    # 5. Load Trained PyTorch PPO Model
-    import torch
-    from train_rl_agent import ActorCriticPPO
-
+    env = CameraEasyCarlaEnv(params=easy_params)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    agent = ActorCriticPPO(action_dim=3, backbone_name=backbone).to(device)
 
+    # 2. Load Trained Policy Checkpoint
+    agent = ActorCriticPPO(action_dim=3, backbone_name=backbone).to(device)
     if checkpoint and os.path.exists(checkpoint):
         try:
             agent.load_state_dict(torch.load(checkpoint, map_location=device))
             agent.eval()
-            print(f"✓ Successfully loaded trained PPO checkpoint: {checkpoint}")
+            print(f"✓ Successfully loaded trained PPO policy: {checkpoint}")
         except Exception as e:
-            print(f"Warning: Could not load checkpoint ({e}). Using fresh policy weights.")
+            print(f"Warning: Could not load checkpoint ({e}). Using initialized weights.")
     else:
-        print(f"Warning: Checkpoint path not found ({checkpoint}).")
+        print(f"Warning: Checkpoint not found at {checkpoint}.")
 
-    # 6. Mount Sensors
-    # Sensor A: Main Third-Person Follow / Chase Camera (880x660)
-    chase_w, chase_h = 880, 660
-    chase_bp = blueprint_library.find("sensor.camera.rgb")
-    chase_bp.set_attribute("image_size_x", str(chase_w))
-    chase_bp.set_attribute("image_size_y", str(chase_h))
-    chase_bp.set_attribute("fov", "95")
-    chase_tf = carla.Transform(carla.Location(x=-5.5, z=2.5), carla.Rotation(pitch=-12.0))
-    chase_cam = world.spawn_actor(chase_bp, chase_tf, attach_to=ego_vehicle)
-    actor_list.append(chase_cam)
+    # 3. Mount Spectator / Chase Camera on the Ego Vehicle for the Third-Person View
+    chase_w, chase_h = 800, 650
+    world = env.easy_env.world
+    blueprint_library = world.get_blueprint_library()
+    
+    chase_cam_holder = [None]
+    chase_frame_buffer = [None]
 
-    # Sensor B: Front RGB Camera (256x256) - EXACT MODEL INPUT
-    model_bp = blueprint_library.find("sensor.camera.rgb")
-    model_bp.set_attribute("image_size_x", "256")
-    model_bp.set_attribute("image_size_y", "256")
-    model_bp.set_attribute("fov", "90")
-    model_tf = carla.Transform(carla.Location(x=1.5, z=1.4), carla.Rotation(pitch=-8.0))
-    model_cam = world.spawn_actor(model_bp, model_tf, attach_to=ego_vehicle)
-    actor_list.append(model_cam)
+    def setup_chase_camera():
+        if chase_cam_holder[0] is not None:
+            try:
+                chase_cam_holder[0].stop()
+                chase_cam_holder[0].destroy()
+            except Exception:
+                pass
+            chase_cam_holder[0] = None
 
-    # Sensor Buffers
-    frames = {"chase": None, "model": None}
+        chase_bp = blueprint_library.find("sensor.camera.rgb")
+        chase_bp.set_attribute("image_size_x", str(chase_w))
+        chase_bp.set_attribute("image_size_y", str(chase_h))
+        chase_bp.set_attribute("fov", "95")
+        chase_tf = carla.Transform(carla.Location(x=-5.5, z=2.5), carla.Rotation(pitch=-12.0))
+        chase_cam = world.spawn_actor(chase_bp, chase_tf, attach_to=env.easy_env.ego)
 
-    def process_chase(img):
-        arr = np.frombuffer(img.raw_data, dtype=np.uint8)
-        arr = np.reshape(arr, (img.height, img.width, 4))
-        frames["chase"] = arr[:, :, :3].copy() # BGR
+        def _on_chase_img(img):
+            arr = np.frombuffer(img.raw_data, dtype=np.uint8)
+            arr = np.reshape(arr, (img.height, img.width, 4))
+            chase_frame_buffer[0] = arr[:, :, :3].copy() # BGR
 
-    def process_model(img):
-        arr = np.frombuffer(img.raw_data, dtype=np.uint8)
-        arr = np.reshape(arr, (img.height, img.width, 4))
-        frames["model"] = arr[:, :, :3].copy() # BGR
+        chase_cam.listen(_on_chase_img)
+        chase_cam_holder[0] = chase_cam
 
-    chase_cam.listen(process_chase)
-    model_cam.listen(process_model)
-
-    # Video Dimensions
-    panel_w = 400
+    # 4. Canvas Dimensions (1280 x 720 HD)
+    panel_w = 480
     canvas_w = chase_w + panel_w
-    canvas_h = chase_h + 50 # 50px top header banner
+    canvas_h = chase_h + 50 # 50px header banner
     
     os.makedirs(os.path.dirname(output_video), exist_ok=True)
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -231,25 +209,28 @@ def record_eval_video(
 
     print(f"Recording {steps} evaluation steps at 20 FPS...")
 
-    # Action State
+    # Initial Environment Reset
+    obs, info = env.reset()
+    setup_chase_camera()
+
+    episode_count = 1
+    episode_reward = 0.0
+    episode_speeds = []
+
     throttle_val = 0.0
     steer_val = 0.0
     brake_val = 0.0
+    status_str = "Active Driving"
 
     try:
-        for i in range(steps):
-            world.tick()
-
-            while frames["chase"] is None or frames["model"] is None:
-                time.sleep(0.002)
-
-            # Get vehicle velocity & speed
-            vel = ego_vehicle.get_velocity()
-            speed_kmh = 3.6 * math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
+        for step in range(steps):
+            # Model Input 1: (256, 256, 3) RGB Front Camera Frame
+            model_rgb_input = obs["image"] # uint8 [0, 255] RGB
+            # Model Input 2: Speed Scalar
+            speed_kmh = float(obs["speed"][0])
+            episode_speeds.append(speed_kmh)
 
             # Model Inference
-            # Model takes: (256, 256, 3) RGB image + speed scalar
-            model_rgb_input = np.ascontiguousarray(frames["model"][:, :, ::-1])  # BGR -> RGB contiguous
             img_tensor = torch.as_tensor(model_rgb_input, dtype=torch.uint8, device=device).unsqueeze(0)
             spd_tensor = torch.as_tensor([speed_kmh], dtype=torch.float32, device=device).unsqueeze(0)
 
@@ -261,77 +242,104 @@ def record_eval_video(
             steer_val = float(np.clip(act[1], -1.0, 1.0))
             brake_val = float(np.clip((act[2] - 0.2) / 0.8, 0.0, 1.0)) if act[2] > 0.2 else 0.0
 
-            # Apply Vehicle Control
-            control = carla.VehicleControl(
-                throttle=throttle_val,
-                steer=steer_val,
-                brake=brake_val
-            )
-            ego_vehicle.apply_control(control)
+            # Step Environment using the exact continuous action space
+            next_obs, reward, terminated, truncated, info = env.step(act)
+            done = terminated or truncated
+            episode_reward += float(reward)
 
-            # Build Full Frame Canvas
+            # Wait for Chase camera frame
+            while chase_frame_buffer[0] is None:
+                time.sleep(0.002)
+
+            # Build Video Frame (1280 x 720)
             canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
 
-            # 1. Top Global Header Banner
+            # 1. Header Banner
             header = np.zeros((50, canvas_w, 3), dtype=np.uint8)
-            cv2.rectangle(header, (0, 0), (canvas_w, 50), (17, 24, 39), -1)
-            cv2.putText(header, "CARLA Deep RL Autonomous Driving Evaluation", (20, 32),
-                        cv2.FONT_HERSHEY_DUPLEX, 0.75, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.rectangle(header, (0, 0), (canvas_w, 50), (15, 23, 42), -1)
+            cv2.putText(header, "CARLA AUTONOMOUS DRIVING EVALUATION STUDIO", (25, 33),
+                        cv2.FONT_HERSHEY_DUPLEX, 0.70, (255, 255, 255), 1, cv2.LINE_AA)
             cv2.putText(header, f"Model: PPO + {backbone.upper()}  |  Map: {town}  |  Checkpoint: {os.path.basename(checkpoint)}",
-                        (620, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (156, 163, 175), 1, cv2.LINE_AA)
-
+                        (640, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (156, 163, 175), 1, cv2.LINE_AA)
             canvas[0:50, 0:canvas_w] = header
 
             # 2. Main View: Chase Camera (Left)
-            canvas[50:50 + chase_h, 0:chase_w] = frames["chase"]
+            canvas[50:50 + chase_h, 0:chase_w] = chase_frame_buffer[0]
+            # Overlay label on chase view
+            cv2.rectangle(canvas, (10, 60), (280, 88), (0, 0, 0), -1)
+            cv2.putText(canvas, "Third-Person Follow View", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
 
-            # 3. Telemetry & Model Input Side Panel (Right)
+            # 3. Model Inputs & Telemetry Panel (Right)
+            model_bgr_256 = cv2.cvtColor(model_rgb_input, cv2.COLOR_RGB2BGR)
+            avg_spd = np.mean(episode_speeds) if len(episode_speeds) > 0 else speed_kmh
+
             draw_hud(
                 canvas=canvas,
                 x_offset=chase_w,
                 y_offset=50,
                 panel_w=panel_w,
                 panel_h=chase_h,
-                model_rgb=frames["model"],
+                model_rgb_256=model_bgr_256,
                 speed_kmh=speed_kmh,
                 throttle=throttle_val,
                 steer=steer_val,
                 brake=brake_val,
-                step=i + 1,
+                step=step + 1,
                 total_steps=steps,
-                backbone_name=backbone
+                episode_count=episode_count,
+                ep_reward=episode_reward,
+                ep_avg_speed=avg_spd,
+                backbone_name=backbone,
+                status_str=status_str
             )
+
+            # If episode terminated on this step, show termination alert overlay
+            if done:
+                term_reason = info.get("termination_reason", "Episode Finished")
+                alert_banner = np.zeros((60, chase_w, 3), dtype=np.uint8)
+                bg_col = (185, 28, 28) if "Collision" in term_reason else ((217, 119, 6) if "Off-Road" in term_reason else (30, 64, 175))
+                cv2.rectangle(alert_banner, (0, 0), (chase_w, 60), bg_col, -1)
+                cv2.putText(alert_banner, f"EPISODE #{episode_count} TERMINATED: {term_reason.upper()}", (30, 26),
+                            cv2.FONT_HERSHEY_DUPLEX, 0.65, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(alert_banner, f"Reward: {episode_reward:+.2f}  |  Avg Speed: {avg_spd:.1f} km/h  |  Respawning to New Route...", (30, 48),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA)
+                canvas[50 + chase_h - 70:50 + chase_h - 10, 0:chase_w] = alert_banner
 
             video_writer.write(canvas)
 
-            if (i + 1) % 50 == 0 or i == steps - 1:
-                print(f"[Step {i+1:03d}/{steps}] Speed: {speed_kmh:4.1f} km/h | Throttle: {throttle_val:.2f} | Steer: {steer_val:+.2f} | Brake: {brake_val:.2f}")
+            if done:
+                term_reason = info.get("termination_reason", "Episode Finished")
+                print(f"[Step {step+1:04d}/{steps}] Episode #{episode_count} Terminated: {term_reason} | Reward: {episode_reward:+.2f} | Avg Speed: {avg_spd:.1f} km/h")
+                
+                # Write 10 duplicate alert frames so the termination banner is clearly readable in the video
+                for _ in range(10):
+                    video_writer.write(canvas)
+
+                # Reset environment for next episode
+                obs, info = env.reset()
+                setup_chase_camera()
+                episode_count += 1
+                episode_reward = 0.0
+                episode_speeds = []
+                status_str = "Active Driving"
+            else:
+                obs = next_obs
+
+            if (step + 1) % 100 == 0:
+                print(f"[Step {step+1:04d}/{steps}] Speed: {speed_kmh:4.1f} km/h | Throttle: {throttle_val:.2f} | Steer: {steer_val:+.2f} | Brake: {brake_val:.2f} | Ep: #{episode_count}")
 
     finally:
-        print("Finalizing video recording and releasing sensors...")
+        print("Finalizing video recording and closing environment...")
         video_writer.release()
 
-        # Stop camera listeners
-        for s in [chase_cam, model_cam]:
+        if chase_cam_holder[0] is not None:
             try:
-                s.stop()
+                chase_cam_holder[0].stop()
+                chase_cam_holder[0].destroy()
             except Exception:
                 pass
 
-        # Drain render pipeline
-        try:
-            world.tick()
-        except Exception:
-            pass
-
-        # Batch destroy all actors safely
-        if actor_list:
-            destroy_cmds = [carla.command.DestroyActor(a.id) for a in actor_list if a is not None]
-            client.apply_batch(destroy_cmds)
-
-        settings = world.get_settings()
-        settings.synchronous_mode = False
-        world.apply_settings(settings)
+        env.close()
 
         print(f"--- Evaluation Video Saved: {os.path.abspath(output_video)} ---")
 
@@ -352,10 +360,9 @@ def record_eval_video(
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Record Model Input & Driving Telemetry Video in CARLA.")
-    parser.add_argument("--host", type=str, default="127.0.0.1", help="CARLA host IP")
+    parser = argparse.ArgumentParser(description="Record PPO Model Evaluation Video in CARLA.")
     parser.add_argument("--port", type=int, default=2000, help="CARLA port")
-    parser.add_argument("--steps", type=int, default=300, help="Number of simulation steps to record (default: 300 steps = 15s)")
+    parser.add_argument("--steps", type=int, default=600, help="Number of simulation steps to record (default: 600 steps = 30s)")
     parser.add_argument("--output-video", type=str, default="/workspace/output_screenshots/driving_eval_model_input.mp4", help="Output MP4 path")
     parser.add_argument("--npc-vehicles", type=int, default=3, help="Number of NPC traffic vehicles")
     parser.add_argument("--backbone", type=str, default="lav", choices=["lav", "erfnet", "resnet18", "resnet34"], help="Vision backbone used during training")
@@ -365,7 +372,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     record_eval_video(
-        host=args.host,
         port=args.port,
         steps=args.steps,
         output_video=args.output_video,
