@@ -178,28 +178,42 @@ class CameraEasyCarlaEnv(gym.Env):
             carla.Client.set_timeout = orig_set_timeout
             carla.Client.load_world = orig_load_world
 
-        # Attach safe atomic batch actor destruction with render pipeline draining
+        # Global protection against short 10s timeouts in underlying CarlaEnv
+        orig_set_timeout = carla.Client.set_timeout
+        def safe_set_timeout(client_self, timeout):
+            orig_set_timeout(client_self, max(timeout, 60.0))
+        carla.Client.set_timeout = safe_set_timeout
+
+        # Attach safe atomic batch actor destruction with controller stopping and render pipeline draining
         def safe_clear_all_actors(actor_filters):
-            batch = []
+            # 1. Stop all controllers and sensors first
             for actor_filter in actor_filters:
                 for actor in self.easy_env.world.get_actors().filter(actor_filter):
                     try:
-                        if 'sensor' in actor.type_id:
+                        if hasattr(actor, 'stop') and callable(actor.stop):
                             actor.stop()
-                    except Exception:
+                    except (Exception, BaseException):
                         pass
-                    batch.append(carla.command.DestroyActor(actor.id))
-            
-            # Drain render thread in-flight frames before deleting memory to prevent Signal 11 crashes
+
+            # 2. Drain render thread in-flight frames before deleting memory
             try:
                 self.easy_env.world.tick()
-            except Exception:
+            except (Exception, BaseException):
                 pass
 
-            if batch:
+            # 3. Gather batch of destroy commands for unique living actors
+            batch = []
+            seen_ids = set()
+            for actor_filter in actor_filters:
+                for actor in self.easy_env.world.get_actors().filter(actor_filter):
+                    if actor.id not in seen_ids:
+                        seen_ids.add(actor.id)
+                        batch.append(carla.command.DestroyActor(actor.id))
+
+            if batch and hasattr(self, 'carla_client') and self.carla_client is not None:
                 try:
                     self.carla_client.apply_batch(batch)
-                except Exception:
+                except (Exception, BaseException):
                     pass
 
         self.easy_env._clear_all_actors = safe_clear_all_actors
@@ -386,23 +400,28 @@ class CameraEasyCarlaEnv(gym.Env):
                     try:
                         self.easy_env = CarlaEnv(self.params)
                         def safe_clear_all_actors(actor_filters):
-                            batch = []
                             for actor_filter in actor_filters:
                                 for actor in self.easy_env.world.get_actors().filter(actor_filter):
                                     try:
-                                        if 'sensor' in actor.type_id:
+                                        if hasattr(actor, 'stop') and callable(actor.stop):
                                             actor.stop()
-                                    except Exception:
+                                    except (Exception, BaseException):
                                         pass
-                                    batch.append(carla.command.DestroyActor(actor.id))
                             try:
                                 self.easy_env.world.tick()
-                            except Exception:
+                            except (Exception, BaseException):
                                 pass
-                            if batch:
+                            batch = []
+                            seen_ids = set()
+                            for actor_filter in actor_filters:
+                                for actor in self.easy_env.world.get_actors().filter(actor_filter):
+                                    if actor.id not in seen_ids:
+                                        seen_ids.add(actor.id)
+                                        batch.append(carla.command.DestroyActor(actor.id))
+                            if batch and hasattr(self, 'carla_client') and self.carla_client is not None:
                                 try:
                                     self.carla_client.apply_batch(batch)
-                                except Exception:
+                                except (Exception, BaseException):
                                     pass
                         self.easy_env._clear_all_actors = safe_clear_all_actors
                     except (Exception, BaseException) as re_err:

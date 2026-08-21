@@ -479,10 +479,11 @@ def train():
     episode_rewards = []
     episode_speeds = []
     current_ep_reward = 0
-    current_ep_speeds = []
-    scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
-
-    # Training Loop
+    # AMP Scaler
+    if hasattr(torch, 'amp') and hasattr(torch.amp, 'GradScaler'):
+        scaler = torch.amp.GradScaler('cuda', enabled=torch.cuda.is_available())
+    else:
+        scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
     while global_step < args.total_steps:
         # Storage buffers for Rollout
         obs_images = []
@@ -596,7 +597,8 @@ def train():
         value_losses = []
 
         for epoch in range(args.ppo_epochs):
-            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+            autocast_ctx = torch.amp.autocast('cuda', enabled=torch.cuda.is_available()) if hasattr(torch, 'amp') and hasattr(torch.amp, 'autocast') else torch.cuda.amp.autocast(enabled=torch.cuda.is_available())
+            with autocast_ctx:
                 _, new_log_prob, entropy, new_value = agent.get_action_and_value(b_images, b_speeds, b_actions)
                 logratio = new_log_prob - b_log_probs
                 ratio = logratio.exp()
