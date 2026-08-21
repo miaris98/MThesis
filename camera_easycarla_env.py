@@ -329,7 +329,11 @@ class CameraEasyCarlaEnv(gym.Env):
         self._setup_camera()
 
         # Tick world once to allow camera sensor callback to receive initial frame
-        self.easy_env.world.tick()
+        try:
+            if hasattr(self.easy_env, 'world') and self.easy_env.world is not None:
+                self.easy_env.world.tick()
+        except (Exception, BaseException):
+            pass
         time.sleep(0.05)
 
         obs = self._get_obs()
