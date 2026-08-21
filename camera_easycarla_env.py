@@ -79,7 +79,7 @@ class CameraEasyCarlaEnv(gym.Env):
             if temp_settings.synchronous_mode:
                 temp_settings.synchronous_mode = False
                 temp_world.apply_settings(temp_settings)
-            active_map = temp_world.get_map().name
+            active_map = temp_world.get_map().name.split('/')[-1]
             if params['town'] in active_map:
                 params['town'] = active_map
         except Exception:
