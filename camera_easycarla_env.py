@@ -114,8 +114,8 @@ class CameraEasyCarlaEnv(gym.Env):
             print(f"--> Starting CARLA server session with map {town}...")
             os.system("pkill -9 -f CarlaUE4 2>/dev/null || true")
             os.system("tmux kill-session -t carla_server 2>/dev/null || true")
-            os.system(f"tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh /Game/Carla/Maps/{town} -carla-port={port} -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
-            _wait_for_carla_server(port, max_wait=30)
+            os.system(f"tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh /Game/Carla/Maps/{town} -carla-port={port} -RenderOffScreen -nosound -vulkan -quality-level=Low -benchmark -fps=20' > /workspace/carla_server.log 2>&1\"")
+            _wait_for_carla_server(port, max_wait=45)
 
         self.carla_client = carla.Client('127.0.0.1', port)
         self.carla_client.set_timeout(60.0)
@@ -318,8 +318,8 @@ class CameraEasyCarlaEnv(gym.Env):
                     town = self.params.get('town', 'Town10HD_Opt')
                     os.system("pkill -9 -f CarlaUE4 2>/dev/null || true")
                     os.system("tmux kill-session -t carla_server 2>/dev/null || true")
-                    os.system(f"tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh /Game/Carla/Maps/{town} -carla-port={port} -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
-                    _wait_for_carla_server(port, max_wait=30)
+                    os.system(f"tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh /Game/Carla/Maps/{town} -carla-port={port} -RenderOffScreen -nosound -vulkan -quality-level=Low -benchmark -fps=20' > /workspace/carla_server.log 2>&1\"")
+                    _wait_for_carla_server(port, max_wait=45)
                     self.carla_client = carla.Client('127.0.0.1', port)
                     self.carla_client.set_timeout(60.0)
 
@@ -406,11 +406,8 @@ class CameraEasyCarlaEnv(gym.Env):
             float(np.clip((action[2] - 0.2) / 0.8, 0.0, 1.0)) if action[2] > 0.2 else 0.0
         ]
 
-        # Step underlying EasyCarla environment
+        # Step underlying EasyCarla environment (which already ticks the world in synchronous mode)
         easy_obs, reward, cost, done, easy_info = self.easy_env.step(scaled_action)
-
-        # Tick world to trigger camera update
-        self.easy_env.world.tick()
 
         obs = self._get_obs()
         speed_kmh = float(obs["speed"][0])

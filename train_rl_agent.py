@@ -329,6 +329,8 @@ def train():
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
     print(f"==============================================================")
     print(f"   🚀 Starting Camera-Only PPO Deep RL Training               ")
     print(f"==============================================================")
@@ -406,7 +408,9 @@ def train():
     episode_speeds = []
     current_ep_reward = 0
     current_ep_speeds = []
+    scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
 
+    # Training Loop
     while global_step < args.total_steps:
         # Storage buffers for Rollout
         obs_images = []
@@ -421,10 +425,10 @@ def train():
         for step in range(args.rollout_steps):
             global_step += 1
             
-            img_tensor = torch.tensor(obs["image"].copy(), dtype=torch.uint8).unsqueeze(0).to(device)
-            spd_tensor = torch.tensor(obs["speed"], dtype=torch.float32).unsqueeze(0).to(device)
+            img_tensor = torch.as_tensor(obs["image"], dtype=torch.uint8, device=device).unsqueeze(0)
+            spd_tensor = torch.as_tensor(obs["speed"], dtype=torch.float32, device=device).unsqueeze(0)
 
-            with torch.no_grad():
+            with torch.inference_mode():
                 action, log_prob, _, value = agent.get_action_and_value(img_tensor, spd_tensor)
 
             action_np = action.cpu().numpy()[0]
@@ -482,9 +486,9 @@ def train():
                 current_ep_speeds = []
 
         # 2. Compute Generalized Advantage Estimation (GAE)
-        with torch.no_grad():
-            next_img = torch.tensor(obs["image"].copy(), dtype=torch.uint8).unsqueeze(0).to(device)
-            next_spd = torch.tensor(obs["speed"], dtype=torch.float32).unsqueeze(0).to(device)
+        with torch.inference_mode():
+            next_img = torch.as_tensor(obs["image"], dtype=torch.uint8, device=device).unsqueeze(0)
+            next_spd = torch.as_tensor(obs["speed"], dtype=torch.float32, device=device).unsqueeze(0)
             next_val = agent.get_action_and_value(next_img, next_spd)[3].squeeze(0)
 
         returns = []
@@ -508,37 +512,40 @@ def train():
         b_speeds = torch.stack(obs_speeds)
         b_actions = torch.stack(actions)
         b_log_probs = torch.stack(log_probs)
-        b_advantages = torch.tensor(advantages, dtype=torch.float32).to(device)
-        b_returns = torch.tensor(returns, dtype=torch.float32).to(device)
+        b_advantages = torch.tensor(advantages, dtype=torch.float32, device=device)
+        b_returns = torch.tensor(returns, dtype=torch.float32, device=device)
         b_values = torch.stack(values)
 
         # Normalize Advantages
         b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-        # 3. Optimize PPO Policy & Value Networks
+        # 3. Optimize PPO Policy & Value Networks with AMP Mixed Precision
         policy_losses = []
         value_losses = []
 
         for epoch in range(args.ppo_epochs):
-            _, new_log_prob, entropy, new_value = agent.get_action_and_value(b_images, b_speeds, b_actions)
-            logratio = new_log_prob - b_log_probs
-            ratio = logratio.exp()
+            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                _, new_log_prob, entropy, new_value = agent.get_action_and_value(b_images, b_speeds, b_actions)
+                logratio = new_log_prob - b_log_probs
+                ratio = logratio.exp()
 
-            # PPO Clipped Surrogate Loss
-            pg_loss1 = -b_advantages * ratio
-            pg_loss2 = -b_advantages * torch.clamp(ratio, 1.0 - args.clip_coef, 1.0 + args.clip_coef)
-            pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+                # PPO Clipped Surrogate Loss
+                pg_loss1 = -b_advantages * ratio
+                pg_loss2 = -b_advantages * torch.clamp(ratio, 1.0 - args.clip_coef, 1.0 + args.clip_coef)
+                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-            # Value Loss
-            v_loss = 0.5 * ((new_value - b_returns) ** 2).mean()
+                # Value Loss
+                v_loss = 0.5 * ((new_value - b_returns) ** 2).mean()
 
-            # Combined Total Loss with exploration entropy bonus
-            total_loss = pg_loss + 0.5 * v_loss - args.ent_coef * entropy.mean()
+                # Combined Total Loss with exploration entropy bonus
+                total_loss = pg_loss + 0.5 * v_loss - args.ent_coef * entropy.mean()
 
             optimizer.zero_grad()
-            total_loss.backward()
+            scaler.scale(total_loss).backward()
+            scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(agent.parameters(), max_norm=0.5)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             policy_losses.append(pg_loss.item())
             value_losses.append(v_loss.item())
