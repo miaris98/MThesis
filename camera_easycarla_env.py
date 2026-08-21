@@ -233,17 +233,17 @@ class CameraEasyCarlaEnv(gym.Env):
             try:
                 if hasattr(self, 'carla_client') and self.carla_client is not None:
                     try:
-                        self.carla_client.set_timeout(15.0)
+                        self.carla_client.set_timeout(10.0)
                         temp_world = self.carla_client.get_world()
                         settings = temp_world.get_settings()
                         if settings.synchronous_mode:
                             settings.synchronous_mode = False
                             temp_world.apply_settings(settings)
-                    except Exception:
+                    except (Exception, BaseException):
                         pass
                 self.easy_env.reset()
                 break
-            except Exception as e:
+            except (Exception, BaseException) as e:
                 print(f"Warning: CARLA reset attempt {attempt+1}/3 failed ({e}). Auto-restarting CARLA engine...")
                 if os.path.exists("/workspace/carla/CarlaUE4.sh"):
                     os.system("pkill -9 -f CarlaUE4 2>/dev/null || true")
@@ -253,6 +253,33 @@ class CameraEasyCarlaEnv(gym.Env):
                     port = self.params.get('port', 2000)
                     self.carla_client = carla.Client('127.0.0.1', port)
                     self.carla_client.set_timeout(60.0)
+
+                    # Re-create underlying CarlaEnv on fresh server instance
+                    try:
+                        orig_set_timeout = carla.Client.set_timeout
+                        orig_load_world = carla.Client.load_world
+
+                        def patched_set_timeout(client_self, timeout):
+                            orig_set_timeout(client_self, max(timeout, 60.0))
+
+                        def patched_load_world(client_self, town_name, reset_settings=True):
+                            orig_set_timeout(client_self, 60.0)
+                            try:
+                                current_map = client_self.get_world().get_map().name
+                                if town_name in current_map:
+                                    return client_self.get_world()
+                            except (Exception, BaseException):
+                                pass
+                            return orig_load_world(client_self, town_name, reset_settings)
+
+                        carla.Client.set_timeout = patched_set_timeout
+                        carla.Client.load_world = patched_load_world
+                        self.easy_env = CarlaEnv(self.params)
+                    except (Exception, BaseException) as re_err:
+                        print(f"Re-initialization error: {re_err}")
+                    finally:
+                        carla.Client.set_timeout = orig_set_timeout
+                        carla.Client.load_world = orig_load_world
         
         # Attach camera sensor to newly spawned ego vehicle
         self._setup_camera()
