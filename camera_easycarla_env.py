@@ -63,7 +63,7 @@ class CameraEasyCarlaEnv(gym.Env):
         if params is None:
             params = {
                 'number_of_vehicles': 3,
-                'number_of_walkers': 0,
+                'number_of_walkers': 10,
                 'display_size': 256,
                 'max_past_step': 1,
                 'dt': 0.05,
@@ -211,26 +211,28 @@ class CameraEasyCarlaEnv(gym.Env):
             dtype=np.float32
         )
 
-        # Define Observation Space: Camera RGB Image + Speed Kinematics
+        # Define Observation Space: 3-Camera RGB Image (256x768x3 stitched: Left | Center | Right) + Speed Kinematics
+        self.num_cameras = 3
         self.observation_space = spaces.Dict({
-            "image": spaces.Box(low=0, high=255, shape=(self.img_height, self.img_width, 3), dtype=np.uint8),
+            "image": spaces.Box(low=0, high=255, shape=(self.img_height, self.img_width * self.num_cameras, 3), dtype=np.uint8),
             "speed": spaces.Box(low=0.0, high=150.0, shape=(1,), dtype=np.float32)
         })
 
-        self.camera_sensor = None
-        self.latest_image = None
+        self.camera_sensors = {"left": None, "center": None, "right": None}
+        self.latest_images = {"left": None, "center": None, "right": None}
 
     def _setup_camera(self):
-        """Attach RGB camera sensor to ego vehicle."""
-        if self.camera_sensor is not None:
-            try:
-                if hasattr(self.camera_sensor, 'is_listening') and self.camera_sensor.is_listening:
-                    self.camera_sensor.stop()
-                if hasattr(self.camera_sensor, 'is_alive') and self.camera_sensor.is_alive:
-                    self.camera_sensor.destroy()
-            except Exception:
-                pass
-            self.camera_sensor = None
+        """Attach 3 synchronized RGB camera sensors (Left, Center, Right) to ego vehicle."""
+        for cam_key in ["left", "center", "right"]:
+            if self.camera_sensors[cam_key] is not None:
+                try:
+                    if hasattr(self.camera_sensors[cam_key], 'is_listening') and self.camera_sensors[cam_key].is_listening:
+                        self.camera_sensors[cam_key].stop()
+                    if hasattr(self.camera_sensors[cam_key], 'is_alive') and self.camera_sensors[cam_key].is_alive:
+                        self.camera_sensors[cam_key].destroy()
+                except Exception:
+                    pass
+                self.camera_sensors[cam_key] = None
 
         if not hasattr(self.easy_env, 'ego') or self.easy_env.ego is None:
             print("Warning: Ego vehicle is None, skipping camera attachment.")
@@ -243,17 +245,38 @@ class CameraEasyCarlaEnv(gym.Env):
         cam_bp.set_attribute("image_size_y", str(self.img_height))
         cam_bp.set_attribute("fov", "90")
 
-        # Mount camera on hood / front windshield
-        cam_transform = carla.Transform(carla.Location(x=1.5, z=1.4), carla.Rotation(pitch=-8.0))
-        self.camera_sensor = world.spawn_actor(cam_bp, cam_transform, attach_to=self.easy_env.ego)
+        # 1. Center Front Camera (yaw=0.0)
+        center_tf = carla.Transform(carla.Location(x=1.5, y=0.0, z=1.4), carla.Rotation(pitch=-8.0, yaw=0.0))
+        self.camera_sensors["center"] = world.spawn_actor(cam_bp, center_tf, attach_to=self.easy_env.ego)
 
-        def _camera_callback(image):
-            array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
-            array = np.reshape(array, (image.height, image.width, 4)) # BGRA
-            rgb_array = array[:, :, :3][:, :, ::-1] # Convert BGRA -> RGB
-            self.latest_image = rgb_array
+        def _center_callback(image):
+            arr = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
+            arr = np.reshape(arr, (image.height, image.width, 4))
+            self.latest_images["center"] = arr[:, :, :3][:, :, ::-1].copy()
 
-        self.camera_sensor.listen(_camera_callback)
+        self.camera_sensors["center"].listen(_center_callback)
+
+        # 2. Left Front Camera (yaw=-55.0)
+        left_tf = carla.Transform(carla.Location(x=1.3, y=-0.4, z=1.4), carla.Rotation(pitch=-8.0, yaw=-55.0))
+        self.camera_sensors["left"] = world.spawn_actor(cam_bp, left_tf, attach_to=self.easy_env.ego)
+
+        def _left_callback(image):
+            arr = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
+            arr = np.reshape(arr, (image.height, image.width, 4))
+            self.latest_images["left"] = arr[:, :, :3][:, :, ::-1].copy()
+
+        self.camera_sensors["left"].listen(_left_callback)
+
+        # 3. Right Front Camera (yaw=+55.0)
+        right_tf = carla.Transform(carla.Location(x=1.3, y=0.4, z=1.4), carla.Rotation(pitch=-8.0, yaw=55.0))
+        self.camera_sensors["right"] = world.spawn_actor(cam_bp, right_tf, attach_to=self.easy_env.ego)
+
+        def _right_callback(image):
+            arr = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
+            arr = np.reshape(arr, (image.height, image.width, 4))
+            self.latest_images["right"] = arr[:, :, :3][:, :, ::-1].copy()
+
+        self.camera_sensors["right"].listen(_right_callback)
 
     def _get_speed_kmh(self):
         """Calculate ego vehicle speed in km/h."""
@@ -263,15 +286,18 @@ class CameraEasyCarlaEnv(gym.Env):
         return 3.6 * math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)
 
     def _get_obs(self):
-        """Return dict containing latest RGB image and speed."""
-        if self.latest_image is None:
-            image_obs = np.zeros((self.img_height, self.img_width, 3), dtype=np.uint8)
-        else:
-            image_obs = self.latest_image.copy()
+        """Return dict containing 3-camera stitched RGB panorama [Left | Center | Right] and speed."""
+        blank_cam = np.zeros((self.img_height, self.img_width, 3), dtype=np.uint8)
+        img_left = self.latest_images["left"] if self.latest_images["left"] is not None else blank_cam
+        img_center = self.latest_images["center"] if self.latest_images["center"] is not None else blank_cam
+        img_right = self.latest_images["right"] if self.latest_images["right"] is not None else blank_cam
+
+        # Stitched 3-camera horizontal panorama: shape (256, 768, 3)
+        panorama_obs = np.ascontiguousarray(np.hstack([img_left, img_center, img_right]))
 
         speed_kmh = self._get_speed_kmh()
         return {
-            "image": image_obs,
+            "image": panorama_obs,
             "speed": np.array([speed_kmh], dtype=np.float32)
         }
 
@@ -412,16 +438,39 @@ class CameraEasyCarlaEnv(gym.Env):
         obs = self._get_obs()
         speed_kmh = float(obs["speed"][0])
         
-        # Track stationary/stalled steps (< 2.0 km/h)
-        if speed_kmh < 2.0:
-            self.stalled_steps += 1
-        else:
-            self.stalled_steps = 0
+        # Check traffic light status affecting ego vehicle
+        is_at_red_light = False
+        try:
+            if hasattr(self.easy_env, 'ego') and self.easy_env.ego is not None:
+                if self.easy_env.ego.is_at_traffic_light():
+                    tl = self.easy_env.ego.get_traffic_light()
+                    if tl is not None:
+                        tl_state = tl.get_state()
+                        if tl_state in [carla.TrafficLightState.Red, carla.TrafficLightState.Yellow]:
+                            is_at_red_light = True
+        except Exception:
+            is_at_red_light = False
 
-        # Terminate episode if car remains stationary/stalled for >= 25 steps (1.25s)
+        if is_at_red_light:
+            if speed_kmh < 2.0:
+                # Legally stopped at red light! Freeze stall counter, grant compliance bonus
+                self.stalled_steps = 0
+                reward += 0.5  # Reward for waiting cleanly at red light
+            else:
+                # Vehicle is moving through an active red light!
+                reward -= 2.0  # Violation penalty for running red light
+        else:
+            # On open road: strictly penalize idle behavior
+            if speed_kmh < 2.0:
+                self.stalled_steps += 1
+                reward -= 0.5  # Strict continuous idle penalty
+            else:
+                self.stalled_steps = 0
+
+        # Terminate episode if car remains stationary/stalled on open road for >= 25 steps (1.25s)
         is_stalled = bool(self.stalled_steps >= 25)
         if is_stalled:
-            reward -= 20.0  # Penalty for refusing to drive
+            reward -= 30.0  # Strict penalty for refusing to drive on open road
 
         # Positive bonus for forward movement (up to +1.5 reward per step)
         reward += 1.5 * min(speed_kmh / 25.0, 1.0)
@@ -447,6 +496,7 @@ class CameraEasyCarlaEnv(gym.Env):
             "cost": cost,
             "is_collision": self.easy_env._is_collision,
             "is_off_road": self.easy_env._is_off_road,
+            "is_at_red_light": is_at_red_light,
             "termination_reason": reason,
             "speed_kmh": speed_kmh
         }
@@ -454,14 +504,15 @@ class CameraEasyCarlaEnv(gym.Env):
         return obs, reward, terminated, truncated, info
 
     def close(self):
-        """Clean up camera sensor and close environment."""
-        if self.camera_sensor is not None:
-            try:
-                self.camera_sensor.stop()
-                self.camera_sensor.destroy()
-            except Exception:
-                pass
-            self.camera_sensor = None
+        """Clean up 3 camera sensors and close environment."""
+        for cam_key in ["left", "center", "right"]:
+            if self.camera_sensors.get(cam_key) is not None:
+                try:
+                    self.camera_sensors[cam_key].stop()
+                    self.camera_sensors[cam_key].destroy()
+                except Exception:
+                    pass
+                self.camera_sensors[cam_key] = None
 
         if hasattr(self, 'easy_env') and self.easy_env is not None:
             self.easy_env.close()

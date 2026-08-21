@@ -66,62 +66,97 @@ class PretrainedVisionFeatureExtractor(nn.Module):
         self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
         self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
 
-        # Linear projector for visual vector + speed scalar
+        # Linear projector for multi-camera visual vector (3 cameras: Left, Center, Right) + speed scalar
+        self.num_cameras = 3
         self.fc = nn.Sequential(
-            nn.Linear(backbone_out_dim + 1, features_dim),
+            nn.Linear(backbone_out_dim * self.num_cameras + 1, features_dim),
             nn.ReLU()
         )
 
     def forward(self, image, speed):
-        # Normalize image pixel values [0, 255] -> [0, 1]
+        # image shape: (N, H, W, 3) where W can be 256 (1 cam) or 768 (3 cams)
         img_x = image.float() / 255.0
-        # Permute (N, H, W, C) -> (N, C, H, W)
+
         if img_x.ndim == 4 and img_x.shape[-1] == 3:
-            img_x = img_x.permute(0, 3, 1, 2)
-
-        # Standard ImageNet normalization
-        img_normalized = (img_x - self.mean) / self.std
-
-        if self.freeze_backbone:
-            with torch.no_grad():
-                conv_out = self.backbone(img_normalized).flatten(start_dim=1)
+            N, H, W, C = img_x.shape
+            if W == H * 3:
+                # 3-camera horizontal panorama: split into Left, Center, Right
+                img_left = img_x[:, :, :H, :]
+                img_center = img_x[:, :, H:2*H, :]
+                img_right = img_x[:, :, 2*H:, :]
+                # Stack along batch: (3*N, H, H, C) -> (3*N, 3, H, H)
+                cams = torch.cat([img_left, img_center, img_right], dim=0).permute(0, 3, 1, 2)
+                cams_normalized = (cams - self.mean) / self.std
+                if self.freeze_backbone:
+                    with torch.no_grad():
+                        conv_out = self.backbone(cams_normalized).flatten(start_dim=1)
+                else:
+                    conv_out = self.backbone(cams_normalized).flatten(start_dim=1)
+                # Reshape from (3*N, D) -> 3 chunks of (N, D) -> concat to (N, 3*D)
+                left_out, center_out, right_out = torch.chunk(conv_out, 3, dim=0)
+                visual_features = torch.cat([left_out, center_out, right_out], dim=1)
+            else:
+                # Single camera input: (N, 3, H, W)
+                img_perm = img_x.permute(0, 3, 1, 2)
+                img_normalized = (img_perm - self.mean) / self.std
+                if self.freeze_backbone:
+                    with torch.no_grad():
+                        single_out = self.backbone(img_normalized).flatten(start_dim=1)
+                else:
+                    single_out = self.backbone(img_normalized).flatten(start_dim=1)
+                visual_features = single_out.repeat(1, self.num_cameras)
         else:
-            conv_out = self.backbone(img_normalized).flatten(start_dim=1)
+            img_normalized = (img_x - self.mean) / self.std
+            if self.freeze_backbone:
+                with torch.no_grad():
+                    visual_features = self.backbone(img_normalized).flatten(start_dim=1).repeat(1, self.num_cameras)
+            else:
+                visual_features = self.backbone(img_normalized).flatten(start_dim=1).repeat(1, self.num_cameras)
 
-        speed_x = speed.float().view(-1, 1) / 50.0 # Normalize speed by 50 km/h scale
-        combined = torch.cat([conv_out, speed_x], dim=1)
+        speed_x = speed.float().view(-1, 1) / 50.0  # Normalize speed by 50 km/h scale
+        combined = torch.cat([visual_features, speed_x], dim=1)
         return self.fc(combined)
 
 class CNNFeatureExtractor(nn.Module):
-    """NatureCNN-style architecture for extracting features from 256x256 RGB images + speed state."""
+    """NatureCNN-style architecture for extracting features from multi-camera RGB images + speed state."""
     def __init__(self, in_channels=3, features_dim=512):
         super(CNNFeatureExtractor, self).__init__()
+        self.num_cameras = 3
         self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=8, stride=4), # -> (32, 63, 63)
+            nn.Conv2d(in_channels, 32, kernel_size=8, stride=4),
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),          # -> (64, 30, 30)
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=2),          # -> (64, 14, 14)
+            nn.Conv2d(64, 64, kernel_size=3, stride=2),
             nn.ReLU(),
-            nn.Flatten()                                          # -> 64 * 14 * 14 = 12544
+            nn.Flatten()
         )
         
-        # Linear projector for flattened image features + speed scalar
         self.fc = nn.Sequential(
-            nn.Linear(12544 + 1, features_dim),
+            nn.Linear(12544 * self.num_cameras + 1, features_dim),
             nn.ReLU()
         )
 
     def forward(self, image, speed):
-        # Normalize image pixel values [0, 255] -> [0, 1]
         img_x = image.float() / 255.0
-        # Permute (N, H, W, C) -> (N, C, H, W) if needed
         if img_x.ndim == 4 and img_x.shape[-1] == 3:
-            img_x = img_x.permute(0, 3, 1, 2)
-            
-        conv_out = self.conv(img_x)
-        speed_x = speed.float().view(-1, 1) / 50.0  # Normalize speed by 50 km/h scale
-        combined = torch.cat([conv_out, speed_x], dim=1)
+            N, H, W, C = img_x.shape
+            if W == H * 3:
+                img_left = img_x[:, :, :H, :]
+                img_center = img_x[:, :, H:2*H, :]
+                img_right = img_x[:, :, 2*H:, :]
+                cams = torch.cat([img_left, img_center, img_right], dim=0).permute(0, 3, 1, 2)
+                conv_out = self.conv(cams)
+                left_out, center_out, right_out = torch.chunk(conv_out, 3, dim=0)
+                visual_features = torch.cat([left_out, center_out, right_out], dim=1)
+            else:
+                img_perm = img_x.permute(0, 3, 1, 2)
+                visual_features = self.conv(img_perm).repeat(1, self.num_cameras)
+        else:
+            visual_features = self.conv(img_x).repeat(1, self.num_cameras)
+
+        speed_x = speed.float().view(-1, 1) / 50.0
+        combined = torch.cat([visual_features, speed_x], dim=1)
         return self.fc(combined)
 
 # --- ERFNet CARLA Camera Feature Extractor ---
@@ -187,30 +222,64 @@ class ERFNetFeatureExtractor(nn.Module):
                 param.requires_grad = False
 
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.num_cameras = 3
         self.fc = nn.Sequential(
-            nn.Linear(128 + 1, features_dim),
+            nn.Linear(128 * self.num_cameras + 1, features_dim),
             nn.ReLU()
         )
 
     def forward(self, image, speed):
         img_x = image.float() / 255.0
         if img_x.ndim == 4 and img_x.shape[-1] == 3:
-            img_x = img_x.permute(0, 3, 1, 2)
-
-        if self.freeze_backbone:
-            with torch.no_grad():
+            N, H, W, C = img_x.shape
+            if W == H * 3:
+                img_left = img_x[:, :, :H, :]
+                img_center = img_x[:, :, H:2*H, :]
+                img_right = img_x[:, :, 2*H:, :]
+                cams = torch.cat([img_left, img_center, img_right], dim=0).permute(0, 3, 1, 2)
+                if self.freeze_backbone:
+                    with torch.no_grad():
+                        x = self.initial_block(cams)
+                        for layer in self.layers:
+                            x = layer(x)
+                        conv_out = self.pool(x).flatten(start_dim=1)
+                else:
+                    x = self.initial_block(cams)
+                    for layer in self.layers:
+                        x = layer(x)
+                    conv_out = self.pool(x).flatten(start_dim=1)
+                left_out, center_out, right_out = torch.chunk(conv_out, 3, dim=0)
+                visual_features = torch.cat([left_out, center_out, right_out], dim=1)
+            else:
+                img_perm = img_x.permute(0, 3, 1, 2)
+                if self.freeze_backbone:
+                    with torch.no_grad():
+                        x = self.initial_block(img_perm)
+                        for layer in self.layers:
+                            x = layer(x)
+                        single_out = self.pool(x).flatten(start_dim=1)
+                else:
+                    x = self.initial_block(img_perm)
+                    for layer in self.layers:
+                        x = layer(x)
+                    single_out = self.pool(x).flatten(start_dim=1)
+                visual_features = single_out.repeat(1, self.num_cameras)
+        else:
+            if self.freeze_backbone:
+                with torch.no_grad():
+                    x = self.initial_block(img_x)
+                    for layer in self.layers:
+                        x = layer(x)
+                    single_out = self.pool(x).flatten(start_dim=1)
+            else:
                 x = self.initial_block(img_x)
                 for layer in self.layers:
                     x = layer(x)
-                features = self.pool(x).flatten(start_dim=1)
-        else:
-            x = self.initial_block(img_x)
-            for layer in self.layers:
-                x = layer(x)
-            features = self.pool(x).flatten(start_dim=1)
+                single_out = self.pool(x).flatten(start_dim=1)
+            visual_features = single_out.repeat(1, self.num_cameras)
 
         speed_x = speed.float().view(-1, 1) / 50.0
-        combined = torch.cat([features, speed_x], dim=1)
+        combined = torch.cat([visual_features, speed_x], dim=1)
         return self.fc(combined)
 
 class ActorCriticPPO(nn.Module):
@@ -319,6 +388,7 @@ def train():
     parser.add_argument("--checkpoint-dir", type=str, default="/workspace/checkpoints", help="Model checkpoint directory")
     parser.add_argument("--resume", action="store_true", default=False, help="Resume training from latest checkpoint")
     parser.add_argument("--num-vehicles", type=int, default=3, help="Number of surrounding NPC vehicles (lower = less CARLA memory pressure)")
+    parser.add_argument("--num-walkers", type=int, default=10, help="Number of pedestrian walkers in the environment")
     parser.add_argument("--town", type=str, default="Town10HD_Opt", help="CARLA map/town to use for training (default: Town10HD_Opt)")
     parser.add_argument("--reward-clip", type=float, default=50.0, help="Clip raw rewards to [-reward-clip, +reward-clip] before normalization")
     parser.add_argument("--ent-coef", type=float, default=0.02, help="PPO entropy bonus coefficient for continuous exploration")
@@ -332,10 +402,12 @@ def train():
     if torch.cuda.is_available():
         torch.backends.cudnn.benchmark = True
     print(f"==============================================================")
-    print(f"   🚀 Starting Camera-Only PPO Deep RL Training               ")
+    print(f"   🚀 Starting Multi-Camera PPO Deep RL Training              ")
     print(f"==============================================================")
     print(f"Device: {device} | Environment: {args.env_type}")
     print(f"Vision Backbone: {args.backbone.upper()} (Pretrained: {args.use_pretrained}, Frozen: {args.freeze_backbone})")
+    print(f"Sensors: 3-Camera RGB Panorama (Left, Center, Right) + Speed")
+    print(f"NPC Traffic: {args.num_vehicles} Vehicles | {args.num_walkers} Pedestrians")
     if args.weights_path:
         print(f"CARLA Pretrained Checkpoint: {os.path.abspath(args.weights_path)}")
     print(f"Total Steps: {args.total_steps} | Rollout Buffer: {args.rollout_steps}")
@@ -347,7 +419,7 @@ def train():
     if args.env_type == "camera_easycarla":
         easy_params = {
             'number_of_vehicles': args.num_vehicles,
-            'number_of_walkers': 0,
+            'number_of_walkers': args.num_walkers,
             'dt': 0.05,
             'ego_vehicle_filter': 'vehicle.tesla.model3',
             'surrounding_vehicle_spawned_randomly': True,
