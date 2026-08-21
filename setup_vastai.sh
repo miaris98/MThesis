@@ -40,8 +40,9 @@ apt-get install -y --no-install-recommends \
     wget \
     git \
     curl \
+    unzip \
     htop \
-    btop 2>/dev/null || apt-get install -y ffmpeg tmux wget git curl htop
+    btop 2>/dev/null || apt-get install -y ffmpeg tmux wget git curl unzip htop
 
 # Try installing libtiff versions safely (libtiff6 on Ubuntu 24.04, libtiff5 on 20.04/22.04, or libtiff-dev)
 apt-get install -y libtiff6 2>/dev/null || apt-get install -y libtiff5 2>/dev/null || apt-get install -y libtiff-dev 2>/dev/null || true
@@ -148,7 +149,24 @@ pip install "setuptools<80" gymnasium gym numpy pillow opencv-python tensorboard
 echo -e "${YELLOW}--> Installing EasyCarla-RL directly into Python environment...${NC}"
 pip install git+https://github.com/silverwingsbot/EasyCarla-RL.git
 
-echo -e "${GREEN}✓ Python environment, EasyCarla-RL package, and Jupyter kernel configured.${NC}"
+# Auto-download CARLA-domain pretrained vision weights (TransFuser++ / Leaderboard 2.0)
+PRETRAINED_DIR="/workspace/pretrained_carla"
+if [ ! -f "$PRETRAINED_DIR/model_0030_0.pth" ]; then
+    echo -e "${YELLOW}--> Downloading CARLA-domain TransFuser++ pretrained vision weights...${NC}"
+    mkdir -p "$PRETRAINED_DIR"
+    wget -q --show-progress https://s3.eu-central-1.amazonaws.com/avg-projects-2/garage_2/models/pretrained_models.zip -O "$PRETRAINED_DIR/models.zip" || true
+    if [ -f "$PRETRAINED_DIR/models.zip" ]; then
+        unzip -q "$PRETRAINED_DIR/models.zip" -d "$PRETRAINED_DIR/" 2>/dev/null || true
+        rm -f "$PRETRAINED_DIR/models.zip"
+        # Find any extracted model_*.pth and link it to model_0030_0.pth
+        FOUND_PTH=$(find "$PRETRAINED_DIR" -name "model_*.pth" 2>/dev/null | head -n 1)
+        if [ -n "$FOUND_PTH" ] && [ "$FOUND_PTH" != "$PRETRAINED_DIR/model_0030_0.pth" ]; then
+            cp "$FOUND_PTH" "$PRETRAINED_DIR/model_0030_0.pth"
+        fi
+    fi
+fi
+
+echo -e "${GREEN}✓ Python environment, EasyCarla-RL package, and CARLA pretrained vision weights configured.${NC}"
 
 # --- 5. Configure Environment Variables ---
 echo -e "\n${CYAN}[5/7] Configuring environment variables (~/.bashrc & Conda activate hook)...${NC}"

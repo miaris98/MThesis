@@ -92,8 +92,10 @@ class CameraEasyCarlaEnv(gym.Env):
         """Attach RGB camera sensor to ego vehicle."""
         if self.camera_sensor is not None:
             try:
-                self.camera_sensor.stop()
-                self.camera_sensor.destroy()
+                if hasattr(self.camera_sensor, 'is_listening') and self.camera_sensor.is_listening:
+                    self.camera_sensor.stop()
+                if hasattr(self.camera_sensor, 'is_alive') and self.camera_sensor.is_alive:
+                    self.camera_sensor.destroy()
             except Exception:
                 pass
             self.camera_sensor = None
@@ -142,7 +144,26 @@ class CameraEasyCarlaEnv(gym.Env):
         if seed is not None:
             np.random.seed(seed)
 
+        # Stop and destroy camera sensor before resetting underlying EasyCarla env
+        if self.camera_sensor is not None:
+            try:
+                if hasattr(self.camera_sensor, 'is_listening') and self.camera_sensor.is_listening:
+                    self.camera_sensor.stop()
+                if hasattr(self.camera_sensor, 'is_alive') and self.camera_sensor.is_alive:
+                    self.camera_sensor.destroy()
+            except Exception:
+                pass
+            self.camera_sensor = None
+
         self.latest_image = None
+        
+        # Ensure client timeout is set to 60s to prevent 10s reset timeouts
+        if hasattr(self.easy_env, 'world') and self.easy_env.world is not None:
+            try:
+                self.easy_env.world.get_settings()
+            except Exception:
+                pass
+
         # Call underlying EasyCarla reset
         self.easy_env.reset()
         

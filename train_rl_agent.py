@@ -20,22 +20,27 @@ class PretrainedVisionFeatureExtractor(nn.Module):
     ImageNet Pretrained ResNet Feature Extractor for 256x256 RGB Images + Speed State.
     Supports backbone freezing for fast, sample-efficient RL training.
     """
-    def __init__(self, backbone_name="resnet18", features_dim=512, freeze_backbone=True):
+    def __init__(self, backbone_name="resnet18", features_dim=512, freeze_backbone=True, weights_path=None):
         super(PretrainedVisionFeatureExtractor, self).__init__()
         self.freeze_backbone = freeze_backbone
 
         if backbone_name == "resnet34":
-            weights = models.ResNet34_Weights.DEFAULT
-            resnet = models.resnet34(weights=weights)
+            resnet = models.resnet34(weights=models.ResNet34_Weights.DEFAULT if weights_path is None else None)
             backbone_out_dim = 512
         else:
             # Default: ResNet18
-            weights = models.ResNet18_Weights.DEFAULT
-            resnet = models.resnet18(weights=weights)
+            resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT if weights_path is None else None)
             backbone_out_dim = 512
 
         # Remove the final 1000-class FC classification layer
         self.backbone = nn.Sequential(*list(resnet.children())[:-1]) # -> Outputs (N, 512, 1, 1)
+
+        # Optionally load CARLA-domain pretrained checkpoint (.pth)
+        if weights_path is not None and os.path.exists(weights_path):
+            print(f"--> Loading CARLA-domain pretrained vision weights from: {weights_path}")
+            checkpoint = torch.load(weights_path, map_location="cpu")
+            state_dict = checkpoint.get("state_dict", checkpoint.get("model", checkpoint))
+            self.backbone.load_state_dict(state_dict, strict=False)
 
         # Freeze backbone parameters if requested
         if self.freeze_backbone:
@@ -106,14 +111,15 @@ class CNNFeatureExtractor(nn.Module):
 
 class ActorCriticPPO(nn.Module):
     """PPO Actor-Critic Policy Network for Continuous Driving Control."""
-    def __init__(self, action_dim=3, features_dim=512, backbone_name="resnet18", freeze_backbone=True, use_pretrained=True):
+    def __init__(self, action_dim=3, features_dim=512, backbone_name="resnet18", freeze_backbone=True, use_pretrained=True, weights_path=None):
         super(ActorCriticPPO, self).__init__()
         
         if use_pretrained:
             self.encoder = PretrainedVisionFeatureExtractor(
                 backbone_name=backbone_name,
                 features_dim=features_dim,
-                freeze_backbone=freeze_backbone
+                freeze_backbone=freeze_backbone,
+                weights_path=weights_path
             )
         else:
             self.encoder = CNNFeatureExtractor(in_channels=3, features_dim=features_dim)
@@ -160,12 +166,14 @@ def train():
     parser.add_argument("--host", type=str, default="127.0.0.1", help="CARLA host IP")
     parser.add_argument("--port", type=int, default=2000, help="CARLA port")
     parser.add_argument("--env-type", type=str, default="camera_easycarla", choices=["camera_easycarla", "carla_gym"], help="Environment type")
-    parser.add_argument("--backbone", type=str, default="resnet18", choices=["resnet18", "resnet34"], help="Pretrained vision backbone")
+    default_carla_weights = "/workspace/pretrained_carla/model_0030_0.pth" if os.path.exists("/workspace/pretrained_carla/model_0030_0.pth") else None
+    parser.add_argument("--backbone", type=str, default="resnet34", choices=["resnet18", "resnet34"], help="Pretrained vision backbone")
+    parser.add_argument("--weights-path", type=str, default=default_carla_weights, help="Path to custom CARLA pretrained vision checkpoint (.pth)")
     parser.add_argument("--freeze-backbone", action="store_true", default=True, help="Freeze vision backbone parameters")
     parser.add_argument("--no-freeze-backbone", action="store_false", dest="freeze_backbone", help="Fine-tune vision backbone parameters")
     parser.add_argument("--use-pretrained", action="store_true", default=True, help="Use pretrained vision backbone")
     parser.add_argument("--no-pretrained", action="store_false", dest="use_pretrained", help="Train CNN from scratch")
-    
+
     parser.add_argument("--total-steps", type=int, default=2000, help="Total training steps")
     parser.add_argument("--rollout-steps", type=int, default=250, help="Steps per PPO rollout buffer")
     parser.add_argument("--ppo-epochs", type=int, default=4, help="PPO optimization epochs per rollout")
@@ -187,6 +195,8 @@ def train():
     print(f"==============================================================")
     print(f"Device: {device} | Environment: {args.env_type}")
     print(f"Vision Backbone: {args.backbone.upper()} (Pretrained: {args.use_pretrained}, Frozen: {args.freeze_backbone})")
+    if args.weights_path:
+        print(f"CARLA Pretrained Checkpoint: {os.path.abspath(args.weights_path)}")
     print(f"Total Steps: {args.total_steps} | Rollout Buffer: {args.rollout_steps}")
     print(f"TensorBoard Logs: {os.path.abspath(args.log_dir)}")
 
@@ -224,7 +234,8 @@ def train():
         features_dim=512,
         backbone_name=args.backbone,
         freeze_backbone=args.freeze_backbone,
-        use_pretrained=args.use_pretrained
+        use_pretrained=args.use_pretrained,
+        weights_path=args.weights_path
     ).to(device)
 
     optimizer = optim.Adam(agent.parameters(), lr=args.lr)
