@@ -68,6 +68,7 @@ class CameraEasyCarlaEnv(gym.Env):
         self.params = params
         self.img_width = params.get('img_width', 256)
         self.img_height = params.get('img_height', 256)
+        self.stalled_steps = 0
         
         # Check if CARLA server is responsive and running the requested town
         town = params.get('town', 'Town10HD_Opt')
@@ -254,6 +255,7 @@ class CameraEasyCarlaEnv(gym.Env):
             self.camera_sensor = None
 
         self.latest_image = None
+        self.stalled_steps = 0
         
         # Call underlying EasyCarla reset with automatic retry logic & server auto-restart
         for attempt in range(3):
@@ -356,14 +358,31 @@ class CameraEasyCarlaEnv(gym.Env):
         self.easy_env.world.tick()
 
         obs = self._get_obs()
+        speed_kmh = float(obs["speed"][0])
         
+        # Track stationary/stalled steps (< 2.0 km/h)
+        if speed_kmh < 2.0:
+            self.stalled_steps += 1
+        else:
+            self.stalled_steps = 0
+
+        # Terminate episode if car remains stationary/stalled for >= 25 steps (1.25s)
+        is_stalled = bool(self.stalled_steps >= 25)
+        if is_stalled:
+            reward -= 20.0  # Penalty for refusing to drive
+
+        # Positive bonus for forward movement (up to +1.5 reward per step)
+        reward += 1.5 * min(speed_kmh / 25.0, 1.0)
+
         # Combine Gym signals
-        terminated = bool(done or self.easy_env._is_collision or self.easy_env._is_off_road)
+        terminated = bool(done or self.easy_env._is_collision or self.easy_env._is_off_road or is_stalled)
         truncated = bool(self.easy_env.time_step >= self.easy_env.max_time_episode)
 
         # Determine exact human-readable termination reason
         reason = "Active"
-        if self.easy_env._is_collision:
+        if is_stalled:
+            reason = "Stalled / No Movement"
+        elif self.easy_env._is_collision:
             reason = "Collision"
         elif self.easy_env._is_off_road:
             reason = "Lane Deviation / Off-Road"
@@ -377,7 +396,7 @@ class CameraEasyCarlaEnv(gym.Env):
             "is_collision": self.easy_env._is_collision,
             "is_off_road": self.easy_env._is_off_road,
             "termination_reason": reason,
-            "speed_kmh": self._get_speed_kmh()
+            "speed_kmh": speed_kmh
         }
         
         return obs, reward, terminated, truncated, info

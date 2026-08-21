@@ -321,6 +321,7 @@ def train():
     parser.add_argument("--num-vehicles", type=int, default=3, help="Number of surrounding NPC vehicles (lower = less CARLA memory pressure)")
     parser.add_argument("--town", type=str, default="Town10HD_Opt", help="CARLA map/town to use for training (default: Town10HD_Opt)")
     parser.add_argument("--reward-clip", type=float, default=50.0, help="Clip raw rewards to [-reward-clip, +reward-clip] before normalization")
+    parser.add_argument("--ent-coef", type=float, default=0.02, help="PPO entropy bonus coefficient for continuous exploration")
 
     args = parser.parse_args()
 
@@ -531,8 +532,8 @@ def train():
             # Value Loss
             v_loss = 0.5 * ((new_value - b_returns) ** 2).mean()
 
-            # Combined Total Loss
-            total_loss = pg_loss + 0.5 * v_loss - 0.01 * entropy.mean()
+            # Combined Total Loss with exploration entropy bonus
+            total_loss = pg_loss + 0.5 * v_loss - args.ent_coef * entropy.mean()
 
             optimizer.zero_grad()
             total_loss.backward()
