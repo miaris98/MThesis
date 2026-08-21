@@ -228,26 +228,31 @@ class CameraEasyCarlaEnv(gym.Env):
 
         self.latest_image = None
         
-        # Temporarily disable synchronous mode before reset so batch actor cleanup & spawn never deadlocks
-        if hasattr(self, 'carla_client') and self.carla_client is not None:
-            try:
-                self.carla_client.set_timeout(60.0)
-                temp_world = self.carla_client.get_world()
-                settings = temp_world.get_settings()
-                if settings.synchronous_mode:
-                    settings.synchronous_mode = False
-                    temp_world.apply_settings(settings)
-            except Exception:
-                pass
-
-        # Call underlying EasyCarla reset with automatic retry logic
+        # Call underlying EasyCarla reset with automatic retry logic & server auto-restart
         for attempt in range(3):
             try:
+                if hasattr(self, 'carla_client') and self.carla_client is not None:
+                    try:
+                        self.carla_client.set_timeout(15.0)
+                        temp_world = self.carla_client.get_world()
+                        settings = temp_world.get_settings()
+                        if settings.synchronous_mode:
+                            settings.synchronous_mode = False
+                            temp_world.apply_settings(settings)
+                    except Exception:
+                        pass
                 self.easy_env.reset()
                 break
             except Exception as e:
-                print(f"Warning: CARLA environment reset attempt {attempt+1}/3 failed ({e}). Retrying reset...")
-                time.sleep(2.0)
+                print(f"Warning: CARLA reset attempt {attempt+1}/3 failed ({e}). Auto-restarting CARLA engine...")
+                if os.path.exists("/workspace/carla/CarlaUE4.sh"):
+                    os.system("pkill -9 -f CarlaUE4 2>/dev/null || true")
+                    os.system("tmux kill-session -t carla_server 2>/dev/null || true")
+                    os.system("tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
+                    time.sleep(8)
+                    port = self.params.get('port', 2000)
+                    self.carla_client = carla.Client('127.0.0.1', port)
+                    self.carla_client.set_timeout(60.0)
         
         # Attach camera sensor to newly spawned ego vehicle
         self._setup_camera()
