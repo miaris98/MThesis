@@ -151,7 +151,7 @@ pip install git+https://github.com/silverwingsbot/EasyCarla-RL.git
 echo -e "${GREEN}✓ Python environment, EasyCarla-RL package, and Jupyter kernel configured.${NC}"
 
 # --- 5. Configure Environment Variables ---
-echo -e "\n${CYAN}[5/7] Configuring environment variables (~/.bashrc)...${NC}"
+echo -e "\n${CYAN}[5/7] Configuring environment variables (~/.bashrc & Conda activate hook)...${NC}"
 EGG_PATH=$(ls /workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg 2>/dev/null | tail -n 1)
 
 if ! grep -q "CARLA_ROOT=/workspace/carla" ~/.bashrc; then
@@ -167,7 +167,15 @@ if [ -n "$EGG_PATH" ]; then
     export PYTHONPATH="$EGG_PATH:/workspace/carla/PythonAPI/carla:$PYTHONPATH"
 fi
 
-echo -e "${GREEN}✓ Environment variables configured.${NC}"
+# Configure Conda environment activation hook so 'import carla' works automatically whenever carla_py38 is activated
+CONDA_ENV_PATH=$(python -c "import sys; print(sys.prefix)" 2>/dev/null)
+if [ -n "$CONDA_ENV_PATH" ]; then
+    mkdir -p "$CONDA_ENV_PATH/etc/conda/activate.d"
+    echo 'export CARLA_ROOT=/workspace/carla' > "$CONDA_ENV_PATH/etc/conda/activate.d/env_vars.sh"
+    echo "export PYTHONPATH=\"$EGG_PATH:/workspace/carla/PythonAPI/carla:\$PYTHONPATH\"" >> "$CONDA_ENV_PATH/etc/conda/activate.d/env_vars.sh"
+fi
+
+echo -e "${GREEN}✓ Environment variables and Conda activation hooks configured.${NC}"
 
 # --- 6. Launch CARLA Server in Background (tmux) ---
 echo -e "\n${CYAN}[6/7] Checking and launching CARLA Server...${NC}"
