@@ -230,13 +230,19 @@ class ActorCriticPPO(nn.Module):
         else:
             self.encoder = CNNFeatureExtractor(in_channels=3, features_dim=features_dim)
 
-        # Actor Head: Outputs mean action [throttle/brake or steer]
+        # Actor Head: Outputs mean action [throttle, steer, brake]
         self.actor_mean = nn.Sequential(
             nn.Linear(features_dim, 128),
             nn.ReLU(),
             nn.Linear(128, action_dim),
             nn.Tanh()
         )
+        
+        # Initialize actor final linear layer bias so initial throttle starts positive
+        with torch.no_grad():
+            self.actor_mean[2].bias.data[0] = 0.5  # Positive initial throttle
+            self.actor_mean[2].bias.data[1] = 0.0  # Neutral steer
+            self.actor_mean[2].bias.data[2] = -0.5 # Negative initial brake
         
         # Learned Log Standard Deviation for continuous action exploration
         self.actor_log_std = nn.Parameter(torch.zeros(action_dim))

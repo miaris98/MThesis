@@ -173,8 +173,8 @@ def record_multiview_eval(
                     action, _, _, _ = agent.get_action_and_value(img_tensor, spd_tensor)
                 act = action.cpu().numpy()[0]
                 control = carla.VehicleControl(
-                    steer=float(np.clip(act[0], -1.0, 1.0)),
-                    throttle=float(np.clip(act[1], 0.0, 1.0)),
+                    throttle=float(np.clip(act[0], 0.0, 1.0)),
+                    steer=float(np.clip(act[1], -1.0, 1.0)),
                     brake=float(np.clip(act[2], 0.0, 1.0))
                 )
                 ego_vehicle.apply_control(control)
