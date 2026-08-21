@@ -69,8 +69,24 @@ class CameraEasyCarlaEnv(gym.Env):
         self.img_width = params.get('img_width', 256)
         self.img_height = params.get('img_height', 256)
         
-        # Pre-connect to CARLA to unstick server if left in synchronous mode by a previous process
+        # Check if CARLA server is responsive; auto-restart if frozen from a previous aborted script
         port = params.get('port', 2000)
+        server_ok = False
+        try:
+            test_c = carla.Client('127.0.0.1', port)
+            test_c.set_timeout(3.0)
+            test_c.get_server_version()
+            server_ok = True
+        except Exception:
+            server_ok = False
+
+        if not server_ok and os.path.exists("/workspace/carla/CarlaUE4.sh"):
+            print("--> CARLA server is unresponsive or frozen. Auto-restarting CARLA server session...")
+            os.system("pkill -9 -f CarlaUE4 2>/dev/null || true")
+            os.system("tmux kill-session -t carla_server 2>/dev/null || true")
+            os.system("tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
+            time.sleep(8)
+
         self.carla_client = carla.Client('127.0.0.1', port)
         self.carla_client.set_timeout(60.0)
         try:
