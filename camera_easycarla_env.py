@@ -183,8 +183,18 @@ class CameraEasyCarlaEnv(gym.Env):
 
     def step(self, action):
         """Step environment with continuous action [throttle, steer, brake]."""
+        # Map policy Tanh output [-1, 1] to vehicle control ranges:
+        # action[0] (throttle): [-1, 1] -> [0.0, 1.0] (neutral 0.0 maps to 0.5 gas)
+        # action[1] (steer):    [-1, 1] -> [-1.0, 1.0]
+        # action[2] (brake):    [-1, 1] -> [0.0, 1.0] (only active if > 0.2)
+        scaled_action = [
+            float(np.clip((action[0] + 1.0) / 2.0, 0.0, 1.0)),
+            float(np.clip(action[1], -1.0, 1.0)),
+            float(np.clip((action[2] - 0.2) / 0.8, 0.0, 1.0)) if action[2] > 0.2 else 0.0
+        ]
+
         # Step underlying EasyCarla environment
-        easy_obs, reward, cost, done, easy_info = self.easy_env.step(action)
+        easy_obs, reward, cost, done, easy_info = self.easy_env.step(scaled_action)
 
         # Tick world to trigger camera update
         self.easy_env.world.tick()

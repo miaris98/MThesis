@@ -172,10 +172,13 @@ def record_multiview_eval(
                 with torch.no_grad():
                     action, _, _, _ = agent.get_action_and_value(img_tensor, spd_tensor)
                 act = action.cpu().numpy()[0]
+                scaled_throttle = float(np.clip((act[0] + 1.0) / 2.0, 0.0, 1.0))
+                scaled_steer = float(np.clip(act[1], -1.0, 1.0))
+                scaled_brake = float(np.clip((act[2] - 0.2) / 0.8, 0.0, 1.0)) if act[2] > 0.2 else 0.0
                 control = carla.VehicleControl(
-                    throttle=float(np.clip(act[0], 0.0, 1.0)),
-                    steer=float(np.clip(act[1], -1.0, 1.0)),
-                    brake=float(np.clip(act[2], 0.0, 1.0))
+                    throttle=scaled_throttle,
+                    steer=scaled_steer,
+                    brake=scaled_brake
                 )
                 ego_vehicle.apply_control(control)
 
