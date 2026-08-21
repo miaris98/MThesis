@@ -44,6 +44,11 @@ def main():
         world = client.get_world()
         map_name = world.get_map().name
         print(f"Current Map: {map_name}")
+        try:
+            available_maps = client.get_available_maps()
+            print(f"Available Maps on Server ({len(available_maps)}): {', '.join(available_maps)}")
+        except Exception:
+            pass
     except Exception as e:
         print(f"Failed to connect to Carla: {e}")
         sys.exit(1)

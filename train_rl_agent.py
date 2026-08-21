@@ -319,7 +319,7 @@ def train():
     parser.add_argument("--checkpoint-dir", type=str, default="/workspace/checkpoints", help="Model checkpoint directory")
     parser.add_argument("--resume", action="store_true", default=False, help="Resume training from latest checkpoint")
     parser.add_argument("--num-vehicles", type=int, default=3, help="Number of surrounding NPC vehicles (lower = less CARLA memory pressure)")
-    parser.add_argument("--town", type=str, default="Town03", help="CARLA map/town to use for training")
+    parser.add_argument("--town", type=str, default="Town10HD_Opt", help="CARLA map/town to use for training (default: Town10HD_Opt)")
     parser.add_argument("--reward-clip", type=float, default=50.0, help="Clip raw rewards to [-reward-clip, +reward-clip] before normalization")
 
     args = parser.parse_args()
