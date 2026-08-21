@@ -5,9 +5,17 @@ def main():
     parser = argparse.ArgumentParser(description="Test connection to Carla Simulator.")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Carla host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=2000, help="Carla port (default: 2000)")
-    parser.add_argument("--timeout", type=float, default=10.0, help="Connection timeout in seconds")
+    parser.add_argument("--restart", action="store_true", help="Auto-restart CARLA server if connection fails or requested")
+    parser.add_argument("--town", type=str, default="Town10HD_Opt", help="Map to load on restart")
     
     args = parser.parse_args()
+
+    if args.restart and os.path.exists("/workspace/carla/CarlaUE4.sh"):
+        print(f"--> Restarting CARLA server session on map {args.town}...")
+        os.system("pkill -9 -f CarlaUE4 2>/dev/null || true")
+        os.system("tmux kill-session -t carla_server 2>/dev/null || true")
+        os.system(f"tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh /Game/Carla/Maps/{args.town} -carla-port={args.port} -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
+        time.sleep(10)
     
     import glob
     import os

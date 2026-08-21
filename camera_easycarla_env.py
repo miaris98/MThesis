@@ -147,12 +147,24 @@ class CameraEasyCarlaEnv(gym.Env):
             carla.Client.set_timeout = orig_set_timeout
             carla.Client.load_world = orig_load_world
 
-        # Ensure underlying client timeout is 60s
-        if hasattr(self.easy_env, 'world') and self.easy_env.world is not None:
-            try:
-                self.easy_env.world.get_client().set_timeout(60.0)
-            except Exception:
-                pass
+        # Attach safe atomic batch actor destruction to EasyCarla to prevent synchronous actor destruction deadlocks
+        def safe_clear_all_actors(actor_filters):
+            batch = []
+            for actor_filter in actor_filters:
+                for actor in self.easy_env.world.get_actors().filter(actor_filter):
+                    try:
+                        if 'sensor' in actor.type_id:
+                            actor.stop()
+                    except Exception:
+                        pass
+                    batch.append(carla.command.DestroyActor(actor.id))
+            if batch:
+                try:
+                    self.carla_client.apply_batch(batch)
+                except Exception:
+                    pass
+
+        self.easy_env._clear_all_actors = safe_clear_all_actors
         
         # Define Action Space: [throttle (0 to 1), steer (-1 to 1), brake (0 to 1)]
         self.action_space = spaces.Box(
@@ -288,9 +300,23 @@ class CameraEasyCarlaEnv(gym.Env):
                                 pass
                             return orig_load_world(client_self, town_name, reset_settings)
 
-                        carla.Client.set_timeout = patched_set_timeout
-                        carla.Client.load_world = patched_load_world
                         self.easy_env = CarlaEnv(self.params)
+                        def safe_clear_all_actors(actor_filters):
+                            batch = []
+                            for actor_filter in actor_filters:
+                                for actor in self.easy_env.world.get_actors().filter(actor_filter):
+                                    try:
+                                        if 'sensor' in actor.type_id:
+                                            actor.stop()
+                                    except Exception:
+                                        pass
+                                    batch.append(carla.command.DestroyActor(actor.id))
+                            if batch:
+                                try:
+                                    self.carla_client.apply_batch(batch)
+                                except Exception:
+                                    pass
+                        self.easy_env._clear_all_actors = safe_clear_all_actors
                     except (Exception, BaseException) as re_err:
                         print(f"Re-initialization error: {re_err}")
                     finally:
