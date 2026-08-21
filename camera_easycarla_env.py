@@ -69,8 +69,31 @@ class CameraEasyCarlaEnv(gym.Env):
         self.img_width = params.get('img_width', 256)
         self.img_height = params.get('img_height', 256)
         
+        # Pre-connect to CARLA to unstick server if left in synchronous mode by a previous process
+        port = params.get('port', 2000)
+        try:
+            temp_client = carla.Client('127.0.0.1', port)
+            temp_client.set_timeout(10.0)
+            temp_world = temp_client.get_world()
+            temp_settings = temp_world.get_settings()
+            if temp_settings.synchronous_mode:
+                temp_settings.synchronous_mode = False
+                temp_world.apply_settings(temp_settings)
+            active_map = temp_world.get_map().name
+            if params['town'] in active_map:
+                params['town'] = active_map
+        except Exception:
+            pass
+
         # Instantiate underlying EasyCarla environment
         self.easy_env = CarlaEnv(params)
+        
+        # Ensure underlying client timeout is 60s
+        if hasattr(self.easy_env, 'world') and self.easy_env.world is not None:
+            try:
+                self.easy_env.world.get_client().set_timeout(60.0)
+            except Exception:
+                pass
         
         # Define Action Space: [throttle (0 to 1), steer (-1 to 1), brake (0 to 1)]
         self.action_space = spaces.Box(
