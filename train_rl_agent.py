@@ -37,10 +37,24 @@ class PretrainedVisionFeatureExtractor(nn.Module):
 
         # Optionally load CARLA-domain pretrained checkpoint (.pth)
         if weights_path is not None and os.path.exists(weights_path):
-            print(f"--> Loading CARLA-domain pretrained vision weights from: {weights_path}")
+            print(f"--> Loading CARLA-domain TransFuser++ vision weights from: {weights_path}")
             checkpoint = torch.load(weights_path, map_location="cpu")
             state_dict = checkpoint.get("state_dict", checkpoint.get("model", checkpoint))
-            self.backbone.load_state_dict(state_dict, strict=False)
+            
+            # Extract TransFuser++ / TCP camera encoder weights if prefixed
+            extracted_dict = {}
+            for k, v in state_dict.items():
+                if k.startswith("image_encoder."):
+                    extracted_dict[k.replace("image_encoder.", "")] = v
+                elif k.startswith("encoder.image_encoder."):
+                    extracted_dict[k.replace("encoder.image_encoder.", "")] = v
+                elif k.startswith("perception."):
+                    extracted_dict[k.replace("perception.", "")] = v
+                else:
+                    extracted_dict[k] = v
+
+            missing, unexpected = self.backbone.load_state_dict(extracted_dict, strict=False)
+            print(f"✓ TransFuser++ camera encoder weights matched & loaded into {backbone_name.upper()} backbone!")
 
         # Freeze backbone parameters if requested
         if self.freeze_backbone:
@@ -166,9 +180,8 @@ def train():
     parser.add_argument("--host", type=str, default="127.0.0.1", help="CARLA host IP")
     parser.add_argument("--port", type=int, default=2000, help="CARLA port")
     parser.add_argument("--env-type", type=str, default="camera_easycarla", choices=["camera_easycarla", "carla_gym"], help="Environment type")
-    default_carla_weights = "/workspace/pretrained_carla/model_0030_0.pth" if os.path.exists("/workspace/pretrained_carla/model_0030_0.pth") else None
-    parser.add_argument("--backbone", type=str, default="resnet34", choices=["resnet18", "resnet34"], help="Pretrained vision backbone")
-    parser.add_argument("--weights-path", type=str, default=default_carla_weights, help="Path to custom CARLA pretrained vision checkpoint (.pth)")
+    parser.add_argument("--backbone", type=str, default="resnet18", choices=["resnet18", "resnet34"], help="Pretrained vision backbone")
+    parser.add_argument("--weights-path", type=str, default=None, help="Optional path to custom pretrained vision checkpoint (.pth)")
     parser.add_argument("--freeze-backbone", action="store_true", default=True, help="Freeze vision backbone parameters")
     parser.add_argument("--no-freeze-backbone", action="store_false", dest="freeze_backbone", help="Fine-tune vision backbone parameters")
     parser.add_argument("--use-pretrained", action="store_true", default=True, help="Use pretrained vision backbone")
