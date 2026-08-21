@@ -73,7 +73,7 @@ class CameraEasyCarlaEnv(gym.Env):
         port = params.get('port', 2000)
         try:
             temp_client = carla.Client('127.0.0.1', port)
-            temp_client.set_timeout(3.0)
+            temp_client.set_timeout(5.0)
             temp_world = temp_client.get_world()
             try:
                 temp_world.tick()
@@ -83,15 +83,39 @@ class CameraEasyCarlaEnv(gym.Env):
             if temp_settings.synchronous_mode:
                 temp_settings.synchronous_mode = False
                 temp_world.apply_settings(temp_settings)
-            active_map = temp_world.get_map().name.split('/')[-1]
-            if params['town'] in active_map:
-                params['town'] = active_map
         except Exception:
             pass
 
-        # Instantiate underlying EasyCarla environment
-        self.easy_env = CarlaEnv(params)
-        
+        # Monkey-patch carla.Client during EasyCarla initialization to use 60s timeout and re-use active world map
+        orig_set_timeout = carla.Client.set_timeout
+        orig_load_world = carla.Client.load_world
+
+        def patched_set_timeout(client_self, timeout):
+            orig_set_timeout(client_self, max(timeout, 60.0))
+
+        def patched_load_world(client_self, town_name, reset_settings=True):
+            orig_set_timeout(client_self, 60.0)
+            try:
+                current_map = client_self.get_world().get_map().name
+                if town_name in current_map:
+                    print(f"✓ CARLA server is already running {current_map}. Re-using active world!")
+                    return client_self.get_world()
+            except Exception:
+                pass
+            print(f"--> Loading CARLA map {town_name} with 60s timeout...")
+            return orig_load_world(client_self, town_name, reset_settings)
+
+        carla.Client.set_timeout = patched_set_timeout
+        carla.Client.load_world = patched_load_world
+
+        try:
+            # Instantiate underlying EasyCarla environment
+            self.easy_env = CarlaEnv(params)
+        finally:
+            # Restore original methods
+            carla.Client.set_timeout = orig_set_timeout
+            carla.Client.load_world = orig_load_world
+
         # Ensure underlying client timeout is 60s
         if hasattr(self.easy_env, 'world') and self.easy_env.world is not None:
             try:
