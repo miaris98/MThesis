@@ -678,9 +678,11 @@ def train():
         writer.add_scalar("Loss/Value", np.mean(value_losses), global_step)
         print(f"--- Rollout Update Complete | Step: {global_step}/{args.total_steps} | Policy Loss: {np.mean(policy_losses):.4f} | Value Loss: {np.mean(value_losses):.4f} ---")
 
-        # Save Latest Checkpoint
+        # Save Latest Checkpoint & State Metadata
         latest_path = os.path.join(args.checkpoint_dir, "ppo_carla_latest.pth")
         torch.save(agent.state_dict(), latest_path)
+        with open(os.path.join(args.checkpoint_dir, "train_state.json"), "w") as f:
+            json.dump({"global_step": global_step, "best_episode_reward": best_episode_reward}, f)
 
     env.close()
     writer.close()
