@@ -255,7 +255,7 @@ class ActorCriticPPO(nn.Module):
             nn.Linear(128, 1)
         )
 
-    def get_action_and_value(self, image, speed, action=None):
+    def get_action_and_value(self, image, speed, action=None, deterministic=False):
         features = self.encoder(image, speed)
         action_mean = self.actor_mean(features)
         
@@ -264,7 +264,7 @@ class ActorCriticPPO(nn.Module):
         dist = Normal(action_mean, action_std)
         
         if action is None:
-            action = dist.sample()
+            action = action_mean if deterministic else dist.sample()
             
         log_prob = dist.log_prob(action).sum(axis=-1)
         entropy = dist.entropy().sum(axis=-1)

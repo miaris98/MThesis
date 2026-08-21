@@ -175,10 +175,10 @@ def record_eval_video(
     chase_frame_buffer = [None]
 
     def setup_chase_camera():
+        chase_frame_buffer[0] = None
         if chase_cam_holder[0] is not None:
             try:
                 chase_cam_holder[0].stop()
-                chase_cam_holder[0].destroy()
             except Exception:
                 pass
             chase_cam_holder[0] = None
@@ -188,7 +188,7 @@ def record_eval_video(
         chase_bp.set_attribute("image_size_y", str(chase_h))
         chase_bp.set_attribute("fov", "95")
         chase_tf = carla.Transform(carla.Location(x=-5.5, z=2.5), carla.Rotation(pitch=-12.0))
-        chase_cam = world.spawn_actor(chase_bp, chase_tf, attach_to=env.easy_env.ego)
+        chase_cam = env.easy_env.world.spawn_actor(chase_bp, chase_tf, attach_to=env.easy_env.ego)
 
         def _on_chase_img(img):
             arr = np.frombuffer(img.raw_data, dtype=np.uint8)
@@ -230,12 +230,12 @@ def record_eval_video(
             speed_kmh = float(obs["speed"][0])
             episode_speeds.append(speed_kmh)
 
-            # Model Inference
+            # Model Inference with deterministic mean action (no exploratory noise)
             img_tensor = torch.as_tensor(model_rgb_input, dtype=torch.uint8, device=device).unsqueeze(0)
             spd_tensor = torch.as_tensor([speed_kmh], dtype=torch.float32, device=device).unsqueeze(0)
 
             with torch.inference_mode():
-                action, _, _, _ = agent.get_action_and_value(img_tensor, spd_tensor)
+                action, _, _, _ = agent.get_action_and_value(img_tensor, spd_tensor, deterministic=True)
             
             act = action.cpu().numpy()[0]
             throttle_val = float(np.clip((act[0] + 1.0) / 2.0, 0.0, 1.0))
