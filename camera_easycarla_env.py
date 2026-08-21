@@ -318,18 +318,27 @@ class CameraEasyCarlaEnv(gym.Env):
             except (Exception, BaseException):
                 pass
 
-        # 2. Stop and destroy camera sensor safely via batch command
-        if self.camera_sensor is not None:
+        # 2. Stop and destroy 3-camera sensors safely via batch command
+        cam_destroy_cmds = []
+        for cam_key in ["left", "center", "right"]:
+            sensor = self.camera_sensors.get(cam_key)
+            if sensor is not None:
+                try:
+                    if hasattr(sensor, 'is_listening') and sensor.is_listening:
+                        sensor.stop()
+                    if hasattr(sensor, 'is_alive') and sensor.is_alive:
+                        cam_destroy_cmds.append(carla.command.DestroyActor(sensor.id))
+                except (Exception, BaseException):
+                    pass
+                self.camera_sensors[cam_key] = None
+
+        if cam_destroy_cmds and hasattr(self, 'carla_client') and self.carla_client is not None:
             try:
-                if hasattr(self.camera_sensor, 'is_listening') and self.camera_sensor.is_listening:
-                    self.camera_sensor.stop()
-                if hasattr(self.camera_sensor, 'is_alive') and self.camera_sensor.is_alive:
-                    self.carla_client.apply_batch([carla.command.DestroyActor(self.camera_sensor.id)])
+                self.carla_client.apply_batch(cam_destroy_cmds)
             except (Exception, BaseException):
                 pass
-            self.camera_sensor = None
 
-        self.latest_image = None
+        self.latest_images = {"left": None, "center": None, "right": None}
         self.stalled_steps = 0
         
         # 3. Call underlying EasyCarla reset with automatic retry logic & server auto-restart
