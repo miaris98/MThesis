@@ -148,7 +148,7 @@ class CameraEasyCarlaEnv(gym.Env):
             carla.Client.set_timeout = orig_set_timeout
             carla.Client.load_world = orig_load_world
 
-        # Attach safe atomic batch actor destruction to EasyCarla to prevent synchronous actor destruction deadlocks
+        # Attach safe atomic batch actor destruction with render pipeline draining
         def safe_clear_all_actors(actor_filters):
             batch = []
             for actor_filter in actor_filters:
@@ -159,6 +159,13 @@ class CameraEasyCarlaEnv(gym.Env):
                     except Exception:
                         pass
                     batch.append(carla.command.DestroyActor(actor.id))
+            
+            # Drain render thread in-flight frames before deleting memory to prevent Signal 11 crashes
+            try:
+                self.easy_env.world.tick()
+            except Exception:
+                pass
+
             if batch:
                 try:
                     self.carla_client.apply_batch(batch)
@@ -243,33 +250,35 @@ class CameraEasyCarlaEnv(gym.Env):
         if seed is not None:
             np.random.seed(seed)
 
-        # Stop and destroy camera sensor before resetting underlying EasyCarla env
+        # 1. Temporarily switch OFF synchronous mode so all cleanup and destruction happens asynchronously in 0.01s!
+        if hasattr(self, 'carla_client') and self.carla_client is not None:
+            try:
+                self.carla_client.set_timeout(10.0)
+                temp_world = self.carla_client.get_world()
+                settings = temp_world.get_settings()
+                if settings.synchronous_mode:
+                    settings.synchronous_mode = False
+                    temp_world.apply_settings(settings)
+            except (Exception, BaseException):
+                pass
+
+        # 2. Stop and destroy camera sensor safely via batch command
         if self.camera_sensor is not None:
             try:
                 if hasattr(self.camera_sensor, 'is_listening') and self.camera_sensor.is_listening:
                     self.camera_sensor.stop()
                 if hasattr(self.camera_sensor, 'is_alive') and self.camera_sensor.is_alive:
-                    self.camera_sensor.destroy()
-            except Exception:
+                    self.carla_client.apply_batch([carla.command.DestroyActor(self.camera_sensor.id)])
+            except (Exception, BaseException):
                 pass
             self.camera_sensor = None
 
         self.latest_image = None
         self.stalled_steps = 0
         
-        # Call underlying EasyCarla reset with automatic retry logic & server auto-restart
+        # 3. Call underlying EasyCarla reset with automatic retry logic & server auto-restart
         for attempt in range(3):
             try:
-                if hasattr(self, 'carla_client') and self.carla_client is not None:
-                    try:
-                        self.carla_client.set_timeout(10.0)
-                        temp_world = self.carla_client.get_world()
-                        settings = temp_world.get_settings()
-                        if settings.synchronous_mode:
-                            settings.synchronous_mode = False
-                            temp_world.apply_settings(settings)
-                    except (Exception, BaseException):
-                        pass
                 self.easy_env.reset()
                 break
             except (Exception, BaseException) as e:
@@ -284,24 +293,27 @@ class CameraEasyCarlaEnv(gym.Env):
                     self.carla_client = carla.Client('127.0.0.1', port)
                     self.carla_client.set_timeout(60.0)
 
-                    # Re-create underlying CarlaEnv on fresh server instance
+                    # Re-create underlying CarlaEnv on fresh server instance with patch applied
+                    orig_set_timeout = carla.Client.set_timeout
+                    orig_load_world = carla.Client.load_world
+
+                    def patched_set_timeout(client_self, timeout):
+                        orig_set_timeout(client_self, max(timeout, 60.0))
+
+                    def patched_load_world(client_self, town_name, reset_settings=True):
+                        orig_set_timeout(client_self, 60.0)
+                        try:
+                            current_map = client_self.get_world().get_map().name
+                            if town_name in current_map:
+                                return client_self.get_world()
+                        except (Exception, BaseException):
+                            pass
+                        return orig_load_world(client_self, town_name, reset_settings)
+
+                    carla.Client.set_timeout = patched_set_timeout
+                    carla.Client.load_world = patched_load_world
+
                     try:
-                        orig_set_timeout = carla.Client.set_timeout
-                        orig_load_world = carla.Client.load_world
-
-                        def patched_set_timeout(client_self, timeout):
-                            orig_set_timeout(client_self, max(timeout, 60.0))
-
-                        def patched_load_world(client_self, town_name, reset_settings=True):
-                            orig_set_timeout(client_self, 60.0)
-                            try:
-                                current_map = client_self.get_world().get_map().name
-                                if town_name in current_map:
-                                    return client_self.get_world()
-                            except (Exception, BaseException):
-                                pass
-                            return orig_load_world(client_self, town_name, reset_settings)
-
                         self.easy_env = CarlaEnv(self.params)
                         def safe_clear_all_actors(actor_filters):
                             batch = []
@@ -313,6 +325,10 @@ class CameraEasyCarlaEnv(gym.Env):
                                     except Exception:
                                         pass
                                     batch.append(carla.command.DestroyActor(actor.id))
+                            try:
+                                self.easy_env.world.tick()
+                            except Exception:
+                                pass
                             if batch:
                                 try:
                                     self.carla_client.apply_batch(batch)
