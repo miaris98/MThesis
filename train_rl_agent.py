@@ -123,18 +123,110 @@ class CNNFeatureExtractor(nn.Module):
         combined = torch.cat([conv_out, speed_x], dim=1)
         return self.fc(combined)
 
+# --- ERFNet CARLA Camera Feature Extractor ---
+
+class DownsamplerBlock(nn.Module):
+    def __init__(self, ninput, noutput):
+        super().__init__()
+        self.conv = nn.Conv2d(ninput, noutput-ninput, (3, 3), stride=2, padding=1, bias=True)
+        self.pool = nn.MaxPool2d(2, stride=2)
+        self.bn = nn.BatchNorm2d(noutput, eps=1e-3)
+
+    def forward(self, input_tensor):
+        output = torch.cat([self.conv(input_tensor), self.pool(input_tensor)], 1)
+        output = self.bn(output)
+        return F.relu(output)
+
+class NonBottleneck1D(nn.Module):
+    def __init__(self, chann, dropprob, dilated):
+        super().__init__()
+        self.conv3x1_1 = nn.Conv2d(chann, chann, (3, 1), stride=1, padding=(1,0), bias=True)
+        self.conv1x3_1 = nn.Conv2d(chann, chann, (1,3), stride=1, padding=(0,1), bias=True)
+        self.bn1 = nn.BatchNorm2d(chann, eps=1e-03)
+        self.conv3x1_2 = nn.Conv2d(chann, chann, (3, 1), stride=1, padding=(dilated,0), bias=True, dilation=(dilated,1))
+        self.conv1x3_2 = nn.Conv2d(chann, chann, (1,3), stride=1, padding=(0,dilated), bias=True, dilation=(1,dilated))
+        self.bn2 = nn.BatchNorm2d(chann, eps=1e-03)
+        self.dropout = nn.Dropout2d(dropprob)
+
+    def forward(self, input_tensor):
+        output = F.relu(self.conv3x1_1(input_tensor))
+        output = self.bn1(F.relu(self.conv1x3_1(output)))
+        output = F.relu(self.conv3x1_2(output))
+        output = self.bn2(self.conv1x3_2(output))
+        if self.dropout.p != 0:
+            output = self.dropout(output)
+        return F.relu(output + input_tensor)
+
+class ERFNetFeatureExtractor(nn.Module):
+    """ERFNet Camera Feature Extractor for CARLA Semantic Perception."""
+    def __init__(self, features_dim=512, freeze_backbone=True, weights_path=None):
+        super(ERFNetFeatureExtractor, self).__init__()
+        self.freeze_backbone = freeze_backbone
+        
+        self.initial_block = DownsamplerBlock(3, 16)
+        self.layers = nn.ModuleList()
+        self.layers.append(DownsamplerBlock(16, 64))
+        for _ in range(5):
+            self.layers.append(NonBottleneck1D(64, 0.03, 1))
+        self.layers.append(DownsamplerBlock(64, 128))
+        for _ in range(2):
+            self.layers.append(NonBottleneck1D(128, 0.3, 2))
+            self.layers.append(NonBottleneck1D(128, 0.3, 4))
+            self.layers.append(NonBottleneck1D(128, 0.3, 8))
+            self.layers.append(NonBottleneck1D(128, 0.3, 16))
+
+        if weights_path is not None and os.path.exists(weights_path):
+            print(f"--> Loading ERFNet CARLA camera weights from: {weights_path}")
+            checkpoint = torch.load(weights_path, map_location="cpu")
+            state_dict = checkpoint.get("state_dict", checkpoint.get("model", checkpoint))
+            self.load_state_dict(state_dict, strict=False)
+
+        if self.freeze_backbone:
+            for param in self.parameters():
+                param.requires_grad = False
+
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Sequential(
+            nn.Linear(128 + 1, features_dim),
+            nn.ReLU()
+        )
+
+    def forward(self, image, speed):
+        img_x = image.float() / 255.0
+        if img_x.ndim == 4 and img_x.shape[-1] == 3:
+            img_x = img_x.permute(0, 3, 1, 2)
+
+        if self.freeze_backbone:
+            with torch.no_grad():
+                x = self.initial_block(img_x)
+                for layer in self.layers:
+                    x = layer(x)
+                features = self.pool(x).flatten(start_dim=1)
+        else:
+            x = self.initial_block(img_x)
+            for layer in self.layers:
+                x = layer(x)
+            features = self.pool(x).flatten(start_dim=1)
+
+        speed_x = speed.float().view(-1, 1) / 50.0
+        combined = torch.cat([features, speed_x], dim=1)
+        return self.fc(combined)
+
 class ActorCriticPPO(nn.Module):
     """PPO Actor-Critic Policy Network for Continuous Driving Control."""
     def __init__(self, action_dim=3, features_dim=512, backbone_name="resnet18", freeze_backbone=True, use_pretrained=True, weights_path=None):
         super(ActorCriticPPO, self).__init__()
         
         if use_pretrained:
-            self.encoder = PretrainedVisionFeatureExtractor(
-                backbone_name=backbone_name,
-                features_dim=features_dim,
-                freeze_backbone=freeze_backbone,
-                weights_path=weights_path
-            )
+            if backbone_name == "erfnet":
+                self.encoder = ERFNetFeatureExtractor(features_dim=features_dim, freeze_backbone=freeze_backbone, weights_path=weights_path)
+            else:
+                self.encoder = PretrainedVisionFeatureExtractor(
+                    backbone_name=backbone_name,
+                    features_dim=features_dim,
+                    freeze_backbone=freeze_backbone,
+                    weights_path=weights_path
+                )
         else:
             self.encoder = CNNFeatureExtractor(in_channels=3, features_dim=features_dim)
 
@@ -180,7 +272,7 @@ def train():
     parser.add_argument("--host", type=str, default="127.0.0.1", help="CARLA host IP")
     parser.add_argument("--port", type=int, default=2000, help="CARLA port")
     parser.add_argument("--env-type", type=str, default="camera_easycarla", choices=["camera_easycarla", "carla_gym"], help="Environment type")
-    parser.add_argument("--backbone", type=str, default="resnet18", choices=["resnet18", "resnet34"], help="Pretrained vision backbone")
+    parser.add_argument("--backbone", type=str, default="resnet18", choices=["resnet18", "resnet34", "lav", "erfnet"], help="Pretrained vision backbone (resnet18, resnet34, lav, erfnet)")
     parser.add_argument("--weights-path", type=str, default=None, help="Optional path to custom pretrained vision checkpoint (.pth)")
     parser.add_argument("--freeze-backbone", action="store_true", default=True, help="Freeze vision backbone parameters")
     parser.add_argument("--no-freeze-backbone", action="store_false", dest="freeze_backbone", help="Fine-tune vision backbone parameters")

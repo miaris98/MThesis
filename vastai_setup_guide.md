@@ -228,19 +228,21 @@ python train_rl_agent.py \
     --checkpoint-dir /workspace/checkpoints
 ```
 
-### Option B: CARLA Domain Pretrained Vision Weights (TransFuser++ / TCP)
-To use a vision encoder specifically pretrained on millions of CARLA driving frames:
-```bash
-# Download CARLA-pretrained model weights (TransFuser++ / Leaderboard 2.0)
-mkdir -p /workspace/pretrained_carla
-wget https://s3.eu-central-1.amazonaws.com/avg-projects-2/garage_2/models/pretrained_models.zip -O /workspace/pretrained_carla/models.zip
-unzip /workspace/pretrained_carla/models.zip -d /workspace/pretrained_carla/
+### Option B: CARLA Pretrained Pure Vision Encoders (LAV / ERFNet)
+Train PPO using a pure camera vision model pretrained specifically on CARLA images:
 
-# Run PPO training using CARLA pretrained vision weights
+```bash
+# 1. Train PPO using LAV CARLA Camera Perception Encoder
 python train_rl_agent.py \
     --env-type camera_easycarla \
-    --backbone resnet34 \
-    --weights-path /workspace/pretrained_carla/model_0030_0.pth \
+    --backbone lav \
+    --freeze-backbone \
+    --total-steps 2000
+
+# 2. Train PPO using ERFNet CARLA Camera Semantic Encoder
+python train_rl_agent.py \
+    --env-type camera_easycarla \
+    --backbone erfnet \
     --freeze-backbone \
     --total-steps 2000
 ```
