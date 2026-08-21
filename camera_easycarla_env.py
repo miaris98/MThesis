@@ -157,15 +157,16 @@ class CameraEasyCarlaEnv(gym.Env):
 
         self.latest_image = None
         
-        # Ensure client timeout is set to 60s to prevent 10s reset timeouts
-        if hasattr(self.easy_env, 'world') and self.easy_env.world is not None:
+        # Call underlying EasyCarla reset with 60s timeout & automatic retry logic
+        for attempt in range(3):
             try:
-                self.easy_env.world.get_settings()
-            except Exception:
-                pass
-
-        # Call underlying EasyCarla reset
-        self.easy_env.reset()
+                if hasattr(self.easy_env, 'world') and self.easy_env.world is not None:
+                    self.easy_env.world.get_client().set_timeout(60.0)
+                self.easy_env.reset()
+                break
+            except Exception as e:
+                print(f"Warning: CARLA environment reset attempt {attempt+1}/3 failed ({e}). Retrying reset...")
+                time.sleep(2.0)
         
         # Attach camera sensor to newly spawned ego vehicle
         self._setup_camera()
@@ -205,10 +206,22 @@ class CameraEasyCarlaEnv(gym.Env):
         terminated = bool(done or self.easy_env._is_collision or self.easy_env._is_off_road)
         truncated = bool(self.easy_env.time_step >= self.easy_env.max_time_episode)
 
+        # Determine exact human-readable termination reason
+        reason = "Active"
+        if self.easy_env._is_collision:
+            reason = "Collision"
+        elif self.easy_env._is_off_road:
+            reason = "Lane Deviation / Off-Road"
+        elif truncated:
+            reason = "Max Steps Reached"
+        elif done:
+            reason = "Episode Done"
+
         info = {
             "cost": cost,
             "is_collision": self.easy_env._is_collision,
             "is_off_road": self.easy_env._is_off_road,
+            "termination_reason": reason,
             "speed_kmh": self._get_speed_kmh()
         }
         

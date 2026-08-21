@@ -402,10 +402,11 @@ def train():
                 avg_speed = np.mean(current_ep_speeds)
                 episode_speeds.append(avg_speed)
 
-                collided_status = info.get("is_collision", info.get("has_collided", False))
-                print(f"[Step {global_step:04d}/{args.total_steps}] Episode Finished | Reward: {current_ep_reward:+.2f} | Avg Speed: {avg_speed:.1f} km/h | Collided: {collided_status}")
+                term_reason = info.get("termination_reason", "Collision" if info.get("is_collision", False) else ("Lane Deviation / Off-Road" if info.get("is_off_road", False) else "Max Steps"))
+                print(f"[Step {global_step:05d}/{args.total_steps}] Episode Finished | Reward: {current_ep_reward:+.2f} | Avg Speed: {avg_speed:.1f} km/h | Reason: {term_reason}")
                 writer.add_scalar("Reward/Episode", current_ep_reward, global_step)
                 writer.add_scalar("Speed/Avg_kmh", avg_speed, global_step)
+                writer.add_text("Termination_Reason", term_reason, global_step)
 
                 if current_ep_reward > best_episode_reward:
                     best_episode_reward = current_ep_reward
