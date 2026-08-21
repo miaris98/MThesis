@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import argparse
+import json
 import numpy as np
 import torch
 import torch.nn as nn
@@ -271,6 +272,28 @@ class ActorCriticPPO(nn.Module):
         
         return action, log_prob, entropy, value
 
+# --- Reward Normalization Utility ---
+
+class RunningMeanStd:
+    """Tracks running mean and variance for online reward normalization (Welford's algorithm)."""
+    def __init__(self, epsilon=1e-4):
+        self.mean = 0.0
+        self.var = 1.0
+        self.count = epsilon
+
+    def update(self, x):
+        x = float(x)
+        delta = x - self.mean
+        self.count += 1
+        self.mean += delta / self.count
+        delta2 = x - self.mean
+        self.var += (delta * delta2 - self.var) / self.count
+
+    @property
+    def std(self):
+        return max(float(np.sqrt(self.var)), 1e-4)
+
+
 # --- Main Training Function ---
 
 def train():
@@ -294,7 +317,11 @@ def train():
     parser.add_argument("--clip-coef", type=float, default=0.2, help="PPO clipping coefficient")
     parser.add_argument("--log-dir", type=str, default="/workspace/runs", help="TensorBoard log directory")
     parser.add_argument("--checkpoint-dir", type=str, default="/workspace/checkpoints", help="Model checkpoint directory")
-    
+    parser.add_argument("--resume", action="store_true", default=False, help="Resume training from latest checkpoint")
+    parser.add_argument("--num-vehicles", type=int, default=3, help="Number of surrounding NPC vehicles (lower = less CARLA memory pressure)")
+    parser.add_argument("--town", type=str, default="Town03", help="CARLA map/town to use for training")
+    parser.add_argument("--reward-clip", type=float, default=50.0, help="Clip raw rewards to [-reward-clip, +reward-clip] before normalization")
+
     args = parser.parse_args()
 
     os.makedirs(args.log_dir, exist_ok=True)
@@ -316,13 +343,13 @@ def train():
     # Initialize Selected Environment
     if args.env_type == "camera_easycarla":
         easy_params = {
-            'number_of_vehicles': 10,
+            'number_of_vehicles': args.num_vehicles,
             'number_of_walkers': 0,
             'dt': 0.05,
             'ego_vehicle_filter': 'vehicle.tesla.model3',
             'surrounding_vehicle_spawned_randomly': True,
             'port': args.port,
-            'town': 'Town10HD_Opt',
+            'town': args.town,
             'max_time_episode': args.rollout_steps,
             'max_waypoints': 12,
             'visualize_waypoints': False,
@@ -351,9 +378,26 @@ def train():
 
     optimizer = optim.Adam(agent.parameters(), lr=args.lr)
 
-    obs, _ = env.reset()
+    # Resume from latest checkpoint if requested
     global_step = 0
     best_episode_reward = -float("inf")
+    if args.resume:
+        latest_ckpt = os.path.join(args.checkpoint_dir, "ppo_carla_latest.pth")
+        state_file = os.path.join(args.checkpoint_dir, "train_state.json")
+        if os.path.exists(latest_ckpt):
+            agent.load_state_dict(torch.load(latest_ckpt, map_location=device))
+            print(f"[Resume] Loaded policy checkpoint: {latest_ckpt}")
+        if os.path.exists(state_file):
+            with open(state_file) as f:
+                state = json.load(f)
+            global_step = state.get("global_step", 0)
+            best_episode_reward = state.get("best_episode_reward", -float("inf"))
+            print(f"[Resume] Continuing from step {global_step}/{args.total_steps} | Best reward so far: {best_episode_reward:.2f}")
+
+    # Running reward normalizer: keeps PPO value targets in a stable range
+    reward_normalizer = RunningMeanStd()
+
+    obs, _ = env.reset()
 
     episode_rewards = []
     episode_speeds = []
@@ -384,16 +428,23 @@ def train():
             next_obs, reward, terminated, truncated, info = env.step(action_np)
             done = terminated or truncated
 
+            # Clip raw reward, then normalize by running std to keep value targets in a healthy range.
+            # Log the raw reward for human-readable episode summaries.
+            raw_reward = float(reward)
+            clipped_reward = float(np.clip(raw_reward, -args.reward_clip, args.reward_clip))
+            reward_normalizer.update(clipped_reward)
+            normalized_reward = clipped_reward / reward_normalizer.std
+
             obs_images.append(img_tensor.squeeze(0))
             obs_speeds.append(spd_tensor.squeeze(0))
             actions.append(action.squeeze(0))
             log_probs.append(log_prob.squeeze(0))
-            rewards.append(reward)
+            rewards.append(normalized_reward)  # Normalized reward into PPO buffer
             dones.append(done)
             values.append(value.squeeze(0))
 
             obs = next_obs
-            current_ep_reward += reward
+            current_ep_reward += raw_reward  # Accumulate raw reward for logging
             speed_val = info.get("speed_kmh", obs["speed"][0])
             current_ep_speeds.append(speed_val)
 
@@ -413,6 +464,15 @@ def train():
                     checkpoint_path = os.path.join(args.checkpoint_dir, "ppo_carla_best.pth")
                     torch.save(agent.state_dict(), checkpoint_path)
                     print(f"--> Saved new BEST policy checkpoint: {checkpoint_path}")
+
+                # Persist training state so --resume can continue from here after a crash
+                state_path = os.path.join(args.checkpoint_dir, "train_state.json")
+                with open(state_path, "w") as f:
+                    json.dump({
+                        "global_step": global_step,
+                        "best_episode_reward": float(best_episode_reward),
+                        "total_steps": args.total_steps
+                    }, f, indent=2)
 
                 obs, _ = env.reset()
                 current_ep_reward = 0
