@@ -73,8 +73,12 @@ class CameraEasyCarlaEnv(gym.Env):
         port = params.get('port', 2000)
         try:
             temp_client = carla.Client('127.0.0.1', port)
-            temp_client.set_timeout(10.0)
+            temp_client.set_timeout(3.0)
             temp_world = temp_client.get_world()
+            try:
+                temp_world.tick()
+            except Exception:
+                pass
             temp_settings = temp_world.get_settings()
             if temp_settings.synchronous_mode:
                 temp_settings.synchronous_mode = False
