@@ -383,6 +383,8 @@ def train():
     best_episode_reward = -float("inf")
     if args.resume:
         latest_ckpt = os.path.join(args.checkpoint_dir, "ppo_carla_latest.pth")
+        if not os.path.exists(latest_ckpt) and os.path.exists(os.path.join(args.checkpoint_dir, "ppo_carla_best.pth")):
+            latest_ckpt = os.path.join(args.checkpoint_dir, "ppo_carla_best.pth")
         state_file = os.path.join(args.checkpoint_dir, "train_state.json")
         if os.path.exists(latest_ckpt):
             agent.load_state_dict(torch.load(latest_ckpt, map_location=device))

@@ -69,23 +69,28 @@ class CameraEasyCarlaEnv(gym.Env):
         self.img_width = params.get('img_width', 256)
         self.img_height = params.get('img_height', 256)
         
-        # Check if CARLA server is responsive; auto-restart if frozen from a previous aborted script
+        # Check if CARLA server is responsive and running the requested town
+        town = params.get('town', 'Town10HD_Opt')
         port = params.get('port', 2000)
         server_ok = False
         try:
             test_c = carla.Client('127.0.0.1', port)
             test_c.set_timeout(3.0)
-            test_c.get_server_version()
-            server_ok = True
+            cur_map = test_c.get_world().get_map().name
+            if town in cur_map:
+                server_ok = True
+            else:
+                print(f"--> Current server map is {cur_map}, but {town} was requested. Restarting server on {town}...")
+                server_ok = False
         except Exception:
             server_ok = False
 
         if not server_ok and os.path.exists("/workspace/carla/CarlaUE4.sh"):
-            print("--> CARLA server is unresponsive or frozen. Auto-restarting CARLA server session...")
+            print(f"--> Starting CARLA server session with map {town}...")
             os.system("pkill -9 -f CarlaUE4 2>/dev/null || true")
             os.system("tmux kill-session -t carla_server 2>/dev/null || true")
-            os.system("tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
-            time.sleep(8)
+            os.system(f"tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh /Game/Carla/Maps/{town} -carla-port={port} -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
+            time.sleep(10)
 
         self.carla_client = carla.Client('127.0.0.1', port)
         self.carla_client.set_timeout(60.0)
@@ -102,15 +107,15 @@ class CameraEasyCarlaEnv(gym.Env):
         except Exception:
             pass
 
-        # Monkey-patch carla.Client during EasyCarla initialization to use 60s timeout and re-use active world map
+        # Monkey-patch carla.Client during EasyCarla initialization to use 120s timeout and re-use active world map
         orig_set_timeout = carla.Client.set_timeout
         orig_load_world = carla.Client.load_world
 
         def patched_set_timeout(client_self, timeout):
-            orig_set_timeout(client_self, max(timeout, 60.0))
+            orig_set_timeout(client_self, max(timeout, 120.0))
 
         def patched_load_world(client_self, town_name, reset_settings=True):
-            orig_set_timeout(client_self, 60.0)
+            orig_set_timeout(client_self, 120.0)
             try:
                 current_map = client_self.get_world().get_map().name
                 if town_name in current_map:
@@ -118,8 +123,18 @@ class CameraEasyCarlaEnv(gym.Env):
                     return client_self.get_world()
             except Exception:
                 pass
-            print(f"--> Loading CARLA map {town_name} with 60s timeout...")
-            return orig_load_world(client_self, town_name, reset_settings)
+            print(f"--> Loading CARLA map {town_name} with 120s timeout...")
+            new_world = orig_load_world(client_self, town_name, reset_settings)
+            try:
+                settings = new_world.get_settings()
+                if settings.synchronous_mode:
+                    settings.synchronous_mode = False
+                    new_world.apply_settings(settings)
+                new_world.tick()
+            except Exception:
+                pass
+            time.sleep(2.0)
+            return new_world
 
         carla.Client.set_timeout = patched_set_timeout
         carla.Client.load_world = patched_load_world
@@ -246,11 +261,12 @@ class CameraEasyCarlaEnv(gym.Env):
             except (Exception, BaseException) as e:
                 print(f"Warning: CARLA reset attempt {attempt+1}/3 failed ({e}). Auto-restarting CARLA engine...")
                 if os.path.exists("/workspace/carla/CarlaUE4.sh"):
+                    port = self.params.get('port', 2000)
+                    town = self.params.get('town', 'Town10HD_Opt')
                     os.system("pkill -9 -f CarlaUE4 2>/dev/null || true")
                     os.system("tmux kill-session -t carla_server 2>/dev/null || true")
-                    os.system("tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
-                    time.sleep(8)
-                    port = self.params.get('port', 2000)
+                    os.system(f"tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh /Game/Carla/Maps/{town} -carla-port={port} -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
+                    time.sleep(10)
                     self.carla_client = carla.Client('127.0.0.1', port)
                     self.carla_client.set_timeout(60.0)
 
