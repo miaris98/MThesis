@@ -27,16 +27,21 @@ except ImportError:
     from envs.carla_env import CarlaEnv
 
 
-def _wait_for_carla_server(port=2000, max_wait=30):
-    """Poll CARLA server until RPC socket is fully initialized and responding."""
+def _wait_for_carla_server(port=2000, max_wait=45):
+    """Poll CARLA server until RPC socket, world, and map geometry are fully initialized and responding."""
     start_time = time.time()
     while time.time() - start_time < max_wait:
         try:
             c = carla.Client('127.0.0.1', port)
-            c.set_timeout(2.0)
+            c.set_timeout(4.0)
             ver = c.get_server_version()
             if ver:
-                return True
+                world = c.get_world()
+                map_obj = world.get_map()
+                spawn_pts = map_obj.get_spawn_points()
+                if len(spawn_pts) > 0:
+                    time.sleep(2.0)  # Grace period for rendering pipeline
+                    return True
         except (Exception, BaseException):
             time.sleep(1.0)
     return False
