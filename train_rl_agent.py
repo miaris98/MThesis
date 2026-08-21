@@ -479,6 +479,7 @@ def train():
     episode_rewards = []
     episode_speeds = []
     current_ep_reward = 0
+    current_ep_speeds = []
     # AMP Scaler
     if hasattr(torch, 'amp') and hasattr(torch.amp, 'GradScaler'):
         scaler = torch.amp.GradScaler('cuda', enabled=torch.cuda.is_available())
