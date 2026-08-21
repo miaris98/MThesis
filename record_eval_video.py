@@ -109,6 +109,8 @@ def draw_hud(canvas, x_offset, y_offset, panel_w, panel_h, model_rgb_256, speed_
 def record_eval_video(
     port=2000,
     steps=600,
+    max_episode_steps=500,
+    min_speed=8.0,
     output_video="/workspace/output_screenshots/driving_eval_model_input.mp4",
     num_npc_vehicles=3,
     checkpoint="/workspace/checkpoints/ppo_carla_best.pth",
@@ -137,7 +139,7 @@ def record_eval_video(
         'ego_vehicle_filter': 'vehicle.lincoln.mkz_2020',
         'port': port,
         'town': town,
-        'max_time_episode': 250,
+        'max_time_episode': max_episode_steps,
         'max_waypoints': 12,
         'visualize_waypoints': False,
         'desired_speed': 8,
@@ -213,9 +215,14 @@ def record_eval_video(
     obs, info = env.reset()
     setup_chase_camera()
 
-    episode_count = 1
-    episode_reward = 0.0
-    episode_speeds = []
+    target_valid_steps = steps
+    recorded_valid_steps = 0
+    saved_episodes = 0
+    attempted_episodes = 0
+
+    # Initial Environment Reset
+    obs, info = env.reset()
+    setup_chase_camera()
 
     throttle_val = 0.0
     steer_val = 0.0
@@ -223,110 +230,121 @@ def record_eval_video(
     status_str = "Active Driving"
 
     try:
-        for step in range(steps):
-            # Model Input 1: (256, 256, 3) RGB Front Camera Frame
-            model_rgb_input = obs["image"] # uint8 [0, 255] RGB
-            # Model Input 2: Speed Scalar
-            speed_kmh = float(obs["speed"][0])
-            episode_speeds.append(speed_kmh)
+        while recorded_valid_steps < target_valid_steps:
+            attempted_episodes += 1
+            ep_frames = []
+            episode_speeds = []
+            episode_reward = 0.0
+            done = False
+            step_in_ep = 0
 
-            # Model Inference with deterministic mean action (no exploratory noise)
-            img_tensor = torch.as_tensor(model_rgb_input, dtype=torch.uint8, device=device).unsqueeze(0)
-            spd_tensor = torch.as_tensor([speed_kmh], dtype=torch.float32, device=device).unsqueeze(0)
+            while not done:
+                step_in_ep += 1
 
-            with torch.inference_mode():
-                action, _, _, _ = agent.get_action_and_value(img_tensor, spd_tensor, deterministic=True)
-            
-            act = action.cpu().numpy()[0]
-            throttle_val = float(np.clip((act[0] + 1.0) / 2.0, 0.0, 1.0))
-            steer_val = float(np.clip(act[1], -1.0, 1.0))
-            brake_val = float(np.clip((act[2] - 0.2) / 0.8, 0.0, 1.0)) if act[2] > 0.2 else 0.0
+                # Model Input 1: (256, 256, 3) RGB Front Camera Frame
+                model_rgb_input = obs["image"]
+                # Model Input 2: Speed Scalar
+                speed_kmh = float(obs["speed"][0])
+                episode_speeds.append(speed_kmh)
 
-            # Step Environment using the exact continuous action space
-            next_obs, reward, terminated, truncated, info = env.step(act)
-            done = terminated or truncated
-            episode_reward += float(reward)
+                # Model Inference (Deterministic Learned Action)
+                img_tensor = torch.as_tensor(model_rgb_input, dtype=torch.uint8, device=device).unsqueeze(0)
+                spd_tensor = torch.as_tensor([speed_kmh], dtype=torch.float32, device=device).unsqueeze(0)
 
-            # Wait for Chase camera frame
-            while chase_frame_buffer[0] is None:
-                time.sleep(0.002)
+                with torch.inference_mode():
+                    action, _, _, _ = agent.get_action_and_value(img_tensor, spd_tensor, deterministic=True)
+                
+                act = action.cpu().numpy()[0]
+                throttle_val = float(np.clip((act[0] + 1.0) / 2.0, 0.0, 1.0))
+                steer_val = float(np.clip(act[1], -1.0, 1.0))
+                brake_val = float(np.clip((act[2] - 0.2) / 0.8, 0.0, 1.0)) if act[2] > 0.2 else 0.0
 
-            # Build Video Frame (1280 x 720)
-            canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+                # Step Environment
+                next_obs, reward, terminated, truncated, info = env.step(act)
+                done = terminated or truncated
+                episode_reward += float(reward)
 
-            # 1. Header Banner
-            header = np.zeros((50, canvas_w, 3), dtype=np.uint8)
-            cv2.rectangle(header, (0, 0), (canvas_w, 50), (15, 23, 42), -1)
-            cv2.putText(header, "CARLA AUTONOMOUS DRIVING EVALUATION STUDIO", (25, 33),
-                        cv2.FONT_HERSHEY_DUPLEX, 0.70, (255, 255, 255), 1, cv2.LINE_AA)
-            cv2.putText(header, f"Model: PPO + {backbone.upper()}  |  Map: {town}  |  Checkpoint: {os.path.basename(checkpoint)}",
-                        (640, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (156, 163, 175), 1, cv2.LINE_AA)
-            canvas[0:50, 0:canvas_w] = header
+                # Wait for Chase camera frame
+                while chase_frame_buffer[0] is None:
+                    time.sleep(0.002)
 
-            # 2. Main View: Chase Camera (Left)
-            canvas[50:50 + chase_h, 0:chase_w] = chase_frame_buffer[0]
-            # Overlay label on chase view
-            cv2.rectangle(canvas, (10, 60), (280, 88), (0, 0, 0), -1)
-            cv2.putText(canvas, "Third-Person Follow View", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
+                # Build Video Frame (1280 x 720)
+                canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
 
-            # 3. Model Inputs & Telemetry Panel (Right)
-            model_bgr_256 = cv2.cvtColor(model_rgb_input, cv2.COLOR_RGB2BGR)
-            avg_spd = np.mean(episode_speeds) if len(episode_speeds) > 0 else speed_kmh
+                # 1. Header Banner
+                header = np.zeros((50, canvas_w, 3), dtype=np.uint8)
+                cv2.rectangle(header, (0, 0), (canvas_w, 50), (15, 23, 42), -1)
+                cv2.putText(header, "CARLA AUTONOMOUS DRIVING EVALUATION STUDIO", (25, 33),
+                            cv2.FONT_HERSHEY_DUPLEX, 0.70, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(header, f"Model: PPO + {backbone.upper()}  |  Map: {town}  |  Checkpoint: {os.path.basename(checkpoint)}",
+                            (640, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (156, 163, 175), 1, cv2.LINE_AA)
+                canvas[0:50, 0:canvas_w] = header
 
-            draw_hud(
-                canvas=canvas,
-                x_offset=chase_w,
-                y_offset=50,
-                panel_w=panel_w,
-                panel_h=chase_h,
-                model_rgb_256=model_bgr_256,
-                speed_kmh=speed_kmh,
-                throttle=throttle_val,
-                steer=steer_val,
-                brake=brake_val,
-                step=step + 1,
-                total_steps=steps,
-                episode_count=episode_count,
-                ep_reward=episode_reward,
-                ep_avg_speed=avg_spd,
-                backbone_name=backbone,
-                status_str=status_str
-            )
+                # 2. Main View: Chase Camera (Left)
+                canvas[50:50 + chase_h, 0:chase_w] = chase_frame_buffer[0]
+                cv2.rectangle(canvas, (10, 60), (280, 88), (0, 0, 0), -1)
+                cv2.putText(canvas, "Third-Person Follow View", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
 
-            # If episode terminated on this step, show termination alert overlay
-            if done:
-                term_reason = info.get("termination_reason", "Episode Finished")
+                # 3. Model Inputs & Telemetry Panel (Right)
+                model_bgr_256 = cv2.cvtColor(model_rgb_input, cv2.COLOR_RGB2BGR)
+                avg_spd = np.mean(episode_speeds) if len(episode_speeds) > 0 else speed_kmh
+
+                draw_hud(
+                    canvas=canvas,
+                    x_offset=chase_w,
+                    y_offset=50,
+                    panel_w=panel_w,
+                    panel_h=chase_h,
+                    model_rgb_256=model_bgr_256,
+                    speed_kmh=speed_kmh,
+                    throttle=throttle_val,
+                    steer=steer_val,
+                    brake=brake_val,
+                    step=recorded_valid_steps + len(ep_frames) + 1,
+                    total_steps=target_valid_steps,
+                    episode_count=saved_episodes + 1,
+                    ep_reward=episode_reward,
+                    ep_avg_speed=avg_spd,
+                    backbone_name=backbone,
+                    status_str=status_str
+                )
+
+                ep_frames.append(canvas)
+                obs = next_obs
+
+            # Episode Finished - Determine if it was dynamic driving or stalled
+            term_reason = info.get("termination_reason", "Episode Finished")
+            max_spd = max(episode_speeds) if episode_speeds else 0.0
+            avg_spd = np.mean(episode_speeds) if episode_speeds else 0.0
+            is_valid_drive = (max_spd >= min_speed) and (avg_spd >= 4.0) and (step_in_ep >= 25) and ("Stalled" not in term_reason)
+
+            if not is_valid_drive:
+                print(f"[Attempt #{attempted_episodes} DISCARDED] Stalled/Slow (Max: {max_spd:.1f} km/h, Avg: {avg_spd:.1f} km/h, Steps: {step_in_ep}, Reason: {term_reason}) - Skipped.")
+            else:
+                saved_episodes += 1
+                # Attach ending alert banner
+                alert_canvas = ep_frames[-1].copy()
                 alert_banner = np.zeros((60, chase_w, 3), dtype=np.uint8)
                 bg_col = (185, 28, 28) if "Collision" in term_reason else ((217, 119, 6) if "Off-Road" in term_reason else (30, 64, 175))
                 cv2.rectangle(alert_banner, (0, 0), (chase_w, 60), bg_col, -1)
-                cv2.putText(alert_banner, f"EPISODE #{episode_count} TERMINATED: {term_reason.upper()}", (30, 26),
+                cv2.putText(alert_banner, f"EPISODE #{saved_episodes} FINISHED: {term_reason.upper()}", (30, 26),
                             cv2.FONT_HERSHEY_DUPLEX, 0.65, (255, 255, 255), 1, cv2.LINE_AA)
-                cv2.putText(alert_banner, f"Reward: {episode_reward:+.2f}  |  Avg Speed: {avg_spd:.1f} km/h  |  Respawning to New Route...", (30, 48),
+                cv2.putText(alert_banner, f"Reward: {episode_reward:+.2f}  |  Avg Speed: {avg_spd:.1f} km/h (Max: {max_spd:.1f})", (30, 48),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA)
-                canvas[50 + chase_h - 70:50 + chase_h - 10, 0:chase_w] = alert_banner
+                alert_canvas[50 + chase_h - 70:50 + chase_h - 10, 0:chase_w] = alert_banner
 
-            video_writer.write(canvas)
+                # Write all valid episode frames to video
+                for f in ep_frames:
+                    video_writer.write(f)
+                for _ in range(12):  # 0.6s hold on end screen
+                    video_writer.write(alert_canvas)
 
-            if done:
-                term_reason = info.get("termination_reason", "Episode Finished")
-                print(f"[Step {step+1:04d}/{steps}] Episode #{episode_count} Terminated: {term_reason} | Reward: {episode_reward:+.2f} | Avg Speed: {avg_spd:.1f} km/h")
-                
-                # Write 10 duplicate alert frames so the termination banner is clearly readable in the video
-                for _ in range(10):
-                    video_writer.write(canvas)
+                recorded_valid_steps += len(ep_frames)
+                print(f"✓ [SAVED TO VIDEO] Episode #{saved_episodes} ({term_reason}) | Steps: {len(ep_frames)} | Max Speed: {max_spd:.1f} km/h | Avg: {avg_spd:.1f} km/h | Total Video Frames: {recorded_valid_steps}/{target_valid_steps}")
 
-                # Reset environment for next episode
-                obs, info = env.reset()
-                setup_chase_camera()
-                episode_count += 1
-                episode_reward = 0.0
-                episode_speeds = []
-                status_str = "Active Driving"
-            else:
-                obs = next_obs
-
-            if (step + 1) % 100 == 0:
-                print(f"[Step {step+1:04d}/{steps}] Speed: {speed_kmh:4.1f} km/h | Throttle: {throttle_val:.2f} | Steer: {steer_val:+.2f} | Brake: {brake_val:.2f} | Ep: #{episode_count}")
+            # Reset environment for next episode
+            obs, info = env.reset()
+            setup_chase_camera()
 
     finally:
         print("Finalizing video recording and closing environment...")
@@ -362,7 +380,9 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Record PPO Model Evaluation Video in CARLA.")
     parser.add_argument("--port", type=int, default=2000, help="CARLA port")
-    parser.add_argument("--steps", type=int, default=600, help="Number of simulation steps to record (default: 600 steps = 30s)")
+    parser.add_argument("--steps", type=int, default=600, help="Total number of valid driving frames to record (default: 600 steps = 30s)")
+    parser.add_argument("--max-episode-steps", type=int, default=500, help="Maximum steps allowed per episode before timeout (default: 500 steps = 25s)")
+    parser.add_argument("--min-speed", type=float, default=8.0, help="Minimum peak speed (km/h) required for an episode to be saved to video")
     parser.add_argument("--output-video", type=str, default="/workspace/output_screenshots/driving_eval_model_input.mp4", help="Output MP4 path")
     parser.add_argument("--npc-vehicles", type=int, default=3, help="Number of NPC traffic vehicles")
     parser.add_argument("--backbone", type=str, default="lav", choices=["lav", "erfnet", "resnet18", "resnet34"], help="Vision backbone used during training")
@@ -374,6 +394,8 @@ if __name__ == "__main__":
     record_eval_video(
         port=args.port,
         steps=args.steps,
+        max_episode_steps=args.max_episode_steps,
+        min_speed=args.min_speed,
         output_video=args.output_video,
         num_npc_vehicles=args.npc_vehicles,
         checkpoint=args.checkpoint,
