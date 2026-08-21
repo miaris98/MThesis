@@ -249,7 +249,7 @@ def record_eval_video(
 
             # Model Inference
             # Model takes: (256, 256, 3) RGB image + speed scalar
-            model_rgb_input = frames["model"][:, :, ::-1] # BGR -> RGB
+            model_rgb_input = np.ascontiguousarray(frames["model"][:, :, ::-1])  # BGR -> RGB contiguous
             img_tensor = torch.as_tensor(model_rgb_input, dtype=torch.uint8, device=device).unsqueeze(0)
             spd_tensor = torch.as_tensor([speed_kmh], dtype=torch.float32, device=device).unsqueeze(0)
 
