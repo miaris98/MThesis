@@ -30,37 +30,40 @@ class CameraEasyCarlaEnv(gym.Env):
     """
     Camera-Only Gymnasium Environment Wrapper around EasyCarla-RL.
     
-    Observation Space:
-        - 'image': RGB Camera Frame of shape (height, width, 3), uint8 [0, 255]
-        - 'speed': Float array [speed_kmh]
-        
-    Action Space:
-        - Box(low=[0.0, -1.0, 0.0], high=[1.0, 1.0, 1.0])
-        - [throttle, steer, brake]
+    Wraps EasyCarla-RL and mounts a front-facing RGB camera sensor on the ego vehicle.
+    Returns observations containing (256, 256, 3) RGB images and vehicle speed scalar,
+    supporting end-to-end RL policies with vision backbones.
     """
-    metadata = {"render_modes": ["rgb_array"]}
+    metadata = {"render_modes": ["rgb_array"], "render_fps": 20}
 
     def __init__(self, params=None):
-        super(CameraEasyCarlaEnv, self).__init__()
+        super().__init__()
 
         if params is None:
             params = {
-                'number_of_vehicles': 10,
+                'number_of_vehicles': 3,
                 'number_of_walkers': 0,
+                'display_size': 256,
+                'max_past_step': 1,
                 'dt': 0.05,
-                'ego_vehicle_filter': 'vehicle.tesla.model3',
-                'surrounding_vehicle_spawned_randomly': True,
+                'discrete': False,
+                'discrete_acc': [-3.0, 1.5, 3.0],
+                'discrete_steer': [-0.2, 0.0, 0.2],
+                'continuous_accel_range': [-3.0, 3.0],
+                'continuous_steer_range': [-0.3, 0.3],
+                'ego_vehicle_filter': 'vehicle.lincoln.mkz_2020',
                 'port': 2000,
                 'town': 'Town10HD_Opt',
-                'max_time_episode': 500,
+                'max_time_episode': 250,
                 'max_waypoints': 12,
                 'visualize_waypoints': False,
                 'desired_speed': 8,
                 'max_ego_spawn_times': 200,
-                'view_mode': 'top',
+                'view_mode': 'follow',
                 'traffic': 'off',
                 'lidar_max_range': 50.0,
                 'max_nearby_vehicles': 5,
+                'surrounding_vehicle_spawned_randomly': True,
                 'img_width': 256,
                 'img_height': 256,
             }
@@ -76,7 +79,7 @@ class CameraEasyCarlaEnv(gym.Env):
         server_ok = False
         try:
             test_c = carla.Client('127.0.0.1', port)
-            test_c.set_timeout(3.0)
+            test_c.set_timeout(5.0)
             cur_map = test_c.get_world().get_map().name
             if town in cur_map:
                 server_ok = True
@@ -91,7 +94,7 @@ class CameraEasyCarlaEnv(gym.Env):
             os.system("pkill -9 -f CarlaUE4 2>/dev/null || true")
             os.system("tmux kill-session -t carla_server 2>/dev/null || true")
             os.system(f"tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh /Game/Carla/Maps/{town} -carla-port={port} -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
-            time.sleep(10)
+            _wait_for_carla_server(port, max_wait=30)
 
         self.carla_client = carla.Client('127.0.0.1', port)
         self.carla_client.set_timeout(60.0)
@@ -108,34 +111,40 @@ class CameraEasyCarlaEnv(gym.Env):
         except Exception:
             pass
 
-        # Monkey-patch carla.Client during EasyCarla initialization to use 120s timeout and re-use active world map
+        # Monkey-patch carla.Client during EasyCarla initialization to use 60s timeout and re-use active world map
         orig_set_timeout = carla.Client.set_timeout
         orig_load_world = carla.Client.load_world
 
         def patched_set_timeout(client_self, timeout):
-            orig_set_timeout(client_self, max(timeout, 120.0))
+            orig_set_timeout(client_self, max(timeout, 60.0))
 
         def patched_load_world(client_self, town_name, reset_settings=True):
-            orig_set_timeout(client_self, 120.0)
+            orig_set_timeout(client_self, 60.0)
+            for map_attempt in range(3):
+                try:
+                    current_map = client_self.get_world().get_map().name
+                    if town_name in current_map:
+                        print(f"✓ CARLA server is already running {current_map}. Re-using active world!")
+                        return client_self.get_world()
+                    print(f"--> Loading CARLA map {town_name}...")
+                    new_world = orig_load_world(client_self, town_name, reset_settings)
+                    try:
+                        settings = new_world.get_settings()
+                        if settings.synchronous_mode:
+                            settings.synchronous_mode = False
+                            new_world.apply_settings(settings)
+                        new_world.tick()
+                    except Exception:
+                        pass
+                    time.sleep(1.0)
+                    return new_world
+                except (Exception, BaseException) as load_err:
+                    print(f"Waiting for simulator world... ({load_err})")
+                    time.sleep(2.0)
             try:
-                current_map = client_self.get_world().get_map().name
-                if town_name in current_map:
-                    print(f"✓ CARLA server is already running {current_map}. Re-using active world!")
-                    return client_self.get_world()
+                return client_self.get_world()
             except Exception:
-                pass
-            print(f"--> Loading CARLA map {town_name} with 120s timeout...")
-            new_world = orig_load_world(client_self, town_name, reset_settings)
-            try:
-                settings = new_world.get_settings()
-                if settings.synchronous_mode:
-                    settings.synchronous_mode = False
-                    new_world.apply_settings(settings)
-                new_world.tick()
-            except Exception:
-                pass
-            time.sleep(2.0)
-            return new_world
+                return None
 
         carla.Client.set_timeout = patched_set_timeout
         carla.Client.load_world = patched_load_world
@@ -289,7 +298,7 @@ class CameraEasyCarlaEnv(gym.Env):
                     os.system("pkill -9 -f CarlaUE4 2>/dev/null || true")
                     os.system("tmux kill-session -t carla_server 2>/dev/null || true")
                     os.system(f"tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh /Game/Carla/Maps/{town} -carla-port={port} -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
-                    time.sleep(10)
+                    _wait_for_carla_server(port, max_wait=30)
                     self.carla_client = carla.Client('127.0.0.1', port)
                     self.carla_client.set_timeout(60.0)
 
@@ -302,13 +311,18 @@ class CameraEasyCarlaEnv(gym.Env):
 
                     def patched_load_world(client_self, town_name, reset_settings=True):
                         orig_set_timeout(client_self, 60.0)
+                        for map_attempt in range(3):
+                            try:
+                                current_map = client_self.get_world().get_map().name
+                                if town_name in current_map:
+                                    return client_self.get_world()
+                                return orig_load_world(client_self, town_name, reset_settings)
+                            except (Exception, BaseException):
+                                time.sleep(2.0)
                         try:
-                            current_map = client_self.get_world().get_map().name
-                            if town_name in current_map:
-                                return client_self.get_world()
-                        except (Exception, BaseException):
-                            pass
-                        return orig_load_world(client_self, town_name, reset_settings)
+                            return client_self.get_world()
+                        except Exception:
+                            return None
 
                     carla.Client.set_timeout = patched_set_timeout
                     carla.Client.load_world = patched_load_world
