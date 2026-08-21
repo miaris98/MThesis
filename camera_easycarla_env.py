@@ -212,11 +212,21 @@ class CameraEasyCarlaEnv(gym.Env):
 
         self.latest_image = None
         
-        # Call underlying EasyCarla reset with 60s timeout & automatic retry logic
+        # Temporarily disable synchronous mode before reset so batch actor cleanup & spawn never deadlocks
+        if hasattr(self, 'carla_client') and self.carla_client is not None:
+            try:
+                self.carla_client.set_timeout(60.0)
+                temp_world = self.carla_client.get_world()
+                settings = temp_world.get_settings()
+                if settings.synchronous_mode:
+                    settings.synchronous_mode = False
+                    temp_world.apply_settings(settings)
+            except Exception:
+                pass
+
+        # Call underlying EasyCarla reset with automatic retry logic
         for attempt in range(3):
             try:
-                if hasattr(self, 'carla_client') and self.carla_client is not None:
-                    self.carla_client.set_timeout(60.0)
                 self.easy_env.reset()
                 break
             except Exception as e:
