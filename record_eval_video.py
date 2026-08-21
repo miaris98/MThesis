@@ -26,13 +26,14 @@ def record_multiview_eval(
     img_height=300,
     output_video="/workspace/output_screenshots/driving_multiview.mp4",
     num_npc_vehicles=20,
-    checkpoint="/workspace/checkpoints/ppo_carla_best.pth"
+    checkpoint="/workspace/checkpoints/ppo_carla_best.pth",
+    backbone="lav"
 ):
     print(f"--- Starting Multi-Sensor Evaluation & Video Recording ---")
     print(f"Connecting to CARLA at {host}:{port}...")
 
     client = carla.Client(host, port)
-    client.set_timeout(30.0)
+    client.set_timeout(60.0)
     world = client.get_world()
     
     # 1. Enable Synchronous Mode
@@ -78,10 +79,10 @@ def record_multiview_eval(
             import torch
             from train_rl_agent import ActorCriticPPO
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            agent = ActorCriticPPO(action_dim=3).to(device)
+            agent = ActorCriticPPO(action_dim=3, backbone_name=backbone).to(device)
             agent.load_state_dict(torch.load(checkpoint, map_location=device))
             agent.eval()
-            print(f"Driving vehicle using Trained PyTorch PPO Policy Model: {checkpoint} (Device: {device})")
+            print(f"Driving vehicle using Trained PyTorch PPO Policy Model: {checkpoint} (Backbone: {backbone}, Device: {device})")
             ego_vehicle.set_autopilot(False)
         except Exception as e:
             print(f"Warning: Could not load checkpoint ({e}). Defaulting to Autopilot.")
@@ -237,6 +238,7 @@ if __name__ == "__main__":
     parser.add_argument("--img-height", type=int, default=300, help="Camera height per view")
     parser.add_argument("--output-video", type=str, default="/workspace/output_screenshots/driving_multiview.mp4", help="Output MP4 path")
     parser.add_argument("--npc-vehicles", type=int, default=20, help="Number of NPC traffic vehicles")
+    parser.add_argument("--backbone", type=str, default="lav", choices=["lav", "erfnet", "resnet18", "resnet34"], help="Vision backbone used during training")
     parser.add_argument("--checkpoint", type=str, default="/workspace/checkpoints/ppo_carla_best.pth", help="Path to PyTorch PPO model checkpoint")
 
     args = parser.parse_args()
@@ -249,5 +251,6 @@ if __name__ == "__main__":
         img_height=args.img_height,
         output_video=args.output_video,
         num_npc_vehicles=args.npc_vehicles,
-        checkpoint=args.checkpoint
+        checkpoint=args.checkpoint,
+        backbone=args.backbone
     )

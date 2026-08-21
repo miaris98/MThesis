@@ -270,11 +270,15 @@ tensorboard --logdir=/workspace/runs --port=6006 --host=0.0.0.0 &
 ## 9. Record & Play Evaluation Video in Jupyter Notebook
 
 ### Step 9.1: Record Evaluation Video
-Generate multi-view video (RGB + Depth + Semantic Segmentation) with traffic:
+Generate multi-view video (RGB + Depth + Semantic Segmentation) driving with your trained PPO model:
 ```bash
 source /opt/conda/bin/activate carla_py38
 cd /workspace/MThesis
-python record_eval_video.py --host 127.0.0.1 --port 2000 --steps 150 --output-video /workspace/output_screenshots/driving_multiview.mp4
+python record_eval_video.py \
+    --checkpoint /workspace/checkpoints/ppo_carla_best.pth \
+    --backbone lav \
+    --steps 200 \
+    --output-video /workspace/output_screenshots/driving_multiview.mp4
 ```
 
 ### Step 9.2: Play Video inside Jupyter Notebook Cell
