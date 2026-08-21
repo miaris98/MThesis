@@ -26,6 +26,22 @@ except ImportError:
     # Fallback import if easycarla is in PYTHONPATH
     from envs.carla_env import CarlaEnv
 
+
+def _wait_for_carla_server(port=2000, max_wait=30):
+    """Poll CARLA server until RPC socket is fully initialized and responding."""
+    start_time = time.time()
+    while time.time() - start_time < max_wait:
+        try:
+            c = carla.Client('127.0.0.1', port)
+            c.set_timeout(2.0)
+            ver = c.get_server_version()
+            if ver:
+                return True
+        except (Exception, BaseException):
+            time.sleep(1.0)
+    return False
+
+
 class CameraEasyCarlaEnv(gym.Env):
     """
     Camera-Only Gymnasium Environment Wrapper around EasyCarla-RL.
