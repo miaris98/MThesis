@@ -52,18 +52,58 @@ echo "=============================================================="
 
 # ==========================================================================
 #  📊 Start Persistent MLflow UI Server (survives training crash/restarts)
-#  This keeps port 5055 alive so the Vast.ai tunnel URL never changes.
+#  This keeps the MLflow port alive so the Vast.ai tunnel URL never changes.
 #  MLflow MUST run in its own tmux session — NOT as a subprocess of
 #  train_rl_agent.py — so it is completely isolated from CARLA crashes.
+#  The port is auto-detected from Vast.ai's Open Ports configuration.
 # ==========================================================================
-MLFLOW_PORT=5055
+
+# Auto-detect an available port from Vast.ai's Open Ports (externally mapped)
+# This ensures MLflow uses a port with a stable Cloudflare tunnel.
+find_mlflow_port() {
+    # Well-known service ports to SKIP (already used by other services)
+    SKIP_PORTS="22 1111 2000 2001 2002 6006 8080 8384"
+
+    # Method 1: Parse iptables DNAT rules to find externally-mapped internal ports
+    MAPPED_PORTS=$(iptables -t nat -L -n 2>/dev/null | grep DNAT | grep -oP 'to:[^:]+:\K\d+' | sort -un)
+
+    if [ -n "$MAPPED_PORTS" ]; then
+        for port in $MAPPED_PORTS; do
+            # Skip well-known service ports
+            if echo "$SKIP_PORTS" | grep -qw "$port"; then
+                continue
+            fi
+            # Check if port is NOT already in use
+            if ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+                echo "$port"
+                return 0
+            fi
+        done
+    fi
+
+    # Method 2: Fallback — try common Vast.ai secondary ports
+    for port in 10100 10200 9090 7070 4040; do
+        if ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+            echo "$port"
+            return 0
+        fi
+    done
+
+    # Last resort
+    echo "10100"
+    return 0
+}
 
 # Check if MLflow is already running inside our dedicated tmux session
 if tmux has-session -t mlflow_server 2>/dev/null; then
+    # Recover the port from the running MLflow process
+    MLFLOW_PORT=$(ss -tlnp 2>/dev/null | grep "mlflow\|gunicorn" | grep -oP ':(\d+)' | head -1 | tr -d ':')
+    MLFLOW_PORT=${MLFLOW_PORT:-$(find_mlflow_port)}
     echo "✓ MLflow UI server running in protected tmux session 'mlflow_server' (port ${MLFLOW_PORT})."
 else
+    MLFLOW_PORT=$(find_mlflow_port)
+
     # Kill any orphaned/unmanaged MLflow processes on this port
-    # (these are leftover subprocess.Popen spawns from previous training crashes)
     fuser -k ${MLFLOW_PORT}/tcp 2>/dev/null || true
     sleep 1
 
@@ -74,6 +114,7 @@ else
     echo "✓ MLflow UI server started in tmux session 'mlflow_server' (port ${MLFLOW_PORT})"
     echo "  This session is fully isolated from training restarts."
 fi
+echo "  📊 MLflow port: ${MLFLOW_PORT}"
 echo "=============================================================="
 
 attempt=1
@@ -130,7 +171,7 @@ while true; do
         --ent-coef 0.02 \
         --minibatch-size 128 \
         --use-mlflow \
-        --mlflow-port 5055 \
+        --mlflow-port $MLFLOW_PORT \
         $WEIGHTS_ARG \
         --resume \
         --total-steps "$TOTAL_STEPS"

@@ -2,7 +2,7 @@
 # Script to launch dedicated Hardware Diagnostics Dashboard (nvitop GPU + btop CPU/RAM)
 
 SESSION_NAME="dashboard"
-MLFLOW_PORT=5055
+MLFLOW_PORT=10100
 
 # Check if session already exists
 tmux has-session -t $SESSION_NAME 2>/dev/null

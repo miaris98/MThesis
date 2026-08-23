@@ -1,6 +1,6 @@
 # CARLA Simulator & PPO Training Guide (Vast.ai Jupyter Template End-to-End)
 
-This guide provides an **end-to-end, copy-pasteable workflow** for setting up a brand new **Vast.ai instance** (using the default Jupyter Notebook / PyTorch template), launching CARLA 0.9.15 headlessly, training a PPO Deep RL Agent, tracking experiment metrics with **MLflow (Port 5055)** & **TensorBoard**, logging step-by-step CSV telemetry (`training_telemetry.csv`), and tracking GPU/CPU system resources with interactive tools like **`nvitop`**, **`btop`**, and **`tmux`**.
+This guide provides an **end-to-end, copy-pasteable workflow** for setting up a brand new **Vast.ai instance** (using the default Jupyter Notebook / PyTorch template), launching CARLA 0.9.15 headlessly, training a PPO Deep RL Agent, tracking experiment metrics with **MLflow (Port 10100)** & **TensorBoard**, logging step-by-step CSV telemetry (`training_telemetry.csv`), and tracking GPU/CPU system resources with interactive tools like **`nvitop`**, **`btop`**, and **`tmux`**.
 
 ---
 
@@ -137,15 +137,15 @@ python test_connection.py --host 127.0.0.1 --port 2000
 
 ---
 
-## 5. MLflow Tracking Dashboard (Port 5055)
+## 5. MLflow Tracking Dashboard (Port 10100)
 
-When you launch `train_rl_agent.py`, the `ExperimentLogger` automatically starts an MLflow tracking server on **port 5055** and outputs clickable URLs to stdout:
+When you launch `train_rl_agent.py`, the `ExperimentLogger` automatically starts an MLflow tracking server on **port 10100** and outputs clickable URLs to stdout:
 
 ```text
 ======================================================================
-   📊 MLFLOW DASHBOARD ONLINE (PORT 5055)
-   👉 Clickable Public URL:  http://<YOUR_VAST_IP>:5055
-   👉 Localhost URL:         http://127.0.0.1:5055
+   📊 MLFLOW DASHBOARD ONLINE (PORT 10100)
+   👉 Clickable Public URL:  http://<YOUR_VAST_IP>:10100
+   👉 Localhost URL:         http://127.0.0.1:10100
    ✓ Experiment: 'CARLA_PPO_RL' | Run ID: 4f8b9d...
 ======================================================================
 ```
@@ -153,7 +153,7 @@ When you launch `train_rl_agent.py`, the `ExperimentLogger` automatically starts
 To start the MLflow server manually at any time:
 ```bash
 source /opt/conda/bin/activate carla_py38
-mlflow ui --host 0.0.0.0 --port 5055
+mlflow ui --host 0.0.0.0 --port 10100
 ```
 
 ---
@@ -183,7 +183,7 @@ python train_rl_agent.py \
     --freeze-backbone \
     --minibatch-size 128 \
     --use-mlflow \
-    --mlflow-port 5055 \
+    --mlflow-port 10100 \
     --total-steps 1000000 \
     --log-dir /workspace/runs \
     --checkpoint-dir /workspace/checkpoints
@@ -199,7 +199,7 @@ bash run_training_loop.sh 1000000 lav Town10HD_Opt 3 10
 ## 8. CSV Telemetry Export & Model Artifacts
 
 * **Step-by-Step CSV Log**: All step inputs, outputs, actions, speed, raw rewards, sub-rewards, and curriculum parameters are written to `/workspace/runs/training_telemetry.csv`.
-* **MLflow Artifact Sync**: `training_telemetry.csv` and best model checkpoints (`ppo_carla_best.pth`) are automatically uploaded as MLflow artifacts and downloadable from the MLflow UI (`http://<VAST_IP>:5055`).
+* **MLflow Artifact Sync**: `training_telemetry.csv` and best model checkpoints (`ppo_carla_best.pth`) are automatically uploaded as MLflow artifacts and downloadable from the MLflow UI (`http://<VAST_IP>:10100`).
 
 ---
 

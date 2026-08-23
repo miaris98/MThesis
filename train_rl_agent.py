@@ -406,9 +406,9 @@ class ExperimentLogger:
     """
     Unified MLflow + TensorBoard Logger.
     Logs metrics, hyperparameters, and artifacts to MLflow (and TensorBoard).
-    Auto-starts MLflow UI server on port 5055 and outputs a clickable link to stdout.
+    Auto-starts MLflow UI server on port 10100 and outputs a clickable link to stdout.
     """
-    def __init__(self, log_dir, checkpoint_dir=None, experiment_name="CARLA_PPO_RL", use_mlflow=True, mlflow_port=5055, resume=False):
+    def __init__(self, log_dir, checkpoint_dir=None, experiment_name="CARLA_PPO_RL", use_mlflow=True, mlflow_port=10100, resume=False):
         self.log_dir = log_dir
         self.checkpoint_dir = checkpoint_dir
         self.tb_writer = SummaryWriter(log_dir)
@@ -650,7 +650,7 @@ def train():
     parser.add_argument("--use-mlflow", action="store_true", default=True, help="Enable MLflow experiment tracking")
     parser.add_argument("--no-mlflow", action="store_false", dest="use_mlflow", help="Disable MLflow experiment tracking")
     parser.add_argument("--experiment-name", type=str, default="CARLA_PPO_RL", help="MLflow experiment name")
-    parser.add_argument("--mlflow-port", type=int, default=5055, help="MLflow UI web dashboard port (default: 5055)")
+    parser.add_argument("--mlflow-port", type=int, default=10100, help="MLflow UI web dashboard port (default: 10100)")
 
     args = parser.parse_args()
 
