@@ -408,11 +408,13 @@ class ExperimentLogger:
     Logs metrics, hyperparameters, and artifacts to MLflow (and TensorBoard).
     Auto-starts MLflow UI server on port 5055 and outputs a clickable link to stdout.
     """
-    def __init__(self, log_dir, experiment_name="CARLA_PPO_RL", use_mlflow=True, mlflow_port=5055):
+    def __init__(self, log_dir, checkpoint_dir=None, experiment_name="CARLA_PPO_RL", use_mlflow=True, mlflow_port=5055, resume=False):
         self.log_dir = log_dir
+        self.checkpoint_dir = checkpoint_dir
         self.tb_writer = SummaryWriter(log_dir)
         self.use_mlflow = False
         self.mlflow_port = mlflow_port
+        self.run_id = None
         
         if use_mlflow:
             try:
@@ -435,6 +437,8 @@ class ExperimentLogger:
                         start_new_session=True
                     )
                     time.sleep(1.5)
+                else:
+                    print(f"✓ MLflow UI server is already active on port {mlflow_port} (re-using active session).")
 
                 # Fetch Public IP if available
                 public_ip = "127.0.0.1"
@@ -451,14 +455,39 @@ class ExperimentLogger:
 
                 self.mlflow = mlflow
                 self.mlflow.set_experiment(experiment_name)
-                self.mlflow.start_run()
+
+                # Check for existing MLflow Run ID to resume if requested
+                saved_run_id = None
+                if resume and checkpoint_dir:
+                    state_file = os.path.join(checkpoint_dir, "train_state.json")
+                    if os.path.exists(state_file):
+                        try:
+                            with open(state_file, "r") as f:
+                                st = json.load(f)
+                            saved_run_id = st.get("mlflow_run_id")
+                        except Exception:
+                            pass
+
+                if saved_run_id:
+                    try:
+                        self.mlflow.start_run(run_id=saved_run_id)
+                        print(f"✓ [Resume MLflow] Re-connected to active MLflow Run ID: {saved_run_id}")
+                    except Exception as run_e:
+                        print(f"--> Note: Could not resume MLflow Run ID {saved_run_id} ({run_e}). Starting new run...")
+                        self.mlflow.start_run()
+                else:
+                    self.mlflow.start_run()
+
                 self.use_mlflow = True
-                
+                active_run = self.mlflow.active_run()
+                if active_run:
+                    self.run_id = active_run.info.run_id
+
                 print(f"======================================================================")
                 print(f"   📊 MLFLOW DASHBOARD ONLINE (PORT {mlflow_port})                      ")
                 print(f"   👉 Clickable Public URL:  http://{public_ip}:{mlflow_port}          ")
                 print(f"   👉 Localhost URL:         http://127.0.0.1:{mlflow_port}             ")
-                print(f"   ✓ Experiment: '{experiment_name}' | Run ID: {self.mlflow.active_run().info.run_id}")
+                print(f"   ✓ Experiment: '{experiment_name}' | Run ID: {self.run_id}")
                 print(f"======================================================================")
             except Exception as e:
                 print(f"--> MLflow import/init note ({e}). Logging to TensorBoard at {log_dir}")
@@ -637,7 +666,14 @@ def train():
     if args.weights_path:
         print(f"CARLA Pretrained Checkpoint: {os.path.abspath(args.weights_path)}")
     print(f"Total Steps: {args.total_steps} | Rollout Buffer: {args.rollout_steps}")
-    writer = ExperimentLogger(args.log_dir, experiment_name=args.experiment_name, use_mlflow=args.use_mlflow, mlflow_port=args.mlflow_port)
+    writer = ExperimentLogger(
+        args.log_dir,
+        checkpoint_dir=args.checkpoint_dir,
+        experiment_name=args.experiment_name,
+        use_mlflow=args.use_mlflow,
+        mlflow_port=args.mlflow_port,
+        resume=args.resume
+    )
     writer.log_params(args)
     
     # Initialize Selected Environment
@@ -859,12 +895,15 @@ def train():
 
                 # Persist training state so --resume can continue from here after a crash
                 state_path = os.path.join(args.checkpoint_dir, "train_state.json")
+                state_data = {
+                    "global_step": global_step,
+                    "best_episode_reward": float(best_episode_reward),
+                    "total_steps": args.total_steps
+                }
+                if writer.use_mlflow and writer.run_id:
+                    state_data["mlflow_run_id"] = writer.run_id
                 with open(state_path, "w") as f:
-                    json.dump({
-                        "global_step": global_step,
-                        "best_episode_reward": float(best_episode_reward),
-                        "total_steps": args.total_steps
-                    }, f, indent=2)
+                    json.dump(state_data, f, indent=2)
 
                 obs, _ = env.reset()
                 current_ep_reward = 0
@@ -953,8 +992,15 @@ def train():
         # Save Latest Checkpoint & State Metadata
         latest_path = os.path.join(args.checkpoint_dir, "ppo_carla_latest.pth")
         torch.save(agent.state_dict(), latest_path)
+        state_data = {
+            "global_step": global_step,
+            "best_episode_reward": float(best_episode_reward),
+            "total_steps": args.total_steps
+        }
+        if writer.use_mlflow and writer.run_id:
+            state_data["mlflow_run_id"] = writer.run_id
         with open(os.path.join(args.checkpoint_dir, "train_state.json"), "w") as f:
-            json.dump({"global_step": global_step, "best_episode_reward": best_episode_reward}, f)
+            json.dump(state_data, f, indent=2)
 
     env.close()
     csv_logger.close()
