@@ -39,6 +39,13 @@ while true; do
         sleep 8
     fi
 
+    WEIGHTS_ARG=""
+    if [ -f "./papers_and_code/LAV/lav_pretrained.pth" ]; then
+        WEIGHTS_ARG="--weights-path ./papers_and_code/LAV/lav_pretrained.pth"
+    elif [ -f "/workspace/pretrained_carla/model_0030_0.pth" ]; then
+        WEIGHTS_ARG="--weights-path /workspace/pretrained_carla/model_0030_0.pth"
+    fi
+
     # 3. Launch / Resume Training
     python train_rl_agent.py \
         --env-type camera_easycarla \
@@ -47,8 +54,10 @@ while true; do
         --num-vehicles "$NUM_VEHICLES" \
         --num-walkers "$NUM_WALKERS" \
         --ent-coef 0.02 \
+        --minibatch-size 128 \
         --use-mlflow \
         --mlflow-port 5055 \
+        $WEIGHTS_ARG \
         --resume \
         --total-steps "$TOTAL_STEPS"
 
