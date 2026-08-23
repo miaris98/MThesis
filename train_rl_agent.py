@@ -649,7 +649,7 @@ def train():
     parser.add_argument("--num-walkers", type=int, default=10, help="Number of pedestrian walkers")
     parser.add_argument("--town", type=str, default="Town10HD_Opt", help="CARLA map/town to use for training")
     parser.add_argument("--reward-clip", type=float, default=50.0, help="Clip raw rewards to [-reward-clip, +reward-clip]")
-    parser.add_argument("--ent-coef", type=float, default=0.02, help="PPO entropy bonus coefficient")
+    parser.add_argument("--ent-coef", type=float, default=0.05, help="PPO entropy bonus coefficient")
     parser.add_argument("--minibatch-size", type=int, default=128, help="PPO mini-batch size for GPU Tensor Core acceleration")
     parser.add_argument("--use-mlflow", action="store_true", default=True, help="Enable MLflow experiment tracking")
     parser.add_argument("--no-mlflow", action="store_false", dest="use_mlflow", help="Disable MLflow experiment tracking")
@@ -731,7 +731,7 @@ def train():
             latest_ckpt = os.path.join(args.checkpoint_dir, "ppo_carla_best.pth")
         state_file = os.path.join(args.checkpoint_dir, "train_state.json")
         if os.path.exists(latest_ckpt):
-            agent.load_state_dict(torch.load(latest_ckpt, map_location=device))
+            agent.load_state_dict(torch.load(latest_ckpt, map_location=device), strict=False)
             print(f"[Resume] Loaded policy checkpoint: {latest_ckpt}")
         if os.path.exists(state_file):
             with open(state_file) as f:

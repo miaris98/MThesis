@@ -601,11 +601,11 @@ class CameraEasyCarlaEnv(gym.Env):
 
         # 2. Dual-Horizon Heading alignment, Lane centering & Gaussian Potential Well
         heading_cos, heading_cos_far, lateral_dist, curve_factor, is_junction = self._get_lane_alignment()
-        r_heading = 0.35 * heading_cos + 0.15 * heading_cos_far
+        r_heading = 0.35 * max(-1.0, min(1.0, heading_cos)) + 0.15 * max(-1.0, min(1.0, heading_cos_far))
         
-        # Gaussian Lane Potential Well: +0.5 at exact center line, smoothly decreasing to -0.5 near boundaries
-        r_lateral = 1.0 * (math.exp(-(lateral_dist ** 2) / (2.0 * (0.6 ** 2))) - 0.5)
-        r_boundary = -1.0 * (max(0.0, lateral_dist - 1.2) ** 2)
+        # Gaussian Lane Potential Well: +1.0 at exact center line, decreasing quadratically with lateral deviation
+        r_lateral = 1.0 * math.exp(-(lateral_dist ** 2) / (2.0 * (0.45 ** 2))) - 0.8 * (lateral_dist ** 2)
+        r_boundary = -2.0 * (max(0.0, lateral_dist - 0.9) ** 2)
 
         # 3. Directional Velocity Projection Progress & Curvature-Adaptive Target Speed
         base_target = self.params.get('desired_speed', 25.0)
@@ -617,22 +617,25 @@ class CameraEasyCarlaEnv(gym.Env):
         v_proj = speed_kmh * max(0.0, heading_cos)
         speed_diff = abs(v_proj - adaptive_target_speed)
         
+        # Scale speed reward by lane centering quality so driving in circles off-center gives 0 speed reward
+        lane_centering_gate = max(0.0, 1.0 - (lateral_dist / 1.2)) * max(0.0, heading_cos)
         if not is_at_red_light:
             if speed_diff <= 3.0:
-                r_speed = 1.5
+                raw_speed_r = 1.5
             else:
-                r_speed = 1.5 * max(0.0, 1.0 - (speed_diff - 3.0) / adaptive_target_speed)
+                raw_speed_r = 1.5 * max(0.0, 1.0 - (speed_diff - 3.0) / adaptive_target_speed)
+            r_speed = raw_speed_r * lane_centering_gate
         else:
             r_speed = 0.0
 
-        # 4. Steering Smoothness, Rate & Dynamic Envelope Regularization
+        # 4. Steering Smoothness, Rate & Dynamic Envelope Regularization (Active at all speeds)
         steer_diff = abs(steer - self.prev_steer)
         self.prev_steer = steer
         r_steer_rate = -0.3 * steer_diff
-        r_steer_mag = -0.2 * (steer ** 2) if speed_kmh > 10.0 else 0.0
+        r_steer_mag = -0.35 * (steer ** 2)
         
-        # Velocity-dynamic steering magnitude limit
-        steer_max_allowed = max(0.15, 30.0 / (speed_kmh + 5.0))
+        # Penalize excessive steering angle beyond 0.35 rad (approx 20 deg) during straight cruising
+        steer_max_allowed = max(0.20, min(0.60, 15.0 / (speed_kmh + 10.0)))
         r_steer_envelope = -2.0 * (max(0.0, abs(steer) - steer_max_allowed) ** 2)
         r_steer = r_steer_rate + r_steer_mag + r_steer_envelope
 
@@ -679,7 +682,15 @@ class CameraEasyCarlaEnv(gym.Env):
             r_idle = 0.0
 
         is_stalled = bool(self.stalled_steps >= 25)
-        r_stall = -30.0 if is_stalled else 0.0
+
+        # 10. Terminal Failure Penalties (Stall, Off-road, Collision)
+        r_terminal = 0.0
+        if self.easy_env._is_collision:
+            r_terminal = -25.0
+        elif self.easy_env._is_off_road:
+            r_terminal = -20.0
+        elif is_stalled:
+            r_terminal = -20.0
 
         # Apply literature-aligned dynamic curriculum scaling (alpha in [0.2, 1.0])
         alpha = self.curriculum_factor
@@ -688,11 +699,11 @@ class CameraEasyCarlaEnv(gym.Env):
         r_light_s = r_light if r_light > 0 else (r_light * alpha)
         r_obstacle_s = r_obstacle if r_obstacle > 0 else (r_obstacle * alpha)
         r_ttc_s = r_ttc * alpha
-        r_stall_s = r_stall * alpha
+        r_terminal_s = r_terminal * alpha
 
         # Combine step reward terms
         reward = (r_speed + r_heading + r_lateral + r_boundary_s + r_steer + 
-                  r_comfort + r_wrong_way_s + r_light_s + r_obstacle_s + r_ttc_s + r_idle + r_stall_s)
+                  r_comfort + r_wrong_way_s + r_light_s + r_obstacle_s + r_ttc_s + r_idle + r_terminal_s)
 
         # Combine Gym termination signals
         terminated = bool(done or self.easy_env._is_collision or self.easy_env._is_off_road or is_stalled)

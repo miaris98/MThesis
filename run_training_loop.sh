@@ -168,7 +168,7 @@ while true; do
         --town "$TOWN" \
         --num-vehicles "$NUM_VEHICLES" \
         --num-walkers "$NUM_WALKERS" \
-        --ent-coef 0.02 \
+        --ent-coef 0.05 \
         --minibatch-size 128 \
         --use-mlflow \
         --mlflow-port $MLFLOW_PORT \
