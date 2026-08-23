@@ -194,29 +194,39 @@ def record_eval_video(
     chase_cam_holder = [None]
     chase_frame_buffer = [None]
 
-    def setup_chase_camera():
+    def cleanup_chase_camera():
         chase_frame_buffer[0] = None
         if chase_cam_holder[0] is not None:
             try:
-                chase_cam_holder[0].stop()
+                if hasattr(chase_cam_holder[0], 'is_listening') and chase_cam_holder[0].is_listening:
+                    chase_cam_holder[0].stop()
+                if hasattr(chase_cam_holder[0], 'is_alive') and chase_cam_holder[0].is_alive:
+                    chase_cam_holder[0].destroy()
             except Exception:
                 pass
             chase_cam_holder[0] = None
 
+    def setup_chase_camera():
+        cleanup_chase_camera()
+        if not hasattr(env, 'easy_env') or not hasattr(env.easy_env, 'ego') or env.easy_env.ego is None:
+            return
         chase_bp = blueprint_library.find("sensor.camera.rgb")
         chase_bp.set_attribute("image_size_x", str(chase_w))
         chase_bp.set_attribute("image_size_y", str(chase_h))
         chase_bp.set_attribute("fov", "95")
         chase_tf = carla.Transform(carla.Location(x=-5.5, z=2.5), carla.Rotation(pitch=-12.0))
-        chase_cam = env.easy_env.world.spawn_actor(chase_bp, chase_tf, attach_to=env.easy_env.ego)
+        try:
+            chase_cam = env.easy_env.world.spawn_actor(chase_bp, chase_tf, attach_to=env.easy_env.ego)
 
-        def _on_chase_img(img):
-            arr = np.frombuffer(img.raw_data, dtype=np.uint8)
-            arr = np.reshape(arr, (img.height, img.width, 4))
-            chase_frame_buffer[0] = arr[:, :, :3].copy()
+            def _on_chase_img(img):
+                arr = np.frombuffer(img.raw_data, dtype=np.uint8)
+                arr = np.reshape(arr, (img.height, img.width, 4))
+                chase_frame_buffer[0] = arr[:, :, :3].copy()
 
-        chase_cam.listen(_on_chase_img)
-        chase_cam_holder[0] = chase_cam
+            chase_cam.listen(_on_chase_img)
+            chase_cam_holder[0] = chase_cam
+        except Exception as e:
+            print(f"Notice: Chase camera mount deferred ({e})")
 
     # 4. Canvas Dimensions (1280 x 720 HD)
     canvas_w = 1280
@@ -386,22 +396,34 @@ def record_eval_video(
                 recorded_valid_steps += len(ep_frames)
                 print(f"✓ [SAVED TO VIDEO] Episode #{saved_episodes} ({term_reason}) | Steps: {len(ep_frames)} | Max Speed: {max_spd:.1f} km/h | Avg: {avg_spd:.1f} km/h | Total Video Frames: {recorded_valid_steps}/{target_valid_steps}")
 
-            # Reset environment for next episode
-            obs, info = env.reset()
-            setup_chase_camera()
+            if recorded_valid_steps >= target_valid_steps:
+                print(f"🎉 Target frame count reached ({recorded_valid_steps}/{target_valid_steps} frames)!")
+                break
+
+            # Clean up spectator sensor before resetting environment to prevent CARLA pipe deadlock
+            cleanup_chase_camera()
+
+            # Reset environment for next episode with safe error handling
+            try:
+                obs, info = env.reset()
+                setup_chase_camera()
+            except (Exception, BaseException) as reset_err:
+                print(f"Notice: Simulator reset completed session ({reset_err}). Finalizing collected video ({recorded_valid_steps} frames)...")
+                break
 
     finally:
         print("Finalizing video recording and closing environment...")
-        video_writer.release()
+        try:
+            video_writer.release()
+        except Exception:
+            pass
 
-        if chase_cam_holder[0] is not None:
-            try:
-                chase_cam_holder[0].stop()
-                chase_cam_holder[0].destroy()
-            except Exception:
-                pass
+        cleanup_chase_camera()
 
-        env.close()
+        try:
+            env.close()
+        except Exception:
+            pass
 
         print(f"--- Evaluation Video Saved: {os.path.abspath(output_video)} ---")
 

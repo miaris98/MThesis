@@ -219,3 +219,6 @@ In JupyterLab, play the recorded video cell:
 from IPython.display import Video
 Video('/workspace/output_screenshots/driving_multiview.mp4', embed=True, width=720)
 ```
+
+
+Mlflow : http://124.60.192.12:50559/#/
