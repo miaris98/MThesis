@@ -9,7 +9,11 @@ tmux has-session -t $SESSION_NAME 2>/dev/null
 
 if [ $? -eq 0 ]; then
     echo "Attaching to existing '$SESSION_NAME' diagnostics session..."
-    tmux attach-session -t $SESSION_NAME
+    if [ -n "$TMUX" ]; then
+        tmux switch-client -t $SESSION_NAME
+    else
+        tmux attach -t $SESSION_NAME
+    fi
     exit 0
 fi
 
@@ -51,4 +55,8 @@ echo "  📊 MLFLOW WEB DASHBOARD URL:"
 echo "  👉 http://$PUBLIC_IP:$MLFLOW_PORT"
 echo "  👉 http://127.0.0.1:$MLFLOW_PORT"
 echo "----------------------------------------------------------------"
-tmux attach-session -t $SESSION_NAME
+if [ -n "$TMUX" ]; then
+    tmux switch-client -t $SESSION_NAME
+else
+    tmux attach -t $SESSION_NAME
+fi

@@ -10,6 +10,15 @@ TOWN=${3:-Town10HD_Opt}
 NUM_VEHICLES=${4:-3}
 NUM_WALKERS=${5:-10}
 
+# Auto-activate carla_py38 conda environment if available
+for p in "/workspace/miniconda" "/opt/conda" "$HOME/miniconda3" "$HOME/anaconda3" "/root/miniconda3" "/usr/local/miniconda3"; do
+    if [ -f "$p/etc/profile.d/conda.sh" ]; then
+        source "$p/etc/profile.d/conda.sh"
+        conda activate carla_py38 2>/dev/null || true
+        break
+    fi
+done
+
 echo "=============================================================="
 echo "   🔄 Starting Autonomous Auto-Restart Training Supervisor    "
 echo "=============================================================="
