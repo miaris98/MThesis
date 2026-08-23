@@ -97,53 +97,33 @@ class CameraEasyCarlaEnv(gym.Env):
         self.prev_throttle = 0.0
         self.curriculum_factor = 1.0
         
-        # Check if CARLA server is responsive and verify active town map
+        # Connect to CARLA server on requested port
         town = params.get('town', 'Town10HD_Opt')
         port = params.get('port', 2000)
-        server_ok = False
+
+        # 1. Wait for server (started by supervisor / run_training_loop.sh) to open port
+        print(f"--> Connecting to CARLA server on port {port}...")
+        server_ok = _wait_for_carla_server(port, max_wait=60)
+
+        # 2. If server is not running at all, launch background server (OpenGL fallback)
+        if not server_ok and os.path.exists("/workspace/carla/CarlaUE4.sh"):
+            print(f"--> No active server found on port {port}. Starting CARLA server (-opengl)...")
+            os.system(f"tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port={port} -RenderOffScreen -nosound -opengl -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
+            _wait_for_carla_server(port, max_wait=45)
+
+        # 3. Check active town map and load requested town via Python RPC if needed
         try:
             test_c = carla.Client('127.0.0.1', port)
-            test_c.set_timeout(10.0)
+            test_c.set_timeout(30.0)
             cur_map = test_c.get_world().get_map().name
-            server_ok = True
             if town in cur_map:
-                print(f"✓ CARLA server is already running {cur_map}. Re-using active world!")
+                print(f"✓ CARLA server is already running map '{cur_map}'. Re-using active world!")
             else:
-                print(f"--> Current map is {cur_map}. Loading requested map '{town}' via Python API...")
+                print(f"--> Current map is '{cur_map}'. Switching to requested map '{town}' via Python API...")
                 test_c.load_world(town)
                 print(f"✓ Successfully loaded map '{town}'!")
         except Exception as e:
-            print(f"--> Server check / map load notice: {e}")
-            server_ok = False
-
-        if not server_ok and os.path.exists("/workspace/carla/CarlaUE4.sh"):
-            print(f"--> Attempting CARLA server launch on port {port} with Vulkan (-vulkan)...")
-            os.system("pkill -9 -f CarlaUE4 2>/dev/null || true")
-            os.system("tmux kill-session -t carla_server 2>/dev/null || true")
-            os.system(f"tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port={port} -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
-            
-            # Check if Vulkan mode succeeded or crashed with Illegal instruction
-            vulkan_ok = False
-            for _ in range(8):
-                time.sleep(1.0)
-                try:
-                    c_chk = carla.Client('127.0.0.1', port)
-                    c_chk.set_timeout(2.0)
-                    c_chk.get_world()
-                    vulkan_ok = True
-                    break
-                except Exception:
-                    pass
-
-            if not vulkan_ok:
-                print("======================================================================")
-                print(" ⚠️  WARNING: CARLA Vulkan render engine failed (Illegal instruction).")
-                print(" 🔄  Falling back automatically to OpenGL rendering mode (-opengl)...")
-                print("======================================================================")
-                os.system("pkill -9 -f CarlaUE4 2>/dev/null || true")
-                os.system("tmux kill-session -t carla_server 2>/dev/null || true")
-                os.system(f"tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port={port} -RenderOffScreen -nosound -opengl -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
-                _wait_for_carla_server(port, max_wait=45)
+            print(f"--> Map check notice: {e}")
 
         self.carla_client = carla.Client('127.0.0.1', port)
         self.carla_client.set_timeout(60.0)
