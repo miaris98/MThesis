@@ -357,10 +357,13 @@ def record_eval_video(
             term_reason = info.get("termination_reason", "Episode Finished")
             max_spd = max(episode_speeds) if episode_speeds else 0.0
             avg_spd = np.mean(episode_speeds) if episode_speeds else 0.0
-            is_valid_drive = (max_spd >= min_speed) and (avg_spd >= 4.0) and (step_in_ep >= 25) and ("Stalled" not in term_reason)
+            if min_speed <= 0.0:
+                is_valid_drive = (step_in_ep >= 5)
+            else:
+                is_valid_drive = (max_spd >= min_speed) and (avg_spd >= min(min_speed / 2.0, 4.0)) and (step_in_ep >= 15)
 
             if not is_valid_drive:
-                print(f"[Attempt #{attempted_episodes} DISCARDED] Stalled/Slow (Max: {max_spd:.1f} km/h, Avg: {avg_spd:.1f} km/h, Steps: {step_in_ep}, Reason: {term_reason}) - Skipped.")
+                print(f"[Attempt #{attempted_episodes} DISCARDED] Slow/Short (Max: {max_spd:.1f} km/h, Avg: {avg_spd:.1f} km/h, Steps: {step_in_ep}, Reason: {term_reason}) - Skipped.")
             else:
                 saved_episodes += 1
                 # Attach ending alert banner
@@ -423,7 +426,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=2000, help="CARLA port")
     parser.add_argument("--steps", type=int, default=600, help="Total number of valid driving frames to record (default: 600 steps = 30s)")
     parser.add_argument("--max-episode-steps", type=int, default=500, help="Maximum steps allowed per episode before timeout (default: 500 steps = 25s)")
-    parser.add_argument("--min-speed", type=float, default=8.0, help="Minimum peak speed (km/h) required for an episode to be saved to video")
+    parser.add_argument("--min-speed", type=float, default=0.0, help="Minimum peak speed (km/h) required for an episode to be saved to video (default: 0.0 to record all)")
     parser.add_argument("--output-video", type=str, default="/workspace/output_screenshots/driving_eval_model_input.mp4", help="Output MP4 path")
     parser.add_argument("--num-vehicles", "--npc-vehicles", dest="npc_vehicles", type=int, default=3, help="Number of NPC traffic vehicles")
     parser.add_argument("--num-walkers", type=int, default=10, help="Number of pedestrian walkers in the environment")
