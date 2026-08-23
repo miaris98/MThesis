@@ -59,11 +59,26 @@ while true; do
     tmux kill-session -t carla_server 2>/dev/null || true
     sleep 2
 
-    # 2. Start clean CARLA Server instance
+    # 2. Start clean CARLA Server instance (Vulkan primary -> OpenGL fallback)
     if [ -f "/workspace/carla/CarlaUE4.sh" ]; then
-        echo "--> Starting fresh CARLA server..."
+        echo "--> Attempting CARLA server launch with Vulkan graphics (-vulkan)..."
         tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1"
-        sleep 10
+        sleep 4
+
+        # Check if Vulkan launch failed (Illegal instruction or early crash)
+        if grep -i -E "Illegal instruction|Fatal error|Signal 11" /workspace/carla_server.log >/dev/null 2>&1 || ! pgrep -f CarlaUE4 >/dev/null 2>&1; then
+            echo -e "\033[1;33m======================================================================\033[0m"
+            echo -e "\033[1;33m ⚠️  WARNING: CARLA Vulkan render engine failed (Illegal instruction).\033[0m"
+            echo -e "\033[1;33m 🔄  Falling back automatically to OpenGL rendering mode (-opengl)...\033[0m"
+            echo -e "\033[1;33m======================================================================\033[0m"
+            pkill -9 -f CarlaUE4 2>/dev/null || true
+            tmux kill-session -t carla_server 2>/dev/null || true
+            sleep 1
+            tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -opengl -quality-level=Low' > /workspace/carla_server.log 2>&1"
+            sleep 8
+        else
+            echo "✓ CARLA Vulkan server running smoothly!"
+        fi
     fi
 
     WEIGHTS_ARG=""

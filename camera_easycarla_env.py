@@ -117,11 +117,33 @@ class CameraEasyCarlaEnv(gym.Env):
             server_ok = False
 
         if not server_ok and os.path.exists("/workspace/carla/CarlaUE4.sh"):
-            print(f"--> Starting CARLA server instance on port {port}...")
+            print(f"--> Attempting CARLA server launch on port {port} with Vulkan (-vulkan)...")
             os.system("pkill -9 -f CarlaUE4 2>/dev/null || true")
             os.system("tmux kill-session -t carla_server 2>/dev/null || true")
             os.system(f"tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port={port} -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
-            _wait_for_carla_server(port, max_wait=45)
+            
+            # Check if Vulkan mode succeeded or crashed with Illegal instruction
+            vulkan_ok = False
+            for _ in range(8):
+                time.sleep(1.0)
+                try:
+                    c_chk = carla.Client('127.0.0.1', port)
+                    c_chk.set_timeout(2.0)
+                    c_chk.get_world()
+                    vulkan_ok = True
+                    break
+                except Exception:
+                    pass
+
+            if not vulkan_ok:
+                print("======================================================================")
+                print(" ⚠️  WARNING: CARLA Vulkan render engine failed (Illegal instruction).")
+                print(" 🔄  Falling back automatically to OpenGL rendering mode (-opengl)...")
+                print("======================================================================")
+                os.system("pkill -9 -f CarlaUE4 2>/dev/null || true")
+                os.system("tmux kill-session -t carla_server 2>/dev/null || true")
+                os.system(f"tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port={port} -RenderOffScreen -nosound -opengl -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
+                _wait_for_carla_server(port, max_wait=45)
 
         self.carla_client = carla.Client('127.0.0.1', port)
         self.carla_client.set_timeout(60.0)
