@@ -47,6 +47,8 @@ while true; do
         --num-vehicles "$NUM_VEHICLES" \
         --num-walkers "$NUM_WALKERS" \
         --ent-coef 0.02 \
+        --use-mlflow \
+        --mlflow-port 5055 \
         --resume \
         --total-steps "$TOTAL_STEPS"
 

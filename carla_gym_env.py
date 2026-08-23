@@ -80,6 +80,9 @@ class CarlaGymEnv(gym.Env):
         self.latest_image = None
         self.has_collided = False
         self.step_count = 0
+        self.prev_steer = 0.0
+        self.prev_throttle = 0.0
+        self.curriculum_factor = 1.0
 
         self._init_carla()
 
@@ -175,6 +178,10 @@ class CarlaGymEnv(gym.Env):
         v = self.vehicle.get_velocity()
         return 3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2)
 
+    def set_curriculum_factor(self, factor):
+        """Set dynamic reward curriculum factor in range [0.2, 1.0] matching literature annealing schedules."""
+        self.curriculum_factor = float(np.clip(factor, 0.2, 1.0))
+
     def _get_obs(self):
         """Build observation dictionary."""
         speed = np.array([self._get_speed_kmh()], dtype=np.float32)
@@ -183,6 +190,90 @@ class CarlaGymEnv(gym.Env):
             "image": image,
             "speed": speed
         }
+
+    def _get_lane_alignment(self):
+        """
+        Calculate heading alignment cos(delta_yaw), lateral distance to lane centerline,
+        ahead curvature factor, junction status, and far horizon heading alignment (10m).
+        Returns: (heading_cos, heading_cos_far, lateral_dist, curve_factor, is_junction)
+        """
+        try:
+            if self.vehicle is None or self.world is None:
+                return 1.0, 1.0, 0.0, 1.0, False
+            ego_tf = self.vehicle.get_transform()
+            ego_loc = ego_tf.location
+            carla_map = self.world.get_map()
+            wpt = carla_map.get_waypoint(ego_loc, project_to_road=True, lane_type=carla.LaneType.Driving)
+            if wpt is None:
+                return 1.0, 1.0, 0.0, 1.0, False
+            wpt_tf = wpt.transform
+            is_junction = bool(wpt.is_junction)
+            
+            ego_yaw_rad = math.radians(ego_tf.rotation.yaw)
+            wpt_yaw_rad = math.radians(wpt_tf.rotation.yaw)
+            heading_cos = math.cos(ego_yaw_rad - wpt_yaw_rad)
+            
+            heading_cos_far = heading_cos
+            curve_factor = 1.0
+            next_wpts = wpt.next(5.0)
+            if next_wpts and len(next_wpts) > 0:
+                ahead_yaw_rad = math.radians(next_wpts[0].transform.rotation.yaw)
+                curve_factor = max(0.4, math.cos(ego_yaw_rad - ahead_yaw_rad))
+                next_10m = next_wpts[0].next(5.0)
+                if next_10m and len(next_10m) > 0:
+                    far_yaw_rad = math.radians(next_10m[0].transform.rotation.yaw)
+                    heading_cos_far = math.cos(ego_yaw_rad - far_yaw_rad)
+                
+            lateral_dist = ego_loc.distance(wpt_tf.location)
+            return heading_cos, heading_cos_far, lateral_dist, curve_factor, is_junction
+        except Exception:
+            return 1.0, 1.0, 0.0, 1.0, False
+
+    def _get_front_obstacle_info(self, max_dist=15.0):
+        """
+        Scan for pedestrians and vehicles in front of ego vehicle within max_dist meters.
+        Returns: (min_dist, is_pedestrian, ttc_seconds)
+        """
+        try:
+            if self.vehicle is None or self.world is None:
+                return max_dist, False, 99.0
+            ego_tf = self.vehicle.get_transform()
+            ego_loc = ego_tf.location
+            ego_fwd = ego_tf.get_forward_vector()
+            ego_vel = self.vehicle.get_velocity()
+            
+            actors = self.world.get_actors()
+            min_dist = max_dist
+            is_pedestrian = False
+            ttc_min = 99.0
+            
+            for actor in actors:
+                if actor.id == self.vehicle.id:
+                    continue
+                a_type = actor.type_id
+                if not (a_type.startswith('walker.pedestrian') or a_type.startswith('vehicle.')):
+                    continue
+                loc = actor.get_location()
+                dist = ego_loc.distance(loc)
+                if dist < min_dist and dist > 0.5:
+                    vec = carla.Vector3D(loc.x - ego_loc.x, loc.y - ego_loc.y, loc.z - ego_loc.z)
+                    norm = math.sqrt(vec.x**2 + vec.y**2 + vec.z**2) + 1e-6
+                    dot = (vec.x * ego_fwd.x + vec.y * ego_fwd.y + vec.z * ego_fwd.z) / norm
+                    if dot > 0.707:
+                        min_dist = dist
+                        if a_type.startswith('walker.pedestrian'):
+                            is_pedestrian = True
+                        
+                        obs_vel = actor.get_velocity()
+                        closing_speed_mps = (ego_vel.x - obs_vel.x) * ego_fwd.x + (ego_vel.y - obs_vel.y) * ego_fwd.y
+                        if closing_speed_mps > 0.1:
+                            ttc = dist / closing_speed_mps
+                            if ttc < ttc_min:
+                                ttc_min = ttc
+                                
+            return min_dist, is_pedestrian, ttc_min
+        except Exception:
+            return max_dist, False, 99.0
 
     def step(self, action):
         self.step_count += 1
@@ -200,27 +291,107 @@ class CarlaGymEnv(gym.Env):
             hand_brake=False,
             reverse=False
         )
-        self.vehicle.apply_control(control)
+        if self.vehicle is not None:
+            self.vehicle.apply_control(control)
 
         # Tick simulation
-        if self.synchronous_mode:
+        if self.synchronous_mode and self.world is not None:
             self.world.tick()
 
         speed_kmh = self._get_speed_kmh()
         obs = self._get_obs()
 
-        # --- Compute Reward Function ---
-        # 1. Speed Reward: Encourage driving near target_speed
-        speed_reward = 1.0 - abs(speed_kmh - self.target_speed) / self.target_speed
-        speed_reward = max(speed_reward, -1.0)
+        # 1. Traffic Light status check (Red & Yellow)
+        is_at_red_light = False
+        try:
+            if self.vehicle is not None and self.vehicle.is_at_traffic_light():
+                tl = self.vehicle.get_traffic_light()
+                if tl is not None and tl.get_state() in [carla.TrafficLightState.Red, carla.TrafficLightState.Yellow]:
+                    is_at_red_light = True
+        except Exception:
+            is_at_red_light = False
 
-        # 2. Steering Smoothness Penalty: Penalize sharp high-speed steering turns
-        steering_penalty = -0.5 * (steering ** 2) if speed_kmh > 10.0 else 0.0
+        # 2. Dual-Horizon Heading alignment, Lane centering & Gaussian Potential Well
+        heading_cos, heading_cos_far, lateral_dist, curve_factor, is_junction = self._get_lane_alignment()
+        r_heading = 0.35 * heading_cos + 0.15 * heading_cos_far
+        
+        # Gaussian Lane Potential Well: +0.5 at exact center line, smoothly decreasing to -0.5 near boundaries
+        r_lateral = 1.0 * (math.exp(-(lateral_dist ** 2) / (2.0 * (0.6 ** 2))) - 0.5)
+        r_boundary = -1.0 * (max(0.0, lateral_dist - 1.2) ** 2)
 
-        # 3. Collision Penalty
-        collision_penalty = -100.0 if self.has_collided else 0.0
+        # 3. Directional Velocity Projection Progress & Curvature-Adaptive Target Speed
+        base_target = self.target_speed
+        adaptive_target_speed = base_target * curve_factor
+        if is_junction:
+            adaptive_target_speed = min(adaptive_target_speed, 15.0)
+            
+        # Directional forward velocity along lane tangent
+        v_proj = speed_kmh * max(0.0, heading_cos)
+        speed_diff = abs(v_proj - adaptive_target_speed)
+        
+        if not is_at_red_light:
+            if speed_diff <= 3.0:
+                r_speed = 1.5
+            else:
+                r_speed = 1.5 * max(0.0, 1.0 - (speed_diff - 3.0) / adaptive_target_speed)
+        else:
+            r_speed = 0.0
 
-        reward = speed_reward + steering_penalty + collision_penalty
+        # 4. Steering Smoothness, Rate & Dynamic Envelope Regularization
+        steer_diff = abs(steering - self.prev_steer)
+        self.prev_steer = steering
+        r_steer_rate = -0.3 * steer_diff
+        r_steer_mag = -0.2 * (steering ** 2) if speed_kmh > 10.0 else 0.0
+        
+        # Velocity-dynamic steering magnitude limit
+        steer_max_allowed = max(0.15, 30.0 / (speed_kmh + 5.0))
+        r_steer_envelope = -2.0 * (max(0.0, abs(steering) - steer_max_allowed) ** 2)
+        r_steer = r_steer_rate + r_steer_mag + r_steer_envelope
+
+        # 5. Comfort & Throttle-Brake Conflict / Jitter Penalty
+        throttle_diff = abs(throttle - self.prev_throttle)
+        self.prev_throttle = throttle
+        r_comfort = -0.5 * (throttle * brake) - 0.2 * throttle_diff
+
+        # 6. Wrong-Way / Reverse Driving Penalty
+        r_wrong_way = -3.0 * max(0.0, -heading_cos) * min(speed_kmh / 5.0, 1.0)
+
+        # 7. Traffic Light Compliance
+        if is_at_red_light:
+            if speed_kmh < 2.0 or brake > 0.2:
+                r_light = 1.5
+            else:
+                r_light = -5.0
+        else:
+            r_light = 0.0
+
+        # 8. Obstacle & Pedestrian Proximity Barrier Function & Time-To-Collision (TTC)
+        min_obs_dist, is_pedestrian, ttc_seconds = self._get_front_obstacle_info(max_dist=15.0)
+        r_obstacle = 0.0
+        if min_obs_dist < 10.0:
+            barrier_scale = 1.0 - (min_obs_dist / 10.0)
+            multiplier = 2.0 if is_pedestrian else 1.0
+            if brake > 0.2 or speed_kmh < 2.0:
+                r_obstacle = 1.5 * barrier_scale * multiplier
+            elif throttle > 0.2:
+                r_obstacle = -4.0 * (barrier_scale ** 2) * multiplier
+
+        r_ttc = -3.0 * (max(0.0, (2.0 - ttc_seconds) / 2.0) ** 2) if ttc_seconds < 2.0 else 0.0
+
+        # 9. Collision Penalty
+        r_collision = -100.0 if self.has_collided else 0.0
+
+        # Apply literature-aligned dynamic curriculum scaling (alpha in [0.2, 1.0])
+        alpha = self.curriculum_factor
+        r_boundary_s = r_boundary * alpha
+        r_wrong_way_s = r_wrong_way * alpha
+        r_light_s = r_light if r_light > 0 else (r_light * alpha)
+        r_obstacle_s = r_obstacle if r_obstacle > 0 else (r_obstacle * alpha)
+        r_ttc_s = r_ttc * alpha
+        r_collision_s = r_collision * alpha
+
+        reward = (r_speed + r_heading + r_lateral + r_boundary_s + r_steer + 
+                  r_comfort + r_wrong_way_s + r_light_s + r_obstacle_s + r_ttc_s + r_collision_s)
 
         # Check termination conditions
         terminated = self.has_collided
@@ -229,7 +400,17 @@ class CarlaGymEnv(gym.Env):
         info = {
             "speed_kmh": speed_kmh,
             "has_collided": self.has_collided,
-            "step_count": self.step_count
+            "step_count": self.step_count,
+            "r_speed": r_speed,
+            "r_heading": r_heading,
+            "r_lateral": r_lateral,
+            "r_boundary": r_boundary,
+            "r_steer": r_steer,
+            "r_comfort": r_comfort,
+            "r_wrong_way": r_wrong_way,
+            "r_light": r_light,
+            "r_obstacle": r_obstacle,
+            "r_collision": r_collision
         }
 
         return obs, reward, terminated, truncated, info

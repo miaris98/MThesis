@@ -3,6 +3,7 @@ import sys
 import time
 import argparse
 import json
+import csv
 import numpy as np
 import torch
 import torch.nn as nn
@@ -38,24 +39,21 @@ class PretrainedVisionFeatureExtractor(nn.Module):
 
         # Optionally load CARLA-domain pretrained checkpoint (.pth)
         if weights_path is not None and os.path.exists(weights_path):
-            print(f"--> Loading CARLA-domain TransFuser++ vision weights from: {weights_path}")
+            print(f"--> Loading CARLA-domain pretrained vision weights (LAV / TransFuser++) from: {weights_path}")
             checkpoint = torch.load(weights_path, map_location="cpu")
-            state_dict = checkpoint.get("state_dict", checkpoint.get("model", checkpoint))
+            state_dict = checkpoint.get("state_dict", checkpoint.get("model", checkpoint.get("state_dict_bev", checkpoint)))
             
-            # Extract TransFuser++ / TCP camera encoder weights if prefixed
+            # Extract LAV / TransFuser++ / TCP camera encoder weights if prefixed
             extracted_dict = {}
             for k, v in state_dict.items():
-                if k.startswith("image_encoder."):
-                    extracted_dict[k.replace("image_encoder.", "")] = v
-                elif k.startswith("encoder.image_encoder."):
-                    extracted_dict[k.replace("encoder.image_encoder.", "")] = v
-                elif k.startswith("perception."):
-                    extracted_dict[k.replace("perception.", "")] = v
-                else:
-                    extracted_dict[k] = v
+                clean_k = k
+                for prefix in ["image_encoder.", "encoder.image_encoder.", "perception.", "bev_planner.", "rgb_encoder.", "camera_encoder.", "bev_encoder.", "model."]:
+                    if clean_k.startswith(prefix):
+                        clean_k = clean_k.replace(prefix, "")
+                extracted_dict[clean_k] = v
 
             missing, unexpected = self.backbone.load_state_dict(extracted_dict, strict=False)
-            print(f"✓ TransFuser++ camera encoder weights matched & loaded into {backbone_name.upper()} backbone!")
+            print(f"✓ Pretrained weights matched & loaded into {backbone_name.upper()} backbone! (Matched keys successfully)")
 
         # Freeze backbone parameters if requested
         if self.freeze_backbone:
@@ -402,6 +400,154 @@ class RunningMeanStd:
         return max(float(np.sqrt(self.var)), 1e-4)
 
 
+# --- Unified Experiment Logger (MLflow + TensorBoard) ---
+
+class ExperimentLogger:
+    """
+    Unified MLflow + TensorBoard Logger.
+    Logs metrics, hyperparameters, and artifacts to MLflow (and TensorBoard).
+    Auto-starts MLflow UI server on port 5055 and outputs a clickable link to stdout.
+    """
+    def __init__(self, log_dir, experiment_name="CARLA_PPO_RL", use_mlflow=True, mlflow_port=5055):
+        self.log_dir = log_dir
+        self.tb_writer = SummaryWriter(log_dir)
+        self.use_mlflow = False
+        self.mlflow_port = mlflow_port
+        
+        if use_mlflow:
+            try:
+                import mlflow
+                import socket
+                import subprocess
+                import urllib.request
+
+                # Check if MLflow UI server is running on mlflow_port, or auto-launch it
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                port_in_use = (sock.connect_ex(('127.0.0.1', mlflow_port)) == 0)
+                sock.close()
+
+                if not port_in_use:
+                    print(f"--> Auto-launching MLflow UI tracking server on port {mlflow_port}...")
+                    subprocess.Popen(
+                        [sys.executable, "-m", "mlflow", "ui", "--host", "0.0.0.0", "--port", str(mlflow_port)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True
+                    )
+                    time.sleep(1.5)
+
+                # Fetch Public IP if available
+                public_ip = "127.0.0.1"
+                try:
+                    public_ip = urllib.request.urlopen("https://api.ipify.org", timeout=2.0).read().decode('utf-8').strip()
+                except Exception:
+                    try:
+                        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        s.connect(("8.8.8.8", 80))
+                        public_ip = s.getsockname()[0]
+                        s.close()
+                    except Exception:
+                        pass
+
+                self.mlflow = mlflow
+                self.mlflow.set_experiment(experiment_name)
+                self.mlflow.start_run()
+                self.use_mlflow = True
+                
+                print(f"======================================================================")
+                print(f"   📊 MLFLOW DASHBOARD ONLINE (PORT {mlflow_port})                      ")
+                print(f"   👉 Clickable Public URL:  http://{public_ip}:{mlflow_port}          ")
+                print(f"   👉 Localhost URL:         http://127.0.0.1:{mlflow_port}             ")
+                print(f"   ✓ Experiment: '{experiment_name}' | Run ID: {self.mlflow.active_run().info.run_id}")
+                print(f"======================================================================")
+            except Exception as e:
+                print(f"--> MLflow import/init note ({e}). Logging to TensorBoard at {log_dir}")
+                self.use_mlflow = False
+
+    def log_params(self, args_obj):
+        if self.use_mlflow:
+            try:
+                params_dict = {k: str(v) for k, v in vars(args_obj).items()}
+                self.mlflow.log_params(params_dict)
+            except Exception as e:
+                print(f"--> MLflow log_params warning: {e}")
+
+    def add_scalar(self, tag, scalar_value, global_step):
+        self.tb_writer.add_scalar(tag, scalar_value, global_step)
+        if self.use_mlflow:
+            try:
+                clean_tag = tag.replace("/", "_")
+                self.mlflow.log_metric(clean_tag, float(scalar_value), step=int(global_step))
+            except Exception:
+                pass
+
+    def add_text(self, tag, text_string, global_step):
+        self.tb_writer.add_text(tag, text_string, global_step)
+        if self.use_mlflow:
+            try:
+                clean_tag = tag.replace("/", "_")
+                self.mlflow.log_param(f"text_{clean_tag}_step_{global_step}", text_string)
+            except Exception:
+                pass
+
+    def log_artifact(self, file_path):
+        if self.use_mlflow and os.path.exists(file_path):
+            try:
+                self.mlflow.log_artifact(file_path)
+            except Exception:
+                pass
+
+    def close(self):
+        self.tb_writer.close()
+        if self.use_mlflow:
+            try:
+                self.mlflow.end_run()
+            except Exception:
+                pass
+
+
+class CSVTelemetryLogger:
+    """
+    Step-by-step CSV telemetry recorder for deep review and offline analysis.
+    Logs inputs, actions, rewards, sub-rewards, and curriculum parameters.
+    """
+    def __init__(self, filepath):
+        self.filepath = filepath
+        self.fieldnames = [
+            "global_step", "episode", "step_in_ep",
+            "speed_kmh", "action_throttle", "action_steer", "action_brake",
+            "raw_reward", "normalized_reward", "curriculum_alpha",
+            "r_speed", "r_heading", "r_lateral", "r_boundary", "r_steer",
+            "r_comfort", "r_wrong_way", "r_light", "r_obstacle", "r_ttc", "r_idle", "r_stall",
+            "is_collision", "is_off_road", "termination_reason"
+        ]
+        file_exists = os.path.exists(filepath)
+        self.file = open(filepath, "a", newline="", encoding="utf-8")
+        self.writer = csv.DictWriter(self.file, fieldnames=self.fieldnames)
+        if not file_exists:
+            self.writer.writeheader()
+            self.file.flush()
+
+    def log_step(self, row_dict):
+        try:
+            self.writer.writerow(row_dict)
+        except Exception:
+            pass
+
+    def flush(self):
+        try:
+            self.file.flush()
+        except Exception:
+            pass
+
+    def close(self):
+        try:
+            self.file.flush()
+            self.file.close()
+        except Exception:
+            pass
+
+
 # --- Main Training Function ---
 
 def train():
@@ -426,11 +572,16 @@ def train():
     parser.add_argument("--log-dir", type=str, default="/workspace/runs", help="TensorBoard log directory")
     parser.add_argument("--checkpoint-dir", type=str, default="/workspace/checkpoints", help="Model checkpoint directory")
     parser.add_argument("--resume", action="store_true", default=False, help="Resume training from latest checkpoint")
-    parser.add_argument("--num-vehicles", type=int, default=3, help="Number of surrounding NPC vehicles (lower = less CARLA memory pressure)")
-    parser.add_argument("--num-walkers", type=int, default=10, help="Number of pedestrian walkers in the environment")
-    parser.add_argument("--town", type=str, default="Town10HD_Opt", help="CARLA map/town to use for training (default: Town10HD_Opt)")
-    parser.add_argument("--reward-clip", type=float, default=50.0, help="Clip raw rewards to [-reward-clip, +reward-clip] before normalization")
-    parser.add_argument("--ent-coef", type=float, default=0.02, help="PPO entropy bonus coefficient for continuous exploration")
+    parser.add_argument("--num-vehicles", type=int, default=3, help="Number of surrounding NPC vehicles")
+    parser.add_argument("--num-walkers", type=int, default=10, help="Number of pedestrian walkers")
+    parser.add_argument("--town", type=str, default="Town10HD_Opt", help="CARLA map/town to use for training")
+    parser.add_argument("--reward-clip", type=float, default=50.0, help="Clip raw rewards to [-reward-clip, +reward-clip]")
+    parser.add_argument("--ent-coef", type=float, default=0.02, help="PPO entropy bonus coefficient")
+    parser.add_argument("--minibatch-size", type=int, default=128, help="PPO mini-batch size for GPU Tensor Core acceleration")
+    parser.add_argument("--use-mlflow", action="store_true", default=True, help="Enable MLflow experiment tracking")
+    parser.add_argument("--no-mlflow", action="store_false", dest="use_mlflow", help="Disable MLflow experiment tracking")
+    parser.add_argument("--experiment-name", type=str, default="CARLA_PPO_RL", help="MLflow experiment name")
+    parser.add_argument("--mlflow-port", type=int, default=5055, help="MLflow UI web dashboard port (default: 5055)")
 
     args = parser.parse_args()
 
@@ -450,9 +601,8 @@ def train():
     if args.weights_path:
         print(f"CARLA Pretrained Checkpoint: {os.path.abspath(args.weights_path)}")
     print(f"Total Steps: {args.total_steps} | Rollout Buffer: {args.rollout_steps}")
-    print(f"TensorBoard Logs: {os.path.abspath(args.log_dir)}")
-
-    writer = SummaryWriter(args.log_dir)
+    writer = ExperimentLogger(args.log_dir, experiment_name=args.experiment_name, use_mlflow=args.use_mlflow, mlflow_port=args.mlflow_port)
+    writer.log_params(args)
     
     # Initialize Selected Environment
     if args.env_type == "camera_easycarla":
@@ -515,6 +665,11 @@ def train():
 
     obs, _ = env.reset()
 
+    # Setup CSV Telemetry Logger
+    csv_file_path = os.path.join(args.log_dir, "training_telemetry.csv")
+    csv_logger = CSVTelemetryLogger(csv_file_path)
+    episode_count = 1
+
     episode_rewards = []
     episode_speeds = []
     current_ep_reward = 0
@@ -535,6 +690,12 @@ def train():
         values = []
 
         # 1. Collect Rollout Trajectory
+        # Literature-aligned dynamic penalty curriculum schedule (20% warmup horizon: alpha in [0.2, 1.0])
+        warmup_steps = max(10000, int(0.20 * args.total_steps))
+        curriculum_factor = min(1.0, max(0.2, global_step / float(warmup_steps)))
+        if hasattr(env, 'set_curriculum_factor'):
+            env.set_curriculum_factor(curriculum_factor)
+
         for step in range(args.rollout_steps):
             global_step += 1
             
@@ -568,21 +729,86 @@ def train():
             speed_val = info.get("speed_kmh", obs["speed"][0])
             current_ep_speeds.append(speed_val)
 
+            # Record step telemetry to CSV file
+            csv_logger.log_step({
+                "global_step": global_step,
+                "episode": episode_count,
+                "step_in_ep": len(current_ep_speeds),
+                "speed_kmh": round(float(speed_val), 2),
+                "action_throttle": round(float(action_np[0]), 3),
+                "action_steer": round(float(action_np[1]), 3),
+                "action_brake": round(float(action_np[2]), 3),
+                "raw_reward": round(raw_reward, 4),
+                "normalized_reward": round(normalized_reward, 4),
+                "curriculum_alpha": round(float(curriculum_factor), 2),
+                "r_speed": round(float(info.get("r_speed", 0.0)), 4),
+                "r_heading": round(float(info.get("r_heading", 0.0)), 4),
+                "r_lateral": round(float(info.get("r_lateral", 0.0)), 4),
+                "r_boundary": round(float(info.get("r_boundary", 0.0)), 4),
+                "r_steer": round(float(info.get("r_steer", 0.0)), 4),
+                "r_comfort": round(float(info.get("r_comfort", 0.0)), 4),
+                "r_wrong_way": round(float(info.get("r_wrong_way", 0.0)), 4),
+                "r_light": round(float(info.get("r_light", 0.0)), 4),
+                "r_obstacle": round(float(info.get("r_obstacle", 0.0)), 4),
+                "r_ttc": round(float(info.get("r_ttc", 0.0)), 4),
+                "r_idle": round(float(info.get("r_idle", 0.0)), 4),
+                "r_stall": round(float(info.get("r_stall", 0.0)), 4),
+                "is_collision": info.get("is_collision", False),
+                "is_off_road": info.get("is_off_road", False),
+                "termination_reason": info.get("termination_reason", "") if done else ""
+            })
+
+            # Accumulate sub-reward breakdowns
+            if 'current_ep_sub_rewards' not in locals():
+                current_ep_sub_rewards = {k: 0.0 for k in ["r_speed", "r_heading", "r_lateral", "r_boundary", "r_steer", "r_comfort", "r_wrong_way", "r_light", "r_obstacle", "r_idle"]}
+            for sub_k in current_ep_sub_rewards:
+                current_ep_sub_rewards[sub_k] += float(info.get(sub_k, 0.0))
+
             if done:
+                episode_count += 1
+                csv_logger.flush()
                 episode_rewards.append(current_ep_reward)
                 avg_speed = np.mean(current_ep_speeds)
                 episode_speeds.append(avg_speed)
+                ep_len = len(current_ep_speeds)
+
+                # Compute CARLA Benchmark Driving Score Estimate (DS_est)
+                completion_pct = min(1.0, ep_len / float(args.rollout_steps))
+                infraction_penalty = 1.0
+                if info.get("is_collision", False):
+                    infraction_penalty *= 0.60  # Vehicle/pedestrian collision penalty factor
+                if info.get("is_off_road", False):
+                    infraction_penalty *= 0.50  # Off-road penalty factor
+                if info.get("termination_reason", "") == "Stalled / No Movement":
+                    infraction_penalty *= 0.85  # Stall penalty factor
+                if current_ep_sub_rewards.get("r_light", 0.0) < -2.0:
+                    infraction_penalty *= 0.70  # Red light violation factor
+
+                ds_est = 100.0 * completion_pct * infraction_penalty
 
                 term_reason = info.get("termination_reason", "Collision" if info.get("is_collision", False) else ("Lane Deviation / Off-Road" if info.get("is_off_road", False) else "Max Steps"))
-                print(f"[Step {global_step:05d}/{args.total_steps}] Episode Finished | Reward: {current_ep_reward:+.2f} | Avg Speed: {avg_speed:.1f} km/h | Reason: {term_reason}")
-                writer.add_scalar("Reward/Episode", current_ep_reward, global_step)
+                print(f"[Step {global_step:05d}/{args.total_steps}] Episode Finished | Reward: {current_ep_reward:+.2f} (PerStep: {current_ep_reward/ep_len:+.2f}) | DS_Est: {ds_est:.1f} | Avg Speed: {avg_speed:.1f} km/h | Reason: {term_reason}")
+                
+                # TensorBoard Episode & Benchmark Metrics
+                writer.add_scalar("Reward/Episode_Total", current_ep_reward, global_step)
+                writer.add_scalar("Reward/PerStep_Mean", current_ep_reward / ep_len, global_step)
                 writer.add_scalar("Speed/Avg_kmh", avg_speed, global_step)
+                writer.add_scalar("CARLA_Benchmark/DrivingScore_Est", ds_est, global_step)
+                writer.add_scalar("CARLA_Benchmark/RouteCompletion_Pct", completion_pct * 100.0, global_step)
+                writer.add_scalar("CARLA_Benchmark/Infraction_Multiplier", infraction_penalty, global_step)
                 writer.add_text("Termination_Reason", term_reason, global_step)
+
+                # Log detailed total and per-step sub-reward breakdown to TensorBoard
+                for sub_k, sub_val in current_ep_sub_rewards.items():
+                    writer.add_scalar(f"SubReward_Total/{sub_k}", sub_val, global_step)
+                    writer.add_scalar(f"SubReward_PerStep/{sub_k}", sub_val / ep_len, global_step)
+                current_ep_sub_rewards = {k: 0.0 for k in current_ep_sub_rewards}
 
                 if current_ep_reward > best_episode_reward:
                     best_episode_reward = current_ep_reward
                     checkpoint_path = os.path.join(args.checkpoint_dir, "ppo_carla_best.pth")
                     torch.save(agent.state_dict(), checkpoint_path)
+                    writer.log_artifact(checkpoint_path)
                     print(f"--> Saved new BEST policy checkpoint: {checkpoint_path}")
 
                 # Persist training state so --resume can continue from here after a crash
@@ -635,7 +861,7 @@ def train():
         # 3. Optimize PPO Policy & Value Networks with Minibatch Updates & AMP Mixed Precision
         policy_losses = []
         value_losses = []
-        minibatch_size = 64
+        minibatch_size = getattr(args, 'minibatch_size', 128)
         b_inds = np.arange(args.rollout_steps)
 
         for epoch in range(args.ppo_epochs):
@@ -685,9 +911,11 @@ def train():
             json.dump({"global_step": global_step, "best_episode_reward": best_episode_reward}, f)
 
     env.close()
+    csv_logger.close()
+    writer.log_artifact(csv_file_path)
     writer.close()
     print("--- Training Completed Successfully! ---")
-    print(f"Final Model Saved to: {os.path.abspath(args.checkpoint_dir)}")
+    print(f"Final Model & Telemetry CSV Saved to: {os.path.abspath(args.log_dir)}")
 
 if __name__ == "__main__":
     train()

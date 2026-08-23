@@ -144,7 +144,7 @@ conda install -y ipykernel
 python -m ipykernel install --user --name=carla_py38 --display-name "Python 3.8 (CARLA RL)"
 
 pip install --upgrade pip
-pip install "setuptools<80" gymnasium gym numpy pillow opencv-python tensorboard torch torchvision jupyterlab ipywidgets nvitop scipy matplotlib
+pip install "setuptools<80" gymnasium gym numpy pillow opencv-python tensorboard mlflow torch torchvision jupyterlab ipywidgets nvitop scipy matplotlib
 
 echo -e "${YELLOW}--> Installing EasyCarla-RL directly into Python environment...${NC}"
 pip install git+https://github.com/silverwingsbot/EasyCarla-RL.git

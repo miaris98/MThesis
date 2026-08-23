@@ -3,4 +3,7 @@ numpy
 pillow
 opencv-python
 torch
+torchvision
 gymnasium
+tensorboard
+mlflow
