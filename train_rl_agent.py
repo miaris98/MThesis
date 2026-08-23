@@ -423,7 +423,10 @@ class ExperimentLogger:
                 import subprocess
                 import urllib.request
 
-                # Check if MLflow UI server is running on mlflow_port, or auto-launch it
+                # Check if MLflow UI server is already running on mlflow_port
+                # NOTE: MLflow UI is started persistently by run_training_loop.sh
+                # in a dedicated tmux session so it survives training crashes.
+                # We only launch it here as a fallback for standalone usage.
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 port_in_use = (sock.connect_ex(('127.0.0.1', mlflow_port)) == 0)
                 sock.close()
@@ -431,14 +434,15 @@ class ExperimentLogger:
                 if not port_in_use:
                     print(f"--> Auto-launching MLflow UI tracking server on port {mlflow_port}...")
                     subprocess.Popen(
-                        [sys.executable, "-m", "mlflow", "ui", "--host", "0.0.0.0", "--port", str(mlflow_port)],
+                        [sys.executable, "-m", "mlflow", "ui", "--host", "0.0.0.0", "--port", str(mlflow_port),
+                         "--backend-store-uri", os.path.join(os.path.dirname(os.path.abspath(log_dir)), "mlruns")],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                         start_new_session=True
                     )
-                    time.sleep(1.5)
+                    time.sleep(2)
                 else:
-                    print(f"✓ MLflow UI server is already active on port {mlflow_port} (re-using active session).")
+                    print(f"✓ MLflow UI server is already active on port {mlflow_port} (re-using persistent session).")
 
                 # Fetch Public IP if available
                 public_ip = "127.0.0.1"

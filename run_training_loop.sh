@@ -50,6 +50,27 @@ echo "NPC Vehicles: $NUM_VEHICLES | Pedestrians: $NUM_WALKERS"
 echo "Python Executable: $PYTHON_BIN"
 echo "=============================================================="
 
+# ==========================================================================
+#  📊 Start Persistent MLflow UI Server (survives training crash/restarts)
+#  This keeps port 5055 alive so the Vast.ai tunnel URL never changes.
+# ==========================================================================
+MLFLOW_PORT=5055
+
+# Check if MLflow is already running on the port
+if ! ss -tlnp 2>/dev/null | grep -q ":${MLFLOW_PORT} " && \
+   ! netstat -tlnp 2>/dev/null | grep -q ":${MLFLOW_PORT} "; then
+    echo "--> 📊 Launching persistent MLflow UI server on port ${MLFLOW_PORT}..."
+    tmux kill-session -t mlflow_server 2>/dev/null || true
+    tmux new-session -d -s mlflow_server \
+        "$PYTHON_BIN -m mlflow ui --host 0.0.0.0 --port ${MLFLOW_PORT} --backend-store-uri /workspace/runs/mlruns > /workspace/mlflow_server.log 2>&1"
+    sleep 2
+    echo "✓ MLflow UI server started in tmux session 'mlflow_server' (port ${MLFLOW_PORT})"
+    echo "  This session persists independently of training restarts."
+else
+    echo "✓ MLflow UI server already running on port ${MLFLOW_PORT} (re-using active session)."
+fi
+echo "=============================================================="
+
 attempt=1
 
 while true; do
