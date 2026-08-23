@@ -506,10 +506,45 @@ class ExperimentLogger:
                 pass
 
 
+def _get_hardware_metrics():
+    """
+    Fetch real-time GPU VRAM usage, System RAM usage, and CPU load.
+    Returns dict with hardware telemetry values.
+    """
+    metrics = {
+        "gpu_mem_used_mb": 0.0,
+        "gpu_mem_total_mb": 0.0,
+        "gpu_mem_pct": 0.0,
+        "sys_cpu_pct": 0.0,
+        "sys_ram_used_gb": 0.0,
+        "sys_ram_total_gb": 0.0
+    }
+    try:
+        if torch.cuda.is_available():
+            mem_used = torch.cuda.memory_allocated() / (1024.0 ** 2)
+            mem_total = torch.cuda.get_device_properties(0).total_memory / (1024.0 ** 2)
+            metrics["gpu_mem_used_mb"] = round(mem_used, 1)
+            metrics["gpu_mem_total_mb"] = round(mem_total, 1)
+            metrics["gpu_mem_pct"] = round((mem_used / max(1.0, mem_total)) * 100.0, 1)
+    except Exception:
+        pass
+
+    try:
+        import psutil
+        metrics["sys_cpu_pct"] = round(psutil.cpu_percent(interval=None), 1)
+        vm = psutil.virtual_memory()
+        metrics["sys_ram_used_gb"] = round(vm.used / (1024.0 ** 3), 2)
+        metrics["sys_ram_total_gb"] = round(vm.total / (1024.0 ** 3), 2)
+    except Exception:
+        pass
+
+    return metrics
+
+
 class CSVTelemetryLogger:
     """
     Step-by-step CSV telemetry recorder for deep review and offline analysis.
-    Logs inputs, actions, rewards, sub-rewards, and curriculum parameters.
+    Logs inputs, actions, rewards, sub-rewards, hardware metrics, and curriculum parameters.
     """
     def __init__(self, filepath):
         self.filepath = filepath
@@ -519,6 +554,7 @@ class CSVTelemetryLogger:
             "raw_reward", "normalized_reward", "curriculum_alpha",
             "r_speed", "r_heading", "r_lateral", "r_boundary", "r_steer",
             "r_comfort", "r_wrong_way", "r_light", "r_obstacle", "r_ttc", "r_idle", "r_stall",
+            "gpu_mem_used_mb", "gpu_mem_pct", "sys_cpu_pct", "sys_ram_used_gb",
             "is_collision", "is_off_road", "termination_reason"
         ]
         file_exists = os.path.exists(filepath)
@@ -729,6 +765,9 @@ def train():
             speed_val = info.get("speed_kmh", obs["speed"][0])
             current_ep_speeds.append(speed_val)
 
+            # Fetch real-time hardware telemetry (GPU VRAM, CPU, RAM)
+            hw_metrics = _get_hardware_metrics()
+
             # Record step telemetry to CSV file
             csv_logger.log_step({
                 "global_step": global_step,
@@ -753,6 +792,10 @@ def train():
                 "r_ttc": round(float(info.get("r_ttc", 0.0)), 4),
                 "r_idle": round(float(info.get("r_idle", 0.0)), 4),
                 "r_stall": round(float(info.get("r_stall", 0.0)), 4),
+                "gpu_mem_used_mb": hw_metrics["gpu_mem_used_mb"],
+                "gpu_mem_pct": hw_metrics["gpu_mem_pct"],
+                "sys_cpu_pct": hw_metrics["sys_cpu_pct"],
+                "sys_ram_used_gb": hw_metrics["sys_ram_used_gb"],
                 "is_collision": info.get("is_collision", False),
                 "is_off_road": info.get("is_off_road", False),
                 "termination_reason": info.get("termination_reason", "") if done else ""
@@ -796,6 +839,9 @@ def train():
                 writer.add_scalar("CARLA_Benchmark/DrivingScore_Est", ds_est, global_step)
                 writer.add_scalar("CARLA_Benchmark/RouteCompletion_Pct", completion_pct * 100.0, global_step)
                 writer.add_scalar("CARLA_Benchmark/Infraction_Multiplier", infraction_penalty, global_step)
+                writer.add_scalar("Hardware/GPU_Memory_MB", hw_metrics["gpu_mem_used_mb"], global_step)
+                writer.add_scalar("Hardware/CPU_Usage_Pct", hw_metrics["sys_cpu_pct"], global_step)
+                writer.add_scalar("Hardware/RAM_Used_GB", hw_metrics["sys_ram_used_gb"], global_step)
                 writer.add_text("Termination_Reason", term_reason, global_step)
 
                 # Log detailed total and per-step sub-reward breakdown to TensorBoard

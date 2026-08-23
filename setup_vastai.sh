@@ -77,15 +77,13 @@ else
     mkdir -p "$CARLA_DIR"
     cd /workspace
     
-    URL_HF="https://huggingface.co/datasets/carla/carla-releases/resolve/main/CARLA_0.9.15.tar.gz"
     URL_S3="https://carla-releases.s3.us-east-005.backblazeb2.com/Linux/CARLA_0.9.15.tar.gz"
     
     if command -v aria2c &>/dev/null; then
-        aria2c -x 16 -s 16 -k 1M "$URL_HF" -d /workspace -o CARLA_0.9.15.tar.gz || \
-        aria2c -x 16 -s 16 -k 1M "$URL_S3" -d /workspace -o CARLA_0.9.15.tar.gz || \
+        aria2c -x 16 -s 16 -k 1M --check-certificate=false "$URL_S3" -d /workspace -o CARLA_0.9.15.tar.gz || \
         wget -c "$URL_S3" -O /workspace/CARLA_0.9.15.tar.gz
     else
-        wget -c "$URL_HF" -O /workspace/CARLA_0.9.15.tar.gz || wget -c "$URL_S3" -O /workspace/CARLA_0.9.15.tar.gz
+        wget -c "$URL_S3" -O /workspace/CARLA_0.9.15.tar.gz
     fi
     
     echo -e "${YELLOW}--> Extracting CARLA package to $CARLA_DIR...${NC}"
