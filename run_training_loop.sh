@@ -61,9 +61,9 @@ while true; do
 
     # 2. Start clean CARLA Server instance
     if [ -f "/workspace/carla/CarlaUE4.sh" ]; then
-        echo "--> Starting fresh CARLA server (Town: $TOWN)..."
-        tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh /Game/Carla/Maps/$TOWN -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low -benchmark -fps=20' > /workspace/carla_server.log 2>&1"
-        sleep 18
+        echo "--> Starting fresh CARLA server..."
+        tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1"
+        sleep 10
     fi
 
     WEIGHTS_ARG=""
