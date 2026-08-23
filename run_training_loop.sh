@@ -10,19 +10,25 @@ TOWN=${3:-Town10HD_Opt}
 NUM_VEHICLES=${4:-3}
 NUM_WALKERS=${5:-10}
 
-# Locate Python binary in carla_py38 conda environment
-PYTHON_BIN="python"
-for p in "/workspace/miniconda/envs/carla_py38/bin/python" \
+# Locate Python 3.8 binary in carla_py38 environment
+PYTHON_BIN=""
+for p in "/venv/carla_py38/bin/python" \
          "/opt/conda/envs/carla_py38/bin/python" \
+         "/workspace/miniconda/envs/carla_py38/bin/python" \
          "$HOME/miniconda3/envs/carla_py38/bin/python" \
          "$HOME/anaconda3/envs/carla_py38/bin/python" \
          "/root/miniconda3/envs/carla_py38/bin/python" \
+         "/root/.conda/envs/carla_py38/bin/python" \
          "/usr/local/miniconda3/envs/carla_py38/bin/python"; do
     if [ -f "$p" ]; then
         PYTHON_BIN="$p"
         break
     fi
 done
+
+if [ -z "$PYTHON_BIN" ]; then
+    PYTHON_BIN=$(which python3.8 2>/dev/null || echo "python")
+fi
 
 # Auto-activate carla_py38 environment if available
 for p in "/workspace/miniconda" "/opt/conda" "$HOME/miniconda3" "$HOME/anaconda3" "/root/miniconda3" "/usr/local/miniconda3"; do
