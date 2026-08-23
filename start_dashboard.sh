@@ -1,5 +1,5 @@
 #!/bin/bash
-# Script to launch automated 3-pane monitoring & training dashboard in tmux
+# Script to launch dedicated Hardware Diagnostics Dashboard (nvitop GPU + btop CPU/RAM)
 
 SESSION_NAME="dashboard"
 MLFLOW_PORT=5055
@@ -8,23 +8,20 @@ MLFLOW_PORT=5055
 tmux has-session -t $SESSION_NAME 2>/dev/null
 
 if [ $? -eq 0 ]; then
-    echo "Attaching to existing '$SESSION_NAME' session..."
+    echo "Attaching to existing '$SESSION_NAME' diagnostics session..."
     tmux attach-session -t $SESSION_NAME
     exit 0
 fi
 
-echo "Creating new 3-pane monitoring dashboard (Training | nvitop GPU | btop CPU/RAM)..."
+echo "Creating dedicated System Diagnostics Dashboard (nvitop GPU | btop CPU/RAM)..."
 
-# 1. Create main session with mouse support enabled
+# 1. Create main session (mouse off allows normal browser text selection & copying)
 tmux new-session -d -s $SESSION_NAME
-tmux set-option -t $SESSION_NAME mouse on
-tmux set-option -g mouse on
+tmux set-option -t $SESSION_NAME mouse off
+tmux set-option -g mouse off
 
-# 2. Split vertically into two main sections (Top & Bottom)
+# 2. Split vertically into two monitoring panes (Top: nvitop | Bottom: btop)
 tmux split-window -v -t $SESSION_NAME
-
-# 3. Split bottom pane horizontally into two sub-panes (Left & Right)
-tmux split-window -h -t $SESSION_NAME.1
 
 # Find Conda activation path dynamically
 CONDA_ACTIVATE="conda activate carla_py38"
@@ -38,20 +35,17 @@ done
 # Detect Public IP
 PUBLIC_IP=$(curl -s https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
 
-# 4. Pane 0 (Top): Set up Python 3.8 environment & display MLflow URL
-tmux send-keys -t $SESSION_NAME.0 "$CONDA_ACTIVATE && cd /workspace/MThesis && echo '====================================================' && echo '   📊 MLFLOW DASHBOARD PORT: $MLFLOW_PORT' && echo '   👉 Public URL: http://$PUBLIC_IP:$MLFLOW_PORT' && echo '===================================================='" C-m
+# 3. Pane 0 (Top): Launch nvitop for GPU VRAM & CUDA process monitoring
+tmux send-keys -t $SESSION_NAME.0 "$CONDA_ACTIVATE && nvitop || watch -n 1 nvidia-smi" C-m
 
-# 5. Pane 1 (Bottom-Left): Launch nvitop for GPU memory & PyTorch CUDA monitoring
-tmux send-keys -t $SESSION_NAME.1 "$CONDA_ACTIVATE && nvitop || watch -n 1 nvidia-smi" C-m
-
-# 6. Pane 2 (Bottom-Right): Launch btop or htop for CPU/RAM system monitoring
+# 4. Pane 1 (Bottom): Launch btop or htop for CPU/RAM system monitoring
 if command -v btop &> /dev/null; then
-    tmux send-keys -t $SESSION_NAME.2 "btop" C-m
+    tmux send-keys -t $SESSION_NAME.1 "btop" C-m
 else
-    tmux send-keys -t $SESSION_NAME.2 "htop" C-m
+    tmux send-keys -t $SESSION_NAME.1 "htop" C-m
 fi
 
-echo "Dashboard setup complete!"
+echo "Diagnostics Dashboard setup complete!"
 echo "----------------------------------------------------------------"
 echo "  📊 MLFLOW WEB DASHBOARD URL:"
 echo "  👉 http://$PUBLIC_IP:$MLFLOW_PORT"
