@@ -73,14 +73,19 @@ CARLA_DIR="/workspace/carla"
 if [ -f "$CARLA_DIR/CarlaUE4.sh" ]; then
     echo -e "${GREEN}✓ CARLA 0.9.15 already exists at $CARLA_DIR. Skipping download.${NC}"
 else
-    echo -e "${YELLOW}--> Downloading CARLA 0.9.15 tarball with multi-threaded parallel download (16 streams)...${NC}"
+    echo -e "${YELLOW}--> Downloading CARLA 0.9.15 tarball via high-speed CDN mirror (16 streams)...${NC}"
     mkdir -p "$CARLA_DIR"
     cd /workspace
     
+    URL_HF="https://huggingface.co/datasets/carla/carla-releases/resolve/main/CARLA_0.9.15.tar.gz"
+    URL_S3="https://carla-releases.s3.us-east-005.backblazeb2.com/Linux/CARLA_0.9.15.tar.gz"
+    
     if command -v aria2c &>/dev/null; then
-        aria2c -x 16 -s 16 -k 1M "https://carla-releases.s3.us-east-005.backblazeb2.com/Linux/CARLA_0.9.15.tar.gz" -d /workspace -o CARLA_0.9.15.tar.gz || wget -c https://carla-releases.s3.us-east-005.backblazeb2.com/Linux/CARLA_0.9.15.tar.gz -O /workspace/CARLA_0.9.15.tar.gz
+        aria2c -x 16 -s 16 -k 1M "$URL_HF" -d /workspace -o CARLA_0.9.15.tar.gz || \
+        aria2c -x 16 -s 16 -k 1M "$URL_S3" -d /workspace -o CARLA_0.9.15.tar.gz || \
+        wget -c "$URL_S3" -O /workspace/CARLA_0.9.15.tar.gz
     else
-        wget -c https://carla-releases.s3.us-east-005.backblazeb2.com/Linux/CARLA_0.9.15.tar.gz -O /workspace/CARLA_0.9.15.tar.gz
+        wget -c "$URL_HF" -O /workspace/CARLA_0.9.15.tar.gz || wget -c "$URL_S3" -O /workspace/CARLA_0.9.15.tar.gz
     fi
     
     echo -e "${YELLOW}--> Extracting CARLA package to $CARLA_DIR...${NC}"
