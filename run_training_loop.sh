@@ -10,7 +10,21 @@ TOWN=${3:-Town10HD_Opt}
 NUM_VEHICLES=${4:-3}
 NUM_WALKERS=${5:-10}
 
-# Auto-activate carla_py38 conda environment if available
+# Locate Python binary in carla_py38 conda environment
+PYTHON_BIN="python"
+for p in "/workspace/miniconda/envs/carla_py38/bin/python" \
+         "/opt/conda/envs/carla_py38/bin/python" \
+         "$HOME/miniconda3/envs/carla_py38/bin/python" \
+         "$HOME/anaconda3/envs/carla_py38/bin/python" \
+         "/root/miniconda3/envs/carla_py38/bin/python" \
+         "/usr/local/miniconda3/envs/carla_py38/bin/python"; do
+    if [ -f "$p" ]; then
+        PYTHON_BIN="$p"
+        break
+    fi
+done
+
+# Auto-activate carla_py38 environment if available
 for p in "/workspace/miniconda" "/opt/conda" "$HOME/miniconda3" "$HOME/anaconda3" "/root/miniconda3" "/usr/local/miniconda3"; do
     if [ -f "$p/etc/profile.d/conda.sh" ]; then
         source "$p/etc/profile.d/conda.sh"
@@ -19,11 +33,15 @@ for p in "/workspace/miniconda" "/opt/conda" "$HOME/miniconda3" "$HOME/anaconda3
     fi
 done
 
+# Ensure required tracking packages exist in target environment
+"$PYTHON_BIN" -c "import tensorboard, mlflow" 2>/dev/null || "$PYTHON_BIN" -m pip install tensorboard mlflow 2>/dev/null || true
+
 echo "=============================================================="
 echo "   🔄 Starting Autonomous Auto-Restart Training Supervisor    "
 echo "=============================================================="
 echo "Target Steps: $TOTAL_STEPS | Backbone: $BACKBONE | Town: $TOWN"
 echo "NPC Vehicles: $NUM_VEHICLES | Pedestrians: $NUM_WALKERS"
+echo "Python Executable: $PYTHON_BIN"
 echo "=============================================================="
 
 attempt=1
@@ -56,7 +74,7 @@ while true; do
     fi
 
     # 3. Launch / Resume Training
-    python train_rl_agent.py \
+    "$PYTHON_BIN" train_rl_agent.py \
         --env-type camera_easycarla \
         --backbone "$BACKBONE" \
         --town "$TOWN" \
