@@ -97,27 +97,30 @@ class CameraEasyCarlaEnv(gym.Env):
         self.prev_throttle = 0.0
         self.curriculum_factor = 1.0
         
-        # Check if CARLA server is responsive and running the requested town
+        # Check if CARLA server is responsive and verify active town map
         town = params.get('town', 'Town10HD_Opt')
         port = params.get('port', 2000)
         server_ok = False
         try:
             test_c = carla.Client('127.0.0.1', port)
-            test_c.set_timeout(5.0)
+            test_c.set_timeout(10.0)
             cur_map = test_c.get_world().get_map().name
+            server_ok = True
             if town in cur_map:
-                server_ok = True
+                print(f"✓ CARLA server is already running {cur_map}. Re-using active world!")
             else:
-                print(f"--> Current server map is {cur_map}, but {town} was requested. Restarting server on {town}...")
-                server_ok = False
-        except Exception:
+                print(f"--> Current map is {cur_map}. Loading requested map '{town}' via Python API...")
+                test_c.load_world(town)
+                print(f"✓ Successfully loaded map '{town}'!")
+        except Exception as e:
+            print(f"--> Server check / map load notice: {e}")
             server_ok = False
 
         if not server_ok and os.path.exists("/workspace/carla/CarlaUE4.sh"):
-            print(f"--> Starting CARLA server session with map {town}...")
+            print(f"--> Starting CARLA server instance on port {port}...")
             os.system("pkill -9 -f CarlaUE4 2>/dev/null || true")
             os.system("tmux kill-session -t carla_server 2>/dev/null || true")
-            os.system(f"tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh /Game/Carla/Maps/{town} -carla-port={port} -RenderOffScreen -nosound -vulkan -quality-level=Low -benchmark -fps=20' > /workspace/carla_server.log 2>&1\"")
+            os.system(f"tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port={port} -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
             _wait_for_carla_server(port, max_wait=45)
 
         self.carla_client = carla.Client('127.0.0.1', port)
