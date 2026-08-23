@@ -53,21 +53,26 @@ echo "=============================================================="
 # ==========================================================================
 #  📊 Start Persistent MLflow UI Server (survives training crash/restarts)
 #  This keeps port 5055 alive so the Vast.ai tunnel URL never changes.
+#  MLflow MUST run in its own tmux session — NOT as a subprocess of
+#  train_rl_agent.py — so it is completely isolated from CARLA crashes.
 # ==========================================================================
 MLFLOW_PORT=5055
 
-# Check if MLflow is already running on the port
-if ! ss -tlnp 2>/dev/null | grep -q ":${MLFLOW_PORT} " && \
-   ! netstat -tlnp 2>/dev/null | grep -q ":${MLFLOW_PORT} "; then
-    echo "--> 📊 Launching persistent MLflow UI server on port ${MLFLOW_PORT}..."
-    tmux kill-session -t mlflow_server 2>/dev/null || true
+# Check if MLflow is already running inside our dedicated tmux session
+if tmux has-session -t mlflow_server 2>/dev/null; then
+    echo "✓ MLflow UI server running in protected tmux session 'mlflow_server' (port ${MLFLOW_PORT})."
+else
+    # Kill any orphaned/unmanaged MLflow processes on this port
+    # (these are leftover subprocess.Popen spawns from previous training crashes)
+    fuser -k ${MLFLOW_PORT}/tcp 2>/dev/null || true
+    sleep 1
+
+    echo "--> 📊 Launching persistent MLflow UI server on port ${MLFLOW_PORT} (tmux: mlflow_server)..."
     tmux new-session -d -s mlflow_server \
         "$PYTHON_BIN -m mlflow ui --host 0.0.0.0 --port ${MLFLOW_PORT} --backend-store-uri /workspace/runs/mlruns > /workspace/mlflow_server.log 2>&1"
-    sleep 2
+    sleep 3
     echo "✓ MLflow UI server started in tmux session 'mlflow_server' (port ${MLFLOW_PORT})"
-    echo "  This session persists independently of training restarts."
-else
-    echo "✓ MLflow UI server already running on port ${MLFLOW_PORT} (re-using active session)."
+    echo "  This session is fully isolated from training restarts."
 fi
 echo "=============================================================="
 
