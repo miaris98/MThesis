@@ -1,6 +1,6 @@
 # CARLA Simulator & RL Training Guide (Ubuntu Linux)
 
-This guide provides complete, end-to-end instructions for running the **CARLA Simulator Engine** (via Docker with GPU Vulkan pass-through or native Linux execution) and training Reinforcement Learning (RL) agents on **Ubuntu Linux**.
+This guide provides complete, end-to-end instructions for running the **CARLA Simulator Engine** (via Docker with GPU Vulkan pass-through or native Linux execution) and training Reinforcement Learning (RL) agents with **MLflow Tracking (Port 5055)** and **Step-Level CSV Telemetry Logging** on **Ubuntu Linux**.
 
 ---
 
@@ -23,7 +23,7 @@ sudo systemctl enable --now docker
 sudo usermod -aG docker $USER
 
 # 2. Configure NVIDIA Container Toolkit
-distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
+distribution=$(. /os-release 2>/dev/null || . /etc/os-release; echo $ID$VERSION_ID)
 curl -s -L https://nvidia.github.io/libnvidia-container/gpgkey | sudo apt-key add -
 curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
 
@@ -37,17 +37,18 @@ sudo systemctl restart docker
 
 ## 2. Setting Up the Conda Environment (`carla_rl`)
 
-Set up a dedicated Python 3.10 Conda environment for your RL client dependencies:
+Set up a dedicated Python Conda environment for your RL client dependencies:
 
 ```bash
 # 1. Create Conda environment
-conda create -n carla_rl python=3.10 -y
+conda create -n carla_rl python=3.8 -y
 
 # 2. Activate environment
 conda activate carla_rl
 
-# 3. Install matching CARLA 0.9.15 client and RL dependencies
-pip install carla==0.9.15 numpy pillow opencv-python torch gymnasium
+# 3. Install matching CARLA 0.9.15 client, RL & MLflow tracking dependencies
+pip install --upgrade pip
+pip install "setuptools<80" carla==0.9.15 numpy pillow opencv-python torch torchvision gymnasium tensorboard mlflow nvitop
 ```
 
 ---
@@ -99,39 +100,32 @@ Choose either **Docker Execution (Containerized)** or **Native Execution**.
 
 ---
 
-## 4. Running the RL Agent Demo & Capturing Screenshots
+## 4. Train PPO Agent with MLflow (Port 5055) & Step Telemetry Logging
 
-With the CARLA server running on port 2000 and the `carla_rl` Conda environment activated:
+Launch multi-camera vision PPO training with **MLflow (Port 5055)** and **Step-Level CSV Telemetry**:
 
 ```bash
 conda activate carla_rl
-python carla_rl_client_demo.py --host 127.0.0.1 --port 2000 --steps 50 --output-dir output_screenshots
+cd ~/MThesis
+
+# Run PPO training with LAV Pretrained Weights, MLflow (Port 5055) and CSV Telemetry
+python train_rl_agent.py \
+    --env-type camera_easycarla \
+    --backbone lav \
+    --weights-path ./papers_and_code/LAV/lav_pretrained.pth \
+    --minibatch-size 128 \
+    --use-mlflow \
+    --mlflow-port 5055 \
+    --total-steps 500000
 ```
 
-### Expected Output Console:
-```text
-Connecting to CARLA server at 127.0.0.1:2000...
-Successfully connected to Carla Simulator!
-Client Version: 0.9.15
-Server Version: 0.9.15
-Spawned Vehicle 'vehicle.tesla.model3' (ID: 104) at Location(x=120.5, y=-45.2, z=0.5)
-Screenshots will be saved to: /home/user/MThesis/output_screenshots
-
---- Starting RL Control Loop ---
-[Step 01/50] Action(T=0.6, S=+0.02) | Speed:  12.4 km/h | Reward: +1.20 | Total Reward: +1.20 | Collision: False | Frame Saved: step_001.png
-[Step 02/50] Action(T=0.6, S=+0.04) | Speed:  21.8 km/h | Reward: +2.10 | Total Reward: +3.30 | Collision: False | Frame Saved: step_002.png
-...
-[Step 50/50] Action(T=0.6, S=-0.05) | Speed:  45.1 km/h | Reward: +4.41 | Total Reward: +185.30 | Collision: False | Frame Saved: step_050.png
-
---- Simulation Episode Finished ---
-Total Cumulative Reward: 185.30
-Cleanup completed.
-```
+### MLflow Web UI Dashboard
+Open your web browser at `http://<UBUNTU_IP>:5055` to view real-time reward curves, policy losses, CARLA driving score estimates ($DS_{\text{est}}$), and download `training_telemetry.csv`.
 
 ---
 
 ## 5. Artifact Output & Verification
 
-- **Camera Screenshots**: Saved as PNG files in [output_screenshots/](file:///c:/Users/miari/Desktop/MThesis/output_screenshots).
-- **RL Reward Tracking**: Logs per-step speed incentives, steering smoothness penalties, and collision event penalties.
-- **Connection Test**: Run `python test_connection.py --port 2000` anytime to verify connection status.
+- **Step Telemetry CSV**: Saved automatically to `runs/training_telemetry.csv` and synced as an MLflow artifact.
+- **Evaluation Video**: Run `python record_eval_video.py --checkpoint checkpoints/ppo_carla_best.pth --steps 300` to generate driving videos with telemetry overlays.
+- **Connection Test**: Run `python test_connection.py --port 2000` anytime to verify server connection.
