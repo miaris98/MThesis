@@ -109,7 +109,7 @@ else
 
     echo "--> 📊 Launching persistent MLflow UI server on port ${MLFLOW_PORT} (tmux: mlflow_server)..."
     tmux new-session -d -s mlflow_server \
-        "$PYTHON_BIN -m mlflow ui --host 0.0.0.0 --port ${MLFLOW_PORT} --backend-store-uri /workspace/runs/mlruns > /workspace/mlflow_server.log 2>&1"
+        "$PYTHON_BIN -m mlflow ui --host 0.0.0.0 --port ${MLFLOW_PORT} --backend-store-uri /workspace/MThesis/mlruns > /workspace/mlflow_server.log 2>&1"
     sleep 3
     echo "✓ MLflow UI server started in tmux session 'mlflow_server' (port ${MLFLOW_PORT})"
     echo "  This session is fully isolated from training restarts."

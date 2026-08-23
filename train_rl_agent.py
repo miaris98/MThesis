@@ -458,6 +458,10 @@ class ExperimentLogger:
                         pass
 
                 self.mlflow = mlflow
+                # Point the client to the running MLflow server so all data flows
+                # through it (ensures consistent backend store across restarts)
+                if port_in_use:
+                    self.mlflow.set_tracking_uri(f"http://127.0.0.1:{mlflow_port}")
                 self.mlflow.set_experiment(experiment_name)
 
                 # Check for existing MLflow Run ID to resume if requested
