@@ -313,11 +313,305 @@ class ERFNetFeatureExtractor(nn.Module):
         visual_features = self.extract_visual_features(image)
         return self.forward_with_visual_features(visual_features, speed)
 
-class ActorCriticPPO(nn.Module):
-    """PPO Actor-Critic Policy Network for Continuous Driving Control."""
-    def __init__(self, action_dim=3, features_dim=512, backbone_name="resnet18", freeze_backbone=True, use_pretrained=True, weights_path=None):
-        super(ActorCriticPPO, self).__init__()
+# --- Qwen-Style Transformer Components with Trainable Attention Skip Connections ---
+
+class RMSNorm(nn.Module):
+    """Root Mean Square Layer Normalization (RMSNorm) used in modern LLMs/VLMs."""
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        variance = x.pow(2).mean(-1, keepdim=True)
+        return x * torch.rsqrt(variance + self.eps) * self.weight
+
+class SwiGLU(nn.Module):
+    """Swish Gated Linear Unit (SwiGLU) Feed-Forward Network."""
+    def __init__(self, dim: int, hidden_dim: int, bias: bool = False):
+        super().__init__()
+        self.w_gate = nn.Linear(dim, hidden_dim, bias=bias)
+        self.w_up = nn.Linear(dim, hidden_dim, bias=bias)
+        self.w_down = nn.Linear(hidden_dim, dim, bias=bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.w_down(F.silu(self.w_gate(x)) * self.w_up(x))
+
+class QwenAttentionWithSkip(nn.Module):
+    """Multi-Head Self-Attention with Trainable Residual Skip Vector (Alpha)."""
+    def __init__(self, dim: int, num_heads: int = 16, dropout: float = 0.0):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+
+        self.q_proj = nn.Linear(dim, dim, bias=False)
+        self.k_proj = nn.Linear(dim, dim, bias=False)
+        self.v_proj = nn.Linear(dim, dim, bias=False)
+        self.out_proj = nn.Linear(dim, dim, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, N, C = x.shape
+        q = self.q_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+
+        # Scaled Dot-Product Attention with FlashAttention / PyTorch SDPA & fallback
+        if hasattr(F, 'scaled_dot_product_attention'):
+            attn_out = F.scaled_dot_product_attention(
+                q, k, v, 
+                dropout_p=self.dropout.p if self.training else 0.0
+            )
+        else:
+            scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+            attn_weights = F.softmax(scores, dim=-1)
+            if self.training and self.dropout.p > 0:
+                attn_weights = self.dropout(attn_weights)
+            attn_out = torch.matmul(attn_weights, v)
+
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, N, C)
+        return self.out_proj(attn_out)
+
+class QwenTransformerBlock(nn.Module):
+    """
+    Qwen-style Transformer Block with Trainable Attention Skip Connection (Qwen Alpha Gating).
+    """
+    def __init__(self, dim: int, num_heads: int = 16, ffn_dim: int = 4096, dropout: float = 0.0):
+        super().__init__()
+        self.norm1 = RMSNorm(dim)
+        self.attn = QwenAttentionWithSkip(dim, num_heads=num_heads, dropout=dropout)
+        # Learnable skip scale vector initialized at 0.1 for deep gradient propagation
+        self.alpha_attn = nn.Parameter(0.1 * torch.ones(dim))
+
+        self.norm2 = RMSNorm(dim)
+        self.ffn = SwiGLU(dim, hidden_dim=ffn_dim)
+        self.alpha_ffn = nn.Parameter(0.1 * torch.ones(dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Trainable attention skip connection: x + alpha_attn * Attn(RMSNorm(x))
+        x = x + self.alpha_attn * self.attn(self.norm1(x))
+        # Trainable FFN skip connection: x + alpha_ffn * SwiGLU(RMSNorm(x))
+        x = x + self.alpha_ffn * self.ffn(self.norm2(x))
+        return x
+
+class Qwen500MVisionTransformer(nn.Module):
+    """
+    ~500M Parameter Qwen-Style Vision Transformer for CARLA End-to-End Driving Policy.
+    - 28 Layers, 1024 Hidden Dimension, 16 Attention Heads, 4096 SwiGLU FFN Dimension.
+    - Multi-Camera Panorama Patch Tokenizer (16x16) + Speed Token + [DRIVE] Token.
+    - Full Trainable Attention Skip Paths for deep end-to-end RL training.
+    """
+    def __init__(
+        self, 
+        features_dim: int = 512, 
+        depth: int = 28, 
+        embed_dim: int = 1024, 
+        num_heads: int = 16, 
+        ffn_dim: int = 4096,
+        patch_size: int = 16,
+        freeze_backbone: bool = False,
+        weights_path: str = None
+    ):
+        super().__init__()
+        self.freeze_backbone = freeze_backbone
+        self.embed_dim = embed_dim
+        self.patch_size = patch_size
+
+        # Patch Tokenizer for 3-camera panorama: 3 x (160 x 256) or 256x768
+        self.patch_embed = nn.Conv2d(3, embed_dim, kernel_size=patch_size, stride=patch_size)
         
+        # [DRIVE] Query Token & Speed Projection
+        self.drive_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.speed_proj = nn.Linear(1, embed_dim)
+        
+        # Learned 1D Positional Embedding for maximum sequence length (1024 tokens)
+        self.pos_embed = nn.Parameter(torch.zeros(1, 1024, embed_dim))
+        self.pos_drop = nn.Dropout(p=0.0)
+
+        # 28 Qwen Transformer Blocks with Trainable Attention Skip Connections
+        self.blocks = nn.ModuleList([
+            QwenTransformerBlock(dim=embed_dim, num_heads=num_heads, ffn_dim=ffn_dim)
+            for _ in range(depth)
+        ])
+        self.final_norm = RMSNorm(embed_dim)
+        
+        # Final linear projection from [DRIVE] token (1024) to features_dim (512)
+        self.head_proj = nn.Sequential(
+            nn.Linear(embed_dim, features_dim),
+            nn.GELU(),
+            nn.Linear(features_dim, features_dim)
+        )
+
+        self._init_weights()
+
+        if weights_path is not None and os.path.exists(weights_path):
+            print(f"--> Loading Qwen-500M checkpoint from: {weights_path}")
+            try:
+                ckpt = torch.load(weights_path, map_location="cpu")
+                state_dict = ckpt.get("state_dict", ckpt.get("model", ckpt))
+                self.load_state_dict(state_dict, strict=False)
+                print("✓ Successfully loaded Qwen-500M weights!")
+            except Exception as e:
+                print(f"--> Notice: Could not load weights ({e}). Initialized from scratch.")
+
+        if self.freeze_backbone:
+            for param in self.parameters():
+                param.requires_grad = False
+            for param in self.head_proj.parameters():
+                param.requires_grad = True
+
+    def _init_weights(self):
+        nn.init.trunc_normal_(self.drive_token, std=0.02)
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def extract_visual_features(self, image):
+        """Extract [DRIVE] token visual representation from multi-camera panorama."""
+        img_x = image.float() / 255.0
+        with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=img_x.is_cuda):
+            if img_x.ndim == 4 and img_x.shape[-1] == 3:
+                # Shape: (B, H, W, C) -> (B, C, H, W)
+                img_perm = img_x.permute(0, 3, 1, 2)
+            else:
+                img_perm = img_x
+
+            # Patch Embedding: (B, embed_dim, H_p, W_p) -> (B, N_patches, embed_dim)
+            patches = self.patch_embed(img_perm).flatten(2).transpose(1, 2)
+            B, N_p, _ = patches.shape
+
+            # Prepend [DRIVE] query token
+            drive_tokens = self.drive_token.expand(B, -1, -1)
+            tokens = torch.cat([drive_tokens, patches], dim=1)  # (B, N_p + 1, embed_dim)
+            
+            # Add positional embeddings (slice to current sequence length)
+            seq_len = tokens.shape[1]
+            tokens = tokens + self.pos_embed[:, :seq_len, :]
+            tokens = self.pos_drop(tokens)
+
+            # Pass through 28 Qwen Transformer Blocks
+            for block in self.blocks:
+                tokens = block(tokens)
+
+            tokens = self.final_norm(tokens)
+            # Extract output representation of the [DRIVE] query token
+            drive_repr = tokens[:, 0]
+            
+        return drive_repr.float()
+
+    def forward_with_visual_features(self, visual_features, speed):
+        """Map extracted [DRIVE] visual features + speed scalar to policy embedding."""
+        speed_norm = speed.float().view(-1, 1) / 50.0
+        speed_emb = self.speed_proj(speed_norm)
+        fused = visual_features + speed_emb
+        return self.head_proj(fused)
+
+    def forward(self, image, speed):
+        visual_features = self.extract_visual_features(image)
+        return self.forward_with_visual_features(visual_features, speed)
+
+class Qwen500MDecisionTransformer(nn.Module):
+    """
+    500M Parameter Qwen-Style Decision Transformer for PPO Actor-Critic.
+    - 28 Layers, 1024 Hidden Dim, 16 Attention Heads, 4096 SwiGLU FFN.
+    - Trainable Attention Skip Connections (Qwen Alpha Gating).
+    - Takes features from the vision backbone (LAV / ResNet) + speed state.
+    - Outputs continuous driving action distribution mu(s), sigma(s) and state-value V(s).
+    """
+    def __init__(self, in_features: int = 1536, action_dim: int = 3, depth: int = 28, embed_dim: int = 1024, num_heads: int = 16, ffn_dim: int = 4096):
+        super().__init__()
+        self.embed_dim = embed_dim
+        
+        # Project vision embeddings and speed into transformer token space
+        self.vision_proj = nn.Linear(in_features, embed_dim)
+        self.speed_proj = nn.Linear(1, embed_dim)
+        
+        # Query tokens: [ACTOR_QUERY] and [CRITIC_QUERY]
+        self.actor_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.critic_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        
+        # 28 Qwen Transformer Blocks with Trainable Attention Skip Connections
+        self.blocks = nn.ModuleList([
+            QwenTransformerBlock(dim=embed_dim, num_heads=num_heads, ffn_dim=ffn_dim)
+            for _ in range(depth)
+        ])
+        self.final_norm = RMSNorm(embed_dim)
+        
+        # Actor Head: Outputs mean action [throttle, steer, brake]
+        self.actor_head = nn.Sequential(
+            nn.Linear(embed_dim, 256),
+            nn.GELU(),
+            nn.Linear(256, action_dim),
+            nn.Tanh()
+        )
+        self.actor_log_std = nn.Parameter(torch.zeros(action_dim))
+        
+        # Critic Head: Outputs scalar state-value V(s)
+        self.critic_head = nn.Sequential(
+            nn.Linear(embed_dim, 256),
+            nn.GELU(),
+            nn.Linear(256, 1)
+        )
+        
+        self._init_weights()
+
+    def _init_weights(self):
+        nn.init.trunc_normal_(self.actor_token, std=0.02)
+        nn.init.trunc_normal_(self.critic_token, std=0.02)
+        with torch.no_grad():
+            self.actor_head[2].bias.data[0] = 0.5   # Positive initial throttle
+            self.actor_head[2].bias.data[1] = 0.0   # Neutral steer
+            self.actor_head[2].bias.data[2] = -0.5  # Negative initial brake
+
+    def forward(self, visual_features: torch.Tensor, speed: torch.Tensor):
+        B = visual_features.shape[0]
+        v_tok = self.vision_proj(visual_features).unsqueeze(1)
+        
+        speed_norm = speed.float().view(-1, 1) / 50.0
+        s_tok = self.speed_proj(speed_norm).unsqueeze(1)
+        
+        a_tok = self.actor_token.expand(B, -1, -1)
+        c_tok = self.critic_token.expand(B, -1, -1)
+        
+        tokens = torch.cat([a_tok, c_tok, v_tok, s_tok], dim=1)  # (B, 4, embed_dim)
+        
+        with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=visual_features.is_cuda):
+            for block in self.blocks:
+                tokens = block(tokens)
+            tokens = self.final_norm(tokens)
+            
+            actor_repr = tokens[:, 0]
+            critic_repr = tokens[:, 1]
+            
+            action_mean = self.actor_head(actor_repr).float()
+            value = self.critic_head(critic_repr).squeeze(-1).float()
+            
+        return action_mean, self.actor_log_std, value
+
+class ActorCriticPPO(nn.Module):
+    """PPO Actor-Critic Policy Network with modular Vision Encoder and Decision Architecture."""
+    def __init__(
+        self, 
+        action_dim=3, 
+        features_dim=512, 
+        backbone_name="lav", 
+        policy_arch="qwen500m", 
+        freeze_backbone=True, 
+        use_pretrained=True, 
+        weights_path=None
+    ):
+        super(ActorCriticPPO, self).__init__()
+        self.policy_arch = policy_arch
+        
+        # 1. Vision Feature Extractor (LAV, ResNet, ERFNet, etc.)
         if use_pretrained:
             if backbone_name == "erfnet":
                 self.encoder = ERFNetFeatureExtractor(features_dim=features_dim, freeze_backbone=freeze_backbone, weights_path=weights_path)
@@ -331,53 +625,63 @@ class ActorCriticPPO(nn.Module):
         else:
             self.encoder = CNNFeatureExtractor(in_channels=3, features_dim=features_dim)
 
-        # Actor Head: Outputs mean action [throttle, steer, brake]
-        self.actor_mean = nn.Sequential(
-            nn.Linear(features_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, action_dim),
-            nn.Tanh()
-        )
-        
-        # Initialize actor final linear layer bias so initial throttle starts positive
-        with torch.no_grad():
-            self.actor_mean[2].bias.data[0] = 0.5  # Positive initial throttle
-            self.actor_mean[2].bias.data[1] = 0.0  # Neutral steer
-            self.actor_mean[2].bias.data[2] = -0.5 # Negative initial brake
-        
-        # Learned Log Standard Deviation for continuous action exploration
-        self.actor_log_std = nn.Parameter(torch.zeros(action_dim))
-        
-        # Critic Head: Outputs scalar state-value V(s)
-        self.critic = nn.Sequential(
-            nn.Linear(features_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 1)
-        )
+        vis_dim = getattr(self.encoder, 'visual_feature_dim', features_dim)
+
+        # 2. PPO Decision Policy Architecture
+        if policy_arch in ["qwen500m", "qwen", "transformer500m", "transformer"]:
+            print(f"--> Initializing 500M Parameter Qwen-Style Decision Transformer with Trainable Attention Skip Connections...")
+            self.decision_net = Qwen500MDecisionTransformer(
+                in_features=vis_dim,
+                action_dim=action_dim,
+                depth=28,
+                embed_dim=1024,
+                num_heads=16,
+                ffn_dim=4096
+            )
+            param_count = sum(p.numel() for p in self.decision_net.parameters())
+            print(f"✓ 500M Qwen Decision Transformer initialized! Policy Parameters: {param_count:,} ({param_count/1e6:.1f}M)")
+        else:
+            self.decision_net = None
+            self.actor_mean = nn.Sequential(
+                nn.Linear(features_dim, 128),
+                nn.ReLU(),
+                nn.Linear(128, action_dim),
+                nn.Tanh()
+            )
+            with torch.no_grad():
+                self.actor_mean[2].bias.data[0] = 0.5
+                self.actor_mean[2].bias.data[1] = 0.0
+                self.actor_mean[2].bias.data[2] = -0.5
+            self.actor_log_std = nn.Parameter(torch.zeros(action_dim))
+            self.critic = nn.Sequential(
+                nn.Linear(features_dim, 128),
+                nn.ReLU(),
+                nn.Linear(128, 1)
+            )
 
     def extract_visual_features(self, image):
-        """Extract multi-camera visual features using vision backbone."""
+        """Extract multi-camera visual features using vision backbone (LAV / ResNet)."""
         return self.encoder.extract_visual_features(image)
 
     def get_action_and_value(self, image=None, speed=None, action=None, deterministic=False, visual_features=None):
-        if visual_features is not None:
-            features = self.encoder.forward_with_visual_features(visual_features, speed)
+        if visual_features is None:
+            visual_features = self.encoder.extract_visual_features(image)
+
+        if self.decision_net is not None:
+            action_mean, actor_log_std, value = self.decision_net(visual_features, speed)
+            action_std = torch.exp(torch.clamp(actor_log_std, -2.0, 0.5))
         else:
-            features = self.encoder(image, speed)
-            
-        action_mean = self.actor_mean(features)
-        
-        # Clip log_std to maintain numerical stability [-2, 0.5]
-        action_std = torch.exp(torch.clamp(self.actor_log_std, -2.0, 0.5))
+            features = self.encoder.forward_with_visual_features(visual_features, speed)
+            action_mean = self.actor_mean(features)
+            action_std = torch.exp(torch.clamp(self.actor_log_std, -2.0, 0.5))
+            value = self.critic(features).squeeze(-1)
+
         dist = Normal(action_mean, action_std)
-        
         if action is None:
             action = action_mean if deterministic else dist.sample()
-            
+
         log_prob = dist.log_prob(action).sum(axis=-1)
         entropy = dist.entropy().sum(axis=-1)
-        value = self.critic(features).squeeze(-1)
-        
         return action, log_prob, entropy, value
 
     def train(self, mode=True):
@@ -639,7 +943,8 @@ def train():
     parser.add_argument("--host", type=str, default="127.0.0.1", help="CARLA host IP")
     parser.add_argument("--port", type=int, default=2000, help="CARLA port")
     parser.add_argument("--env-type", type=str, default="camera_easycarla", choices=["camera_easycarla", "carla_gym"], help="Environment type")
-    parser.add_argument("--backbone", type=str, default="resnet18", choices=["resnet18", "resnet34", "lav", "erfnet"], help="Pretrained vision backbone (resnet18, resnet34, lav, erfnet)")
+    parser.add_argument("--backbone", type=str, default="resnet18", choices=["resnet18", "resnet34", "lav", "erfnet", "qwen500m", "qwen", "transformer500m"], help="Vision backbone (resnet18, resnet34, lav, erfnet, qwen500m)")
+    parser.add_argument("--policy-arch", type=str, default="qwen500m", choices=["qwen500m", "mlp", "transformer"], help="Decision policy architecture (qwen500m, mlp)")
     parser.add_argument("--weights-path", type=str, default=None, help="Optional path to custom pretrained vision checkpoint (.pth)")
     parser.add_argument("--freeze-backbone", action="store_true", default=True, help="Freeze vision backbone parameters")
     parser.add_argument("--no-freeze-backbone", action="store_false", dest="freeze_backbone", help="Fine-tune vision backbone parameters")
@@ -707,6 +1012,7 @@ def train():
     print(f"==============================================================")
     print(f"Device: {device} | Environment: {args.env_type} | Frame Skip: {args.frame_skip}")
     print(f"Vision Backbone: {args.backbone.upper()} (Pretrained: {args.use_pretrained}, Frozen: {args.freeze_backbone})")
+    print(f"Decision Architecture: {args.policy_arch.upper()} (Trainable Attention Skips: True)")
     print(f"Feature Caching Acceleration: {'ENABLED (PPO updates skip backbone)' if args.freeze_backbone else 'DISABLED (Fine-tuning)'}")
     print(f"Sensors: 3-Camera Zero-Copy RGB Panorama (Left, Center, Right) + Speed")
     print(f"NPC Traffic: {args.num_vehicles} Vehicles | {args.num_walkers} Pedestrians")
@@ -755,6 +1061,7 @@ def train():
         action_dim=3,
         features_dim=512,
         backbone_name=args.backbone,
+        policy_arch=args.policy_arch,
         freeze_backbone=args.freeze_backbone,
         use_pretrained=args.use_pretrained,
         weights_path=args.weights_path
