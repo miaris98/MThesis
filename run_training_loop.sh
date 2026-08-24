@@ -181,8 +181,9 @@ while true; do
         --town "$TOWN" \
         --num-vehicles "$NUM_VEHICLES" \
         --num-walkers "$NUM_WALKERS" \
+        --frame-skip 2 \
         --rollout-steps 500 \
-        --minibatch-size 128 \
+        --minibatch-size 256 \
         --ent-coef 0.05 \
         --use-mlflow \
         --mlflow-port $MLFLOW_PORT \

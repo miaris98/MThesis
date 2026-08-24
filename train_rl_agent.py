@@ -646,8 +646,9 @@ def train():
     parser.add_argument("--use-pretrained", action="store_true", default=True, help="Use pretrained vision backbone")
     parser.add_argument("--no-pretrained", action="store_false", dest="use_pretrained", help="Train CNN from scratch")
 
-    parser.add_argument("--total-steps", type=int, default=2000, help="Total training steps")
-    parser.add_argument("--rollout-steps", type=int, default=250, help="Steps per PPO rollout buffer")
+    parser.add_argument("--total-steps", type=int, default=50000, help="Total training steps")
+    parser.add_argument("--rollout-steps", type=int, default=500, help="Steps per PPO rollout buffer (default: 500)")
+    parser.add_argument("--frame-skip", type=int, default=2, help="Frame skip / action repeat factor (default: 2 for 2x simulation throughput)")
     parser.add_argument("--ppo-epochs", type=int, default=4, help="PPO optimization epochs per rollout")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor gamma")
@@ -704,7 +705,7 @@ def train():
     print(f"==============================================================")
     print(f"   🚀 Starting High-Throughput PPO Deep RL Training           ")
     print(f"==============================================================")
-    print(f"Device: {device} | Environment: {args.env_type}")
+    print(f"Device: {device} | Environment: {args.env_type} | Frame Skip: {args.frame_skip}")
     print(f"Vision Backbone: {args.backbone.upper()} (Pretrained: {args.use_pretrained}, Frozen: {args.freeze_backbone})")
     print(f"Feature Caching Acceleration: {'ENABLED (PPO updates skip backbone)' if args.freeze_backbone else 'DISABLED (Fine-tuning)'}")
     print(f"Sensors: 3-Camera Zero-Copy RGB Panorama (Left, Center, Right) + Speed")
@@ -727,12 +728,13 @@ def train():
         easy_params = {
             'number_of_vehicles': args.num_vehicles,
             'number_of_walkers': args.num_walkers,
+            'frame_skip': args.frame_skip,
             'dt': 0.05,
             'ego_vehicle_filter': 'vehicle.tesla.model3',
             'surrounding_vehicle_spawned_randomly': True,
             'port': args.port,
             'town': args.town,
-            'max_time_episode': args.rollout_steps,
+            'max_time_episode': args.rollout_steps * args.frame_skip,
             'max_waypoints': 12,
             'visualize_waypoints': False,
             'desired_speed': 8,

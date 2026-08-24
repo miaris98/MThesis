@@ -118,6 +118,7 @@ class CameraEasyCarlaEnv(gym.Env):
         self.params = params
         self.img_width = params.get('img_width', 256)
         self.img_height = params.get('img_height', 256)
+        self.frame_skip = int(params.get('frame_skip', 2))
         self.stalled_steps = 0
         self.prev_steer = 0.0
         self.prev_throttle = 0.0
@@ -634,8 +635,8 @@ class CameraEasyCarlaEnv(gym.Env):
         }
         return obs, info
 
-    def step(self, action):
-        """Step environment with continuous action [throttle, steer, brake]."""
+    def _sub_step(self, action):
+        """Execute single physics simulation tick with continuous action [throttle, steer, brake]."""
         # Map policy Tanh output [-1, 1] to vehicle control ranges:
         # action[0] (throttle): [-1, 1] -> [0.0, 1.0] (neutral 0.0 maps to 0.5 gas)
         # action[1] (steer):    [-1, 1] -> [-1.0, 1.0]
@@ -808,6 +809,22 @@ class CameraEasyCarlaEnv(gym.Env):
         }
         
         return obs, reward, terminated, truncated, info
+
+    def step(self, action):
+        """Step environment with continuous action [throttle, steer, brake] and frame-skip (action repeat)."""
+        total_reward = 0.0
+        total_cost = 0.0
+        
+        for k in range(self.frame_skip):
+            obs, reward, terminated, truncated, info = self._sub_step(action)
+            total_reward += reward
+            total_cost += info.get("cost", 0.0)
+            if terminated or truncated:
+                break
+                
+        info["cost"] = total_cost
+        info["frame_skip"] = self.frame_skip
+        return obs, total_reward, terminated, truncated, info
 
     def close(self):
         """Clean up 3 camera sensors and close environment."""
