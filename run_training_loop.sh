@@ -274,6 +274,7 @@ print(f'CARLA {v} ready, map: {w.get_map().name}')
     fi
 
     # 3. Launch / Resume Training
+    export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     "$PYTHON_BIN" train_rl_agent.py \
         --env-type camera_easycarla \
         --backbone "$BACKBONE" \

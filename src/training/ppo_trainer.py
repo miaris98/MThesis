@@ -32,7 +32,10 @@ class PPOTrainer:
 
         self.env = self._create_env()
         self.agent = self._create_agent()
-        self.optimizer = optim.Adam(self.agent.parameters(), lr=self.cfg.lr)
+        try:
+            self.optimizer = optim.Adam(self.agent.parameters(), lr=self.cfg.lr, foreach=False)
+        except TypeError:
+            self.optimizer = optim.Adam(self.agent.parameters(), lr=self.cfg.lr)
         self.scaler = torch.amp.GradScaler('cuda', enabled=torch.cuda.is_available())
 
         self.reward_normalizer = RunningMeanStd()
@@ -57,6 +60,7 @@ class PPOTrainer:
     def _init_cuda_optimizations(self) -> None:
         if torch.cuda.is_available():
             try:
+                os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
                 torch.backends.cudnn.benchmark = True
                 torch.backends.cuda.matmul.allow_tf32 = True
                 torch.backends.cudnn.allow_tf32 = True
