@@ -248,9 +248,12 @@ class CameraEasyCarlaEnv(gym.Env):
 
             if batch and hasattr(self, 'carla_client') and self.carla_client is not None:
                 try:
-                    self.carla_client.apply_batch(batch)
+                    self.carla_client.apply_batch_sync(batch, False)
                 except (Exception, BaseException):
-                    pass
+                    try:
+                        self.carla_client.apply_batch(batch)
+                    except Exception:
+                        pass
 
         self.easy_env._clear_all_actors = safe_clear_all_actors
         self._optimize_underlying_easy_env(self.easy_env)
@@ -514,10 +517,14 @@ class CameraEasyCarlaEnv(gym.Env):
         # Do fast in-place reset (99% of the time) to prevent RPC socket bottleneck
         if all_cams_alive and (self.episode_count % 100 != 0):
             try:
-                # Pick a valid spawn point from map
+                # Temporarily disable physics simulation to avoid collision sensor triggering on reposition
+                self.easy_env.ego.set_simulate_physics(False)
+
+                # Pick a valid spawn point from map (with +0.5m z-offset to ensure clean ground clearance)
                 spawn_points = self.easy_env.map.get_spawn_points()
                 if spawn_points:
                     sp = random.choice(spawn_points)
+                    sp.location.z += 0.5
                     self.easy_env.ego.set_transform(sp)
                 
                 self.easy_env.ego.set_target_velocity(carla.Vector3D(0, 0, 0))
@@ -529,9 +536,15 @@ class CameraEasyCarlaEnv(gym.Env):
                 self.easy_env.time_step = 0
                 self.easy_env.total_reward = 0.0
                 
+                # Re-enable physics simulation
+                self.easy_env.ego.set_simulate_physics(True)
+
                 # Tick world once to update camera frames
                 if hasattr(self.easy_env, 'world') and self.easy_env.world is not None:
-                    self.easy_env.world.tick()
+                    try:
+                        self.easy_env.world.tick()
+                    except Exception:
+                        pass
                     
                 time.sleep(0.02)
                 return self._get_obs(), {}

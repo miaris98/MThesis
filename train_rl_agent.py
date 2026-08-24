@@ -847,8 +847,8 @@ class ExperimentLogger:
             try:
                 params_dict = {k: str(v) for k, v in vars(args_obj).items()}
                 self.mlflow.log_params(params_dict)
-            except Exception as e:
-                print(f"--> MLflow log_params warning: {e}")
+            except Exception:
+                pass
 
     def add_scalar(self, tag, scalar_value, global_step):
         self.tb_writer.add_scalar(tag, scalar_value, global_step)
