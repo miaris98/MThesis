@@ -16,15 +16,40 @@ if os.path.exists(carla_dist_path):
     if os.path.join(carla_root, "PythonAPI", "carla") not in sys.path:
         sys.path.insert(0, os.path.join(carla_root, "PythonAPI", "carla"))
 
-import carla
-import gymnasium as gym
-from gymnasium import spaces
+# Auto-add local EasyCarla-RL package if present
+easycarla_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Carla-utils", "EasyCarla-RL")
+if os.path.exists(easycarla_path) and easycarla_path not in sys.path:
+    sys.path.insert(0, easycarla_path)
+
+try:
+    import carla
+except ImportError:
+    carla = None
+
+try:
+    import gymnasium as gym
+    from gymnasium import spaces
+except ImportError:
+    try:
+        import gym
+        from gym import spaces
+    except ImportError:
+        class DummySpaces:
+            Box = object
+            Dict = dict
+        spaces = DummySpaces()
+        class DummyGym:
+            Env = object
+            spaces = spaces
+        gym = DummyGym()
 
 try:
     from easycarla.envs.carla_env import CarlaEnv
 except ImportError:
-    # Fallback import if easycarla is in PYTHONPATH
-    from envs.carla_env import CarlaEnv
+    try:
+        from envs.carla_env import CarlaEnv
+    except ImportError:
+        CarlaEnv = object
 
 
 def _wait_for_carla_server(port=2000, max_wait=45):
@@ -187,6 +212,7 @@ class CameraEasyCarlaEnv(gym.Env):
             carla.Client.load_world = orig_load_world
 
         # Global protection against short 10s timeouts in underlying CarlaEnv
+        # Global protection against short 10s timeouts in underlying CarlaEnv
         orig_set_timeout = carla.Client.set_timeout
         def safe_set_timeout(client_self, timeout):
             orig_set_timeout(client_self, max(timeout, 60.0))
@@ -225,6 +251,7 @@ class CameraEasyCarlaEnv(gym.Env):
                     pass
 
         self.easy_env._clear_all_actors = safe_clear_all_actors
+        self._optimize_underlying_easy_env(self.easy_env)
         
         # Define Action Space: [throttle (0 to 1), steer (-1 to 1), brake (0 to 1)]
         self.action_space = spaces.Box(
@@ -241,10 +268,44 @@ class CameraEasyCarlaEnv(gym.Env):
         })
 
         self.camera_sensors = {"left": None, "center": None, "right": None}
-        self.latest_images = {"left": None, "center": None, "right": None}
+        # Zero-copy pre-allocated panorama buffer (256, 768, 3) in contiguous memory
+        self.panorama_buffer = np.zeros((self.img_height, self.img_width * self.num_cameras, 3), dtype=np.uint8)
+
+    def _optimize_underlying_easy_env(self, easy_env):
+        """Suppress unused LiDAR raycasting and bypass heavy unused observation math in EasyCarla."""
+        # 1. Disable LiDAR sensor spawning (saves 10,000 raycasts/sec in UE4)
+        easy_env.lidar_bp = None
+
+        # 2. Fast stub for unused EasyCarla _get_obs
+        easy_env._get_obs = lambda: {
+            'ego_state': np.zeros(9, dtype=np.float32),
+            'lane_info': np.zeros(2, dtype=np.float32),
+            'lidar': np.zeros(240, dtype=np.float32),
+            'nearby_vehicles': np.zeros(20, dtype=np.float32),
+            'waypoints': np.zeros(36, dtype=np.float32)
+        }
+
+        # 3. Track spawned walkers for fast local obstacle queries without world.get_actors() RPC scans
+        easy_env.spawned_walkers = []
+        orig_spawn_walker = easy_env._try_spawn_random_walker_at
+        def tracked_spawn_walker(transform):
+            walker_bp = random.choice(easy_env.world.get_blueprint_library().filter('walker.*'))
+            if walker_bp.has_attribute('is_invincible'):
+                walker_bp.set_attribute('is_invincible', 'false')
+            walker_actor = easy_env.world.try_spawn_actor(walker_bp, transform)
+            if walker_actor is not None:
+                easy_env.spawned_walkers.append(walker_actor)
+                walker_controller_bp = easy_env.world.get_blueprint_library().find('controller.ai.walker')
+                walker_controller_actor = easy_env.world.spawn_actor(walker_controller_bp, carla.Transform(), walker_actor)
+                walker_controller_actor.start()
+                walker_controller_actor.go_to_location(easy_env.world.get_random_location_from_navigation())
+                walker_controller_actor.set_max_speed(1 + random.random())
+                return True
+            return False
+        easy_env._try_spawn_random_walker_at = tracked_spawn_walker
 
     def _setup_camera(self):
-        """Attach 3 synchronized RGB camera sensors (Left, Center, Right) to ego vehicle."""
+        """Attach 3 synchronized RGB camera sensors (Left, Center, Right) to ego vehicle with zero-copy buffer slices."""
         for cam_key in ["left", "center", "right"]:
             if self.camera_sensors[cam_key] is not None:
                 try:
@@ -267,36 +328,35 @@ class CameraEasyCarlaEnv(gym.Env):
         cam_bp.set_attribute("image_size_y", str(self.img_height))
         cam_bp.set_attribute("fov", "90")
 
-        # 1. Center Front Camera (yaw=0.0)
+        w = self.img_width
+
+        # 1. Center Front Camera (yaw=0.0) -> Slice [w : 2*w]
         center_tf = carla.Transform(carla.Location(x=1.5, y=0.0, z=1.4), carla.Rotation(pitch=-8.0, yaw=0.0))
         self.camera_sensors["center"] = world.spawn_actor(cam_bp, center_tf, attach_to=self.easy_env.ego)
 
         def _center_callback(image):
-            arr = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
-            arr = np.reshape(arr, (image.height, image.width, 4))
-            self.latest_images["center"] = arr[:, :, :3][:, :, ::-1].copy()
+            arr = np.frombuffer(image.raw_data, dtype=np.uint8).reshape((image.height, image.width, 4))
+            self.panorama_buffer[:, w:2*w, :] = arr[:, :, [2, 1, 0]]
 
         self.camera_sensors["center"].listen(_center_callback)
 
-        # 2. Left Front Camera (yaw=-55.0)
+        # 2. Left Front Camera (yaw=-55.0) -> Slice [0 : w]
         left_tf = carla.Transform(carla.Location(x=1.3, y=-0.4, z=1.4), carla.Rotation(pitch=-8.0, yaw=-55.0))
         self.camera_sensors["left"] = world.spawn_actor(cam_bp, left_tf, attach_to=self.easy_env.ego)
 
         def _left_callback(image):
-            arr = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
-            arr = np.reshape(arr, (image.height, image.width, 4))
-            self.latest_images["left"] = arr[:, :, :3][:, :, ::-1].copy()
+            arr = np.frombuffer(image.raw_data, dtype=np.uint8).reshape((image.height, image.width, 4))
+            self.panorama_buffer[:, 0:w, :] = arr[:, :, [2, 1, 0]]
 
         self.camera_sensors["left"].listen(_left_callback)
 
-        # 3. Right Front Camera (yaw=+55.0)
+        # 3. Right Front Camera (yaw=+55.0) -> Slice [2*w : 3*w]
         right_tf = carla.Transform(carla.Location(x=1.3, y=0.4, z=1.4), carla.Rotation(pitch=-8.0, yaw=55.0))
         self.camera_sensors["right"] = world.spawn_actor(cam_bp, right_tf, attach_to=self.easy_env.ego)
 
         def _right_callback(image):
-            arr = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
-            arr = np.reshape(arr, (image.height, image.width, 4))
-            self.latest_images["right"] = arr[:, :, :3][:, :, ::-1].copy()
+            arr = np.frombuffer(image.raw_data, dtype=np.uint8).reshape((image.height, image.width, 4))
+            self.panorama_buffer[:, 2*w:3*w, :] = arr[:, :, [2, 1, 0]]
 
         self.camera_sensors["right"].listen(_right_callback)
 
@@ -362,13 +422,12 @@ class CameraEasyCarlaEnv(gym.Env):
 
     def _get_front_obstacle_info(self, max_dist=15.0):
         """
-        Scan for pedestrians and vehicles in front of ego vehicle within max_dist meters.
+        Fast front obstacle scan using tracked spawned vehicles and walkers.
+        Avoids expensive world.get_actors() RPC round-trips over TCP.
         Returns: (min_dist, is_pedestrian, ttc_seconds)
         """
         try:
             if not hasattr(self.easy_env, 'ego') or self.easy_env.ego is None:
-                return max_dist, False, 99.0
-            if not hasattr(self.easy_env, 'world') or self.easy_env.world is None:
                 return max_dist, False, 99.0
 
             ego = self.easy_env.ego
@@ -377,17 +436,23 @@ class CameraEasyCarlaEnv(gym.Env):
             ego_fwd = ego_tf.get_forward_vector()
             ego_vel = ego.get_velocity()
             
-            world = self.easy_env.world
-            actors = world.get_actors()
-            
             min_dist = max_dist
             is_pedestrian = False
             ttc_min = 99.0
             
-            for actor in actors:
-                if actor.id == ego.id:
+            candidate_actors = []
+            if hasattr(self.easy_env, 'spawned_vehicles') and self.easy_env.spawned_vehicles:
+                candidate_actors.extend(self.easy_env.spawned_vehicles)
+            if hasattr(self.easy_env, 'spawned_walkers') and self.easy_env.spawned_walkers:
+                candidate_actors.extend(self.easy_env.spawned_walkers)
+
+            if not candidate_actors and hasattr(self.easy_env, 'world') and self.easy_env.world is not None:
+                candidate_actors = self.easy_env.world.get_actors()
+            
+            for actor in candidate_actors:
+                if not getattr(actor, 'is_alive', True) or actor.id == ego.id:
                     continue
-                a_type = actor.type_id
+                a_type = getattr(actor, 'type_id', '')
                 if not (a_type.startswith('walker.pedestrian') or a_type.startswith('vehicle.')):
                     continue
                     
@@ -416,18 +481,10 @@ class CameraEasyCarlaEnv(gym.Env):
             return max_dist, False, 99.0
 
     def _get_obs(self):
-        """Return dict containing 3-camera stitched RGB panorama [Left | Center | Right] and speed."""
-        blank_cam = np.zeros((self.img_height, self.img_width, 3), dtype=np.uint8)
-        img_left = self.latest_images["left"] if self.latest_images["left"] is not None else blank_cam
-        img_center = self.latest_images["center"] if self.latest_images["center"] is not None else blank_cam
-        img_right = self.latest_images["right"] if self.latest_images["right"] is not None else blank_cam
-
-        # Stitched 3-camera horizontal panorama: shape (256, 768, 3)
-        panorama_obs = np.ascontiguousarray(np.hstack([img_left, img_center, img_right]))
-
+        """Return dict containing zero-copy 3-camera stitched RGB panorama [Left | Center | Right] and speed."""
         speed_kmh = self._get_speed_kmh()
         return {
-            "image": panorama_obs,
+            "image": self.panorama_buffer,
             "speed": np.array([speed_kmh], dtype=np.float32)
         }
 
@@ -468,7 +525,7 @@ class CameraEasyCarlaEnv(gym.Env):
             except (Exception, BaseException):
                 pass
 
-        self.latest_images = {"left": None, "center": None, "right": None}
+        self.panorama_buffer.fill(0)
         self.stalled_steps = 0
         self.prev_steer = 0.0
         self.prev_throttle = 0.0
@@ -544,6 +601,7 @@ class CameraEasyCarlaEnv(gym.Env):
                                 except (Exception, BaseException):
                                     pass
                         self.easy_env._clear_all_actors = safe_clear_all_actors
+                        self._optimize_underlying_easy_env(self.easy_env)
                     except (Exception, BaseException) as re_err:
                         print(f"Re-initialization error: {re_err}")
                     finally:

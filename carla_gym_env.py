@@ -15,9 +15,27 @@ if os.path.exists(carla_dist_path):
         if p not in sys.path:
             sys.path.insert(0, p)
 
-import carla
-import gymnasium as gym
-from gymnasium import spaces
+try:
+    import carla
+except ImportError:
+    carla = None
+
+try:
+    import gymnasium as gym
+    from gymnasium import spaces
+except ImportError:
+    try:
+        import gym
+        from gym import spaces
+    except ImportError:
+        class DummySpaces:
+            Box = object
+            Dict = dict
+        spaces = DummySpaces()
+        class DummyGym:
+            Env = object
+            spaces = spaces
+        gym = DummyGym()
 
 class CarlaGymEnv(gym.Env):
     """

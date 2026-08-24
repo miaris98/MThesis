@@ -5,8 +5,18 @@ import argparse
 import json
 import csv
 import numpy as np
+
+# NumPy 2.x backward-compatibility shim for TensorBoard / older packages
+if not hasattr(np, 'bool8'):
+    np.bool8 = np.bool_
+if not hasattr(np, 'float_'):
+    np.float_ = np.float64
+if not hasattr(np, 'complex_'):
+    np.complex_ = np.complex128
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import torchvision.models as models
 from torch.distributions import Normal
@@ -20,7 +30,7 @@ from camera_easycarla_env import CameraEasyCarlaEnv
 class PretrainedVisionFeatureExtractor(nn.Module):
     """
     ImageNet Pretrained ResNet Feature Extractor for 256x256 RGB Images + Speed State.
-    Supports backbone freezing for fast, sample-efficient RL training.
+    Supports backbone freezing for fast, sample-efficient RL training and zero-overhead feature caching.
     """
     def __init__(self, backbone_name="resnet18", features_dim=512, freeze_backbone=True, weights_path=None):
         super(PretrainedVisionFeatureExtractor, self).__init__()
@@ -66,13 +76,14 @@ class PretrainedVisionFeatureExtractor(nn.Module):
 
         # Linear projector for multi-camera visual vector (3 cameras: Left, Center, Right) + speed scalar
         self.num_cameras = 3
+        self.visual_feature_dim = backbone_out_dim * self.num_cameras
         self.fc = nn.Sequential(
-            nn.Linear(backbone_out_dim * self.num_cameras + 1, features_dim),
+            nn.Linear(self.visual_feature_dim + 1, features_dim),
             nn.ReLU()
         )
 
-    def forward(self, image, speed):
-        # image shape: (N, H, W, 3) where W can be 256 (1 cam) or 768 (3 cams)
+    def extract_visual_features(self, image):
+        """Extract multi-camera visual embedding (N, 3 * D) with batch-level Tensor Core efficiency."""
         img_x = image.float() / 255.0
 
         if img_x.ndim == 4 and img_x.shape[-1] == 3:
@@ -82,21 +93,15 @@ class PretrainedVisionFeatureExtractor(nn.Module):
                 img_left = img_x[:, :, :H, :]
                 img_center = img_x[:, :, H:2*H, :]
                 img_right = img_x[:, :, 2*H:, :]
-                # Stack along batch: (3*N, H, H, C) -> (3*N, 3, H, H)
+                # Stack along batch: (3*N, 3, H, H)
                 cams = torch.cat([img_left, img_center, img_right], dim=0).permute(0, 3, 1, 2)
                 cams_normalized = (cams - self.mean) / self.std
                 if self.freeze_backbone:
                     with torch.no_grad():
-                        conv_chunks = []
-                        for chunk in torch.split(cams_normalized, 32, dim=0):
-                            conv_chunks.append(self.backbone(chunk).flatten(start_dim=1))
-                        conv_out = torch.cat(conv_chunks, dim=0)
+                        conv_out = self.backbone(cams_normalized).flatten(start_dim=1)
                 else:
-                    conv_chunks = []
-                    for chunk in torch.split(cams_normalized, 32, dim=0):
-                        conv_chunks.append(self.backbone(chunk).flatten(start_dim=1))
-                    conv_out = torch.cat(conv_chunks, dim=0)
-                # Reshape from (3*N, D) -> 3 chunks of (N, D) -> concat to (N, 3*D)
+                    conv_out = self.backbone(cams_normalized).flatten(start_dim=1)
+
                 left_out, center_out, right_out = torch.chunk(conv_out, 3, dim=0)
                 visual_features = torch.cat([left_out, center_out, right_out], dim=1)
             else:
@@ -105,40 +110,37 @@ class PretrainedVisionFeatureExtractor(nn.Module):
                 img_normalized = (img_perm - self.mean) / self.std
                 if self.freeze_backbone:
                     with torch.no_grad():
-                        conv_chunks = []
-                        for chunk in torch.split(img_normalized, 32, dim=0):
-                            conv_chunks.append(self.backbone(chunk).flatten(start_dim=1))
-                        single_out = torch.cat(conv_chunks, dim=0)
+                        single_out = self.backbone(img_normalized).flatten(start_dim=1)
                 else:
-                    conv_chunks = []
-                    for chunk in torch.split(img_normalized, 32, dim=0):
-                        conv_chunks.append(self.backbone(chunk).flatten(start_dim=1))
-                    single_out = torch.cat(conv_chunks, dim=0)
+                    single_out = self.backbone(img_normalized).flatten(start_dim=1)
                 visual_features = single_out.repeat(1, self.num_cameras)
         else:
             img_normalized = (img_x - self.mean) / self.std
             if self.freeze_backbone:
                 with torch.no_grad():
-                    conv_chunks = []
-                    for chunk in torch.split(img_normalized, 32, dim=0):
-                        conv_chunks.append(self.backbone(chunk).flatten(start_dim=1))
-                    single_out = torch.cat(conv_chunks, dim=0)
+                    single_out = self.backbone(img_normalized).flatten(start_dim=1)
             else:
-                conv_chunks = []
-                for chunk in torch.split(img_normalized, 32, dim=0):
-                    conv_chunks.append(self.backbone(chunk).flatten(start_dim=1))
-                single_out = torch.cat(conv_chunks, dim=0)
+                single_out = self.backbone(img_normalized).flatten(start_dim=1)
             visual_features = single_out.repeat(1, self.num_cameras)
 
+        return visual_features
+
+    def forward_with_visual_features(self, visual_features, speed):
+        """Zero-backbone forward pass using cached visual features + speed scalar."""
         speed_x = speed.float().view(-1, 1) / 50.0  # Normalize speed by 50 km/h scale
         combined = torch.cat([visual_features, speed_x], dim=1)
         return self.fc(combined)
+
+    def forward(self, image, speed):
+        visual_features = self.extract_visual_features(image)
+        return self.forward_with_visual_features(visual_features, speed)
 
 class CNNFeatureExtractor(nn.Module):
     """NatureCNN-style architecture for extracting features from multi-camera RGB images + speed state."""
     def __init__(self, in_channels=3, features_dim=512):
         super(CNNFeatureExtractor, self).__init__()
         self.num_cameras = 3
+        self.freeze_backbone = False
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels, 32, kernel_size=8, stride=4),
             nn.ReLU(),
@@ -148,13 +150,13 @@ class CNNFeatureExtractor(nn.Module):
             nn.ReLU(),
             nn.Flatten()
         )
-        
+        self.visual_feature_dim = 12544 * self.num_cameras
         self.fc = nn.Sequential(
-            nn.Linear(12544 * self.num_cameras + 1, features_dim),
+            nn.Linear(self.visual_feature_dim + 1, features_dim),
             nn.ReLU()
         )
 
-    def forward(self, image, speed):
+    def extract_visual_features(self, image):
         img_x = image.float() / 255.0
         if img_x.ndim == 4 and img_x.shape[-1] == 3:
             N, H, W, C = img_x.shape
@@ -163,29 +165,26 @@ class CNNFeatureExtractor(nn.Module):
                 img_center = img_x[:, :, H:2*H, :]
                 img_right = img_x[:, :, 2*H:, :]
                 cams = torch.cat([img_left, img_center, img_right], dim=0).permute(0, 3, 1, 2)
-                conv_chunks = []
-                for chunk in torch.split(cams, 32, dim=0):
-                    conv_chunks.append(self.conv(chunk))
-                conv_out = torch.cat(conv_chunks, dim=0)
+                conv_out = self.conv(cams)
                 left_out, center_out, right_out = torch.chunk(conv_out, 3, dim=0)
                 visual_features = torch.cat([left_out, center_out, right_out], dim=1)
             else:
                 img_perm = img_x.permute(0, 3, 1, 2)
-                conv_chunks = []
-                for chunk in torch.split(img_perm, 32, dim=0):
-                    conv_chunks.append(self.conv(chunk))
-                single_out = torch.cat(conv_chunks, dim=0)
+                single_out = self.conv(img_perm)
                 visual_features = single_out.repeat(1, self.num_cameras)
         else:
-            conv_chunks = []
-            for chunk in torch.split(img_x, 32, dim=0):
-                conv_chunks.append(self.conv(chunk))
-            single_out = torch.cat(conv_chunks, dim=0)
+            single_out = self.conv(img_x)
             visual_features = single_out.repeat(1, self.num_cameras)
+        return visual_features
 
+    def forward_with_visual_features(self, visual_features, speed):
         speed_x = speed.float().view(-1, 1) / 50.0
         combined = torch.cat([visual_features, speed_x], dim=1)
         return self.fc(combined)
+
+    def forward(self, image, speed):
+        visual_features = self.extract_visual_features(image)
+        return self.forward_with_visual_features(visual_features, speed)
 
 # --- ERFNet CARLA Camera Feature Extractor ---
 
@@ -251,12 +250,19 @@ class ERFNetFeatureExtractor(nn.Module):
 
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
         self.num_cameras = 3
+        self.visual_feature_dim = 128 * self.num_cameras
         self.fc = nn.Sequential(
-            nn.Linear(128 * self.num_cameras + 1, features_dim),
+            nn.Linear(self.visual_feature_dim + 1, features_dim),
             nn.ReLU()
         )
 
-    def forward(self, image, speed):
+    def _forward_erfnet(self, tensor_input):
+        x = self.initial_block(tensor_input)
+        for layer in self.layers:
+            x = layer(x)
+        return self.pool(x).flatten(start_dim=1)
+
+    def extract_visual_features(self, image):
         img_x = image.float() / 255.0
         if img_x.ndim == 4 and img_x.shape[-1] == 3:
             N, H, W, C = img_x.shape
@@ -265,59 +271,38 @@ class ERFNetFeatureExtractor(nn.Module):
                 img_center = img_x[:, :, H:2*H, :]
                 img_right = img_x[:, :, 2*H:, :]
                 cams = torch.cat([img_left, img_center, img_right], dim=0).permute(0, 3, 1, 2)
-                def _forward_erfnet(tensor_input):
-                    chunks = []
-                    for chunk in torch.split(tensor_input, 32, dim=0):
-                        x = self.initial_block(chunk)
-                        for layer in self.layers:
-                            x = layer(x)
-                        chunks.append(self.pool(x).flatten(start_dim=1))
-                    return torch.cat(chunks, dim=0)
-
                 if self.freeze_backbone:
                     with torch.no_grad():
-                        conv_out = _forward_erfnet(cams)
+                        conv_out = self._forward_erfnet(cams)
                 else:
-                    conv_out = _forward_erfnet(cams)
+                    conv_out = self._forward_erfnet(cams)
                 left_out, center_out, right_out = torch.chunk(conv_out, 3, dim=0)
                 visual_features = torch.cat([left_out, center_out, right_out], dim=1)
             else:
                 img_perm = img_x.permute(0, 3, 1, 2)
-                def _forward_erfnet(tensor_input):
-                    chunks = []
-                    for chunk in torch.split(tensor_input, 32, dim=0):
-                        x = self.initial_block(chunk)
-                        for layer in self.layers:
-                            x = layer(x)
-                        chunks.append(self.pool(x).flatten(start_dim=1))
-                    return torch.cat(chunks, dim=0)
-
                 if self.freeze_backbone:
                     with torch.no_grad():
-                        single_out = _forward_erfnet(img_perm)
+                        single_out = self._forward_erfnet(img_perm)
                 else:
-                    single_out = _forward_erfnet(img_perm)
+                    single_out = self._forward_erfnet(img_perm)
                 visual_features = single_out.repeat(1, self.num_cameras)
         else:
-            def _forward_erfnet(tensor_input):
-                chunks = []
-                for chunk in torch.split(tensor_input, 32, dim=0):
-                    x = self.initial_block(chunk)
-                    for layer in self.layers:
-                        x = layer(x)
-                    chunks.append(self.pool(x).flatten(start_dim=1))
-                return torch.cat(chunks, dim=0)
-
             if self.freeze_backbone:
                 with torch.no_grad():
-                    single_out = _forward_erfnet(img_x)
+                    single_out = self._forward_erfnet(img_x)
             else:
-                single_out = _forward_erfnet(img_x)
+                single_out = self._forward_erfnet(img_x)
             visual_features = single_out.repeat(1, self.num_cameras)
+        return visual_features
 
+    def forward_with_visual_features(self, visual_features, speed):
         speed_x = speed.float().view(-1, 1) / 50.0
         combined = torch.cat([visual_features, speed_x], dim=1)
         return self.fc(combined)
+
+    def forward(self, image, speed):
+        visual_features = self.extract_visual_features(image)
+        return self.forward_with_visual_features(visual_features, speed)
 
 class ActorCriticPPO(nn.Module):
     """PPO Actor-Critic Policy Network for Continuous Driving Control."""
@@ -361,8 +346,16 @@ class ActorCriticPPO(nn.Module):
             nn.Linear(128, 1)
         )
 
-    def get_action_and_value(self, image, speed, action=None, deterministic=False):
-        features = self.encoder(image, speed)
+    def extract_visual_features(self, image):
+        """Extract multi-camera visual features using vision backbone."""
+        return self.encoder.extract_visual_features(image)
+
+    def get_action_and_value(self, image=None, speed=None, action=None, deterministic=False, visual_features=None):
+        if visual_features is not None:
+            features = self.encoder.forward_with_visual_features(visual_features, speed)
+        else:
+            features = self.encoder(image, speed)
+            
         action_mean = self.actor_mean(features)
         
         # Clip log_std to maintain numerical stability [-2, 0.5]
@@ -377,6 +370,15 @@ class ActorCriticPPO(nn.Module):
         value = self.critic(features).squeeze(-1)
         
         return action, log_prob, entropy, value
+
+    def train(self, mode=True):
+        super().train(mode)
+        if getattr(self.encoder, 'freeze_backbone', False):
+            if hasattr(self.encoder, 'backbone'):
+                self.encoder.backbone.eval()
+            else:
+                self.encoder.eval()
+        return self
 
 # --- Reward Normalization Utility ---
 
@@ -655,6 +657,7 @@ def train():
     parser.add_argument("--no-mlflow", action="store_false", dest="use_mlflow", help="Disable MLflow experiment tracking")
     parser.add_argument("--experiment-name", type=str, default="CARLA_PPO_RL", help="MLflow experiment name")
     parser.add_argument("--mlflow-port", type=int, default=10100, help="MLflow UI web dashboard port (default: 10100)")
+    parser.add_argument("--compile", action="store_true", default=False, help="Enable PyTorch 2.x torch.compile graph acceleration")
 
     args = parser.parse_args()
 
@@ -665,15 +668,16 @@ def train():
     if torch.cuda.is_available():
         torch.backends.cudnn.benchmark = True
     print(f"==============================================================")
-    print(f"   🚀 Starting Multi-Camera PPO Deep RL Training              ")
+    print(f"   🚀 Starting High-Throughput PPO Deep RL Training           ")
     print(f"==============================================================")
     print(f"Device: {device} | Environment: {args.env_type}")
     print(f"Vision Backbone: {args.backbone.upper()} (Pretrained: {args.use_pretrained}, Frozen: {args.freeze_backbone})")
-    print(f"Sensors: 3-Camera RGB Panorama (Left, Center, Right) + Speed")
+    print(f"Feature Caching Acceleration: {'ENABLED (PPO updates skip backbone)' if args.freeze_backbone else 'DISABLED (Fine-tuning)'}")
+    print(f"Sensors: 3-Camera Zero-Copy RGB Panorama (Left, Center, Right) + Speed")
     print(f"NPC Traffic: {args.num_vehicles} Vehicles | {args.num_walkers} Pedestrians")
     if args.weights_path:
         print(f"CARLA Pretrained Checkpoint: {os.path.abspath(args.weights_path)}")
-    print(f"Total Steps: {args.total_steps} | Rollout Buffer: {args.rollout_steps}")
+    print(f"Total Steps: {args.total_steps} | Rollout Buffer: {args.rollout_steps} | Minibatch: {args.minibatch_size}")
     writer = ExperimentLogger(
         args.log_dir,
         checkpoint_dir=args.checkpoint_dir,
@@ -720,6 +724,14 @@ def train():
         weights_path=args.weights_path
     ).to(device)
 
+    if getattr(args, 'compile', False) and hasattr(torch, 'compile'):
+        try:
+            print("--> Enabling PyTorch 2.x torch.compile JIT optimization...")
+            agent = torch.compile(agent)
+            print("✓ Policy network compiled successfully!")
+        except Exception as compile_err:
+            print(f"--> Note: torch.compile notice ({compile_err}). Continuing with standard eager execution.")
+
     optimizer = optim.Adam(agent.parameters(), lr=args.lr)
 
     # Resume from latest checkpoint if requested
@@ -759,9 +771,13 @@ def train():
         scaler = torch.amp.GradScaler('cuda', enabled=torch.cuda.is_available())
     else:
         scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
+    
+    is_frozen_backbone = bool(getattr(agent.encoder, 'freeze_backbone', False))
+
     while global_step < args.total_steps:
         # Storage buffers for Rollout
         obs_images = []
+        obs_visual_features = []
         obs_speeds = []
         actions = []
         log_probs = []
@@ -770,6 +786,8 @@ def train():
         values = []
 
         # 1. Collect Rollout Trajectory
+        rollout_start_time = time.time()
+
         # Literature-aligned dynamic penalty curriculum schedule (20% warmup horizon: alpha in [0.2, 1.0])
         warmup_steps = max(10000, int(0.20 * args.total_steps))
         curriculum_factor = min(1.0, max(0.2, global_step / float(warmup_steps)))
@@ -783,7 +801,14 @@ def train():
             spd_tensor = torch.as_tensor(obs["speed"], dtype=torch.float32, device=device).unsqueeze(0)
 
             with torch.inference_mode():
-                action, log_prob, _, value = agent.get_action_and_value(img_tensor, spd_tensor)
+                if is_frozen_backbone:
+                    # Extract visual features once during rollout; cache for zero-overhead PPO optimization
+                    vis_feat = agent.extract_visual_features(img_tensor)
+                    action, log_prob, _, value = agent.get_action_and_value(speed=spd_tensor, visual_features=vis_feat)
+                    obs_visual_features.append(vis_feat.squeeze(0))
+                else:
+                    action, log_prob, _, value = agent.get_action_and_value(image=img_tensor, speed=spd_tensor)
+                    obs_images.append(img_tensor.squeeze(0))
 
             action_np = action.cpu().numpy()[0]
             next_obs, reward, terminated, truncated, info = env.step(action_np)
@@ -796,7 +821,6 @@ def train():
             reward_normalizer.update(clipped_reward)
             normalized_reward = clipped_reward / reward_normalizer.std
 
-            obs_images.append(img_tensor.squeeze(0))
             obs_speeds.append(spd_tensor.squeeze(0))
             actions.append(action.squeeze(0))
             log_probs.append(log_prob.squeeze(0))
@@ -917,11 +941,19 @@ def train():
                 current_ep_reward = 0
                 current_ep_speeds = []
 
+        rollout_elapsed = time.time() - rollout_start_time
+        sps = args.rollout_steps / max(1e-4, rollout_elapsed)
+        writer.add_scalar("Speed/SPS", sps, global_step)
+
         # 2. Compute Generalized Advantage Estimation (GAE)
         with torch.inference_mode():
             next_img = torch.as_tensor(obs["image"], dtype=torch.uint8, device=device).unsqueeze(0)
             next_spd = torch.as_tensor(obs["speed"], dtype=torch.float32, device=device).unsqueeze(0)
-            next_val = agent.get_action_and_value(next_img, next_spd)[3].squeeze(0)
+            if is_frozen_backbone:
+                next_vis = agent.extract_visual_features(next_img)
+                next_val = agent.get_action_and_value(speed=next_spd, visual_features=next_vis)[3].squeeze(0)
+            else:
+                next_val = agent.get_action_and_value(image=next_img, speed=next_spd)[3].squeeze(0)
 
         returns = []
         advantages = []
@@ -939,8 +971,11 @@ def train():
             advantages.insert(0, gae)
             returns.insert(0, gae + values[t])
 
-        # Convert Rollout Lists to Tensors
-        b_images = torch.stack(obs_images)
+        # Convert Rollout Lists to GPU Tensors
+        if is_frozen_backbone:
+            b_vis_feats = torch.stack(obs_visual_features)
+        else:
+            b_images = torch.stack(obs_images)
         b_speeds = torch.stack(obs_speeds)
         b_actions = torch.stack(actions)
         b_log_probs = torch.stack(log_probs)
@@ -957,6 +992,8 @@ def train():
         minibatch_size = getattr(args, 'minibatch_size', 128)
         b_inds = np.arange(args.rollout_steps)
 
+        ppo_start_time = time.time()
+
         for epoch in range(args.ppo_epochs):
             np.random.shuffle(b_inds)
             for start in range(0, args.rollout_steps, minibatch_size):
@@ -965,7 +1002,19 @@ def train():
 
                 autocast_ctx = torch.amp.autocast('cuda', enabled=torch.cuda.is_available()) if hasattr(torch, 'amp') and hasattr(torch.amp, 'autocast') else torch.cuda.amp.autocast(enabled=torch.cuda.is_available())
                 with autocast_ctx:
-                    _, new_log_prob, entropy, new_value = agent.get_action_and_value(b_images[mb_inds], b_speeds[mb_inds], b_actions[mb_inds])
+                    if is_frozen_backbone:
+                        # Zero-backbone forward pass: only trains policy & value MLP heads (0.002s per epoch!)
+                        _, new_log_prob, entropy, new_value = agent.get_action_and_value(
+                            speed=b_speeds[mb_inds],
+                            action=b_actions[mb_inds],
+                            visual_features=b_vis_feats[mb_inds]
+                        )
+                    else:
+                        _, new_log_prob, entropy, new_value = agent.get_action_and_value(
+                            image=b_images[mb_inds],
+                            speed=b_speeds[mb_inds],
+                            action=b_actions[mb_inds]
+                        )
                     logratio = new_log_prob - b_log_probs[mb_inds]
                     ratio = logratio.exp()
 
@@ -990,12 +1039,15 @@ def train():
                 policy_losses.append(pg_loss.item())
                 value_losses.append(v_loss.item())
 
+        ppo_elapsed = time.time() - ppo_start_time
+
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
         writer.add_scalar("Loss/Policy", np.mean(policy_losses), global_step)
         writer.add_scalar("Loss/Value", np.mean(value_losses), global_step)
-        print(f"--- Rollout Update Complete | Step: {global_step}/{args.total_steps} | Policy Loss: {np.mean(policy_losses):.4f} | Value Loss: {np.mean(value_losses):.4f} ---")
+        writer.add_scalar("Speed/PPO_Update_Sec", ppo_elapsed, global_step)
+        print(f"--- Rollout Update Complete | Step: {global_step}/{args.total_steps} | SPS: {sps:.1f} | PPO Opt Time: {ppo_elapsed*1000.0:.1f}ms | Policy Loss: {np.mean(policy_losses):.4f} | Value Loss: {np.mean(value_losses):.4f} ---")
 
         # Save Latest Checkpoint & State Metadata
         latest_path = os.path.join(args.checkpoint_dir, "ppo_carla_latest.pth")
