@@ -273,9 +273,14 @@ class CameraEasyCarlaEnv(gym.Env):
         self.panorama_buffer = np.zeros((self.img_height, self.img_width * self.num_cameras, 3), dtype=np.uint8)
 
     def _optimize_underlying_easy_env(self, easy_env):
-        """Suppress unused LiDAR raycasting and bypass heavy unused observation math in EasyCarla."""
-        # 1. Disable LiDAR sensor spawning (saves 10,000 raycasts/sec in UE4)
-        easy_env.lidar_bp = None
+        """Optimize underlying EasyCarla environment: minimize sensor overhead and bypass unused observation math."""
+        # 1. Minimize LiDAR raycasting overhead without setting blueprint to None
+        if hasattr(easy_env, 'lidar_bp') and easy_env.lidar_bp is not None:
+            try:
+                if easy_env.lidar_bp.has_attribute('points_per_second'):
+                    easy_env.lidar_bp.set_attribute('points_per_second', '1000')
+            except Exception:
+                pass
 
         # 2. Fast stub for unused EasyCarla _get_obs
         easy_env._get_obs = lambda: {
