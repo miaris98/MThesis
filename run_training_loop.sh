@@ -39,9 +39,7 @@ for p in "/workspace/miniconda" "/opt/conda" "$HOME/miniconda3" "$HOME/anaconda3
     fi
 done
 
-# CUDA and GPU optimizations for RTX 40/50 series (Blackwell sm_120) and PyTorch
-export CUDA_FORCE_PTX_JIT=1
-export TORCH_CUDA_ARCH_LIST="12.0;9.0;8.9;8.6;8.0"
+# GPU and PyTorch CUDA optimizations
 export CUDA_MODULE_LOADING=LAZY
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
