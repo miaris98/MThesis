@@ -4,15 +4,21 @@ import time
 import argparse
 import json
 import csv
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
 import numpy as np
 
 # NumPy 2.x backward-compatibility shim for TensorBoard / older packages
-if not hasattr(np, 'bool8'):
-    np.bool8 = np.bool_
-if not hasattr(np, 'float_'):
-    np.float_ = np.float64
-if not hasattr(np, 'complex_'):
-    np.complex_ = np.complex128
+try:
+    if not hasattr(np, 'bool8'):
+        np.bool8 = np.bool_
+    if not hasattr(np, 'float_'):
+        np.float_ = np.float64
+    if not hasattr(np, 'complex_'):
+        np.complex_ = np.complex128
+except Exception:
+    pass
 
 import torch
 import torch.nn as nn

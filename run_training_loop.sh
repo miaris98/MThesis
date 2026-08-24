@@ -133,10 +133,9 @@ while true; do
     sleep 2
 
     # 2. Start clean CARLA Server instance (Vulkan primary -> OpenGL fallback)
-    # High-throughput benchmark mode (-benchmark -fps=20) runs simulation as fast as hardware allows
     if [ -f "/workspace/carla/CarlaUE4.sh" ]; then
-        echo "--> Attempting CARLA server launch with Vulkan graphics (-vulkan -benchmark -fps=20)..."
-        tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low -prefernvidia -benchmark -fps=20' > /workspace/carla_server.log 2>&1"
+        echo "--> Attempting CARLA server launch with Vulkan graphics (-vulkan)..."
+        tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1"
         sleep 4
 
         # Check if Vulkan launch failed (Illegal instruction or early crash)
@@ -148,7 +147,7 @@ while true; do
             pkill -9 -f CarlaUE4 2>/dev/null || true
             tmux kill-session -t carla_server 2>/dev/null || true
             sleep 1
-            tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -opengl -quality-level=Low -prefernvidia -benchmark -fps=20' > /workspace/carla_server.log 2>&1"
+            tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -opengl -quality-level=Low' > /workspace/carla_server.log 2>&1"
             sleep 8
         else
             echo "✓ CARLA Vulkan server running smoothly!"
