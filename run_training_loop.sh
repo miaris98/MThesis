@@ -39,6 +39,11 @@ for p in "/workspace/miniconda" "/opt/conda" "$HOME/miniconda3" "$HOME/anaconda3
     fi
 done
 
+# CUDA and GPU optimizations for RTX 40/50 series and PyTorch
+export TORCH_CUDA_ARCH_LIST="12.0;9.0;8.9;8.6;8.0"
+export CUDA_MODULE_LOADING=LAZY
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+
 # Ensure required tracking packages exist in target environment
 "$PYTHON_BIN" -c "import tensorboard, mlflow" 2>/dev/null || "$PYTHON_BIN" -m pip install tensorboard mlflow 2>/dev/null || true
 

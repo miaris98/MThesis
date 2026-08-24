@@ -3,6 +3,7 @@ import sys
 import glob
 import time
 import math
+import random
 import numpy as np
 
 # Auto-add local CARLA 0.9.15 client package if present
@@ -535,6 +536,8 @@ class CameraEasyCarlaEnv(gym.Env):
             try:
                 self.easy_env.reset()
                 break
+            except (NameError, TypeError, AttributeError, SyntaxError, IndexError, KeyError):
+                raise
             except (Exception, BaseException) as e:
                 print(f"Warning: CARLA reset attempt {attempt+1}/3 failed ({e}). Auto-restarting CARLA engine...")
                 if os.path.exists("/workspace/carla/CarlaUE4.sh"):
@@ -544,8 +547,8 @@ class CameraEasyCarlaEnv(gym.Env):
                     os.system("fuser -k 2000/tcp 2001/tcp 2002/tcp 8000/tcp 2>/dev/null || true")
                     os.system("tmux kill-session -t carla_server 2>/dev/null || true")
                     time.sleep(1.0)
-                    os.system(f"tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port={port} -RenderOffScreen -nosound -opengl -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
-                    _wait_for_carla_server(port, max_wait=45)
+                    os.system(f"tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port={port} -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
+                    _wait_for_carla_server(port, max_wait=60)
                     self.carla_client = carla.Client('127.0.0.1', port)
                     self.carla_client.set_timeout(60.0)
 
