@@ -672,7 +672,13 @@ def train():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
-        torch.backends.cudnn.benchmark = True
+        try:
+            test_x = torch.ones(2, device="cuda")
+            _ = test_x + 1
+            torch.backends.cudnn.benchmark = True
+        except Exception as cuda_err:
+            print(f"⚠️  GPU CUDA kernel execution failed ({cuda_err}). Running policy on CPU.")
+            device = torch.device("cpu")
     print(f"==============================================================")
     print(f"   🚀 Starting High-Throughput PPO Deep RL Training           ")
     print(f"==============================================================")

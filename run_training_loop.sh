@@ -44,6 +44,15 @@ export TORCH_CUDA_ARCH_LIST="12.0;9.0;8.9;8.6;8.0"
 export CUDA_MODULE_LOADING=LAZY
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
+# Verify PyTorch CUDA kernel compatibility with current GPU
+echo "--> Verifying PyTorch CUDA compatibility with GPU..."
+if ! "$PYTHON_BIN" -c "import torch; x = torch.ones(2, device='cuda'); y = x + 1" >/dev/null 2>&1; then
+    echo "⚠️  Current PyTorch build does not have native kernels for this GPU architecture."
+    echo "🔄 Upgrading PyTorch to latest CUDA build..."
+    "$PYTHON_BIN" -m pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu124 || \
+    "$PYTHON_BIN" -m pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu121 || true
+fi
+
 # Ensure required tracking packages exist in target environment
 "$PYTHON_BIN" -c "import tensorboard, mlflow" 2>/dev/null || "$PYTHON_BIN" -m pip install tensorboard mlflow 2>/dev/null || true
 
