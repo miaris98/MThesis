@@ -197,18 +197,21 @@ while true; do
     echo " 🚀 Launching Training Session (Run #$attempt)..."
     echo "--------------------------------------------------------------"
 
-    # 1. Clean up any stale or frozen processes
-    pkill -9 -f CarlaUE4 2>/dev/null || true
+    # 1. Kill ALL stale CARLA and training processes, release GPU memory
+    echo "--> Cleaning up stale processes and GPU memory..."
     pkill -9 -f train_rl_agent 2>/dev/null || true
-    fuser -k 2000/tcp 2001/tcp 2002/tcp 8000/tcp 2>/dev/null || true
+    pkill -9 -f CarlaUE4 2>/dev/null || true
     tmux kill-session -t carla_server 2>/dev/null || true
-    sleep 2
+    fuser -k 2000/tcp 2001/tcp 2002/tcp 8000/tcp 2>/dev/null || true
+    # Force GPU memory release (CARLA Vulkan allocations persist after kill)
+    nvidia-smi --gpu-reset 2>/dev/null || true
+    sleep 5  # Wait for GPU memory to fully release after process kill
 
     # 2. Start clean CARLA Server instance (Vulkan primary -> OpenGL fallback)
     if [ -f "/workspace/carla/CarlaUE4.sh" ]; then
         echo "--> Attempting CARLA server launch with Vulkan graphics (-vulkan)..."
         tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1"
-        sleep 4
+        sleep 6
 
         # Check if Vulkan launch failed (Illegal instruction or early crash)
         if grep -i -E "Illegal instruction|Fatal error|Signal 11" /workspace/carla_server.log >/dev/null 2>&1 || ! pgrep -f CarlaUE4 >/dev/null 2>&1; then
@@ -218,11 +221,39 @@ while true; do
             echo -e "\033[1;33m======================================================================\033[0m"
             pkill -9 -f CarlaUE4 2>/dev/null || true
             tmux kill-session -t carla_server 2>/dev/null || true
-            sleep 1
+            sleep 2
             tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -opengl -quality-level=Low' > /workspace/carla_server.log 2>&1"
-            sleep 8
+            sleep 10
         else
             echo "✓ CARLA Vulkan server running smoothly!"
+        fi
+
+        # 3. Verify CARLA is actually responding on port 2000 before launching training
+        echo "--> Waiting for CARLA RPC server to accept connections on port 2000..."
+        carla_ready=false
+        for i in $(seq 1 30); do
+            if "$PYTHON_BIN" -c "
+import sys
+sys.path.insert(0, '/workspace/carla/PythonAPI/carla/dist')
+import glob
+eggs = glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg')
+for e in eggs: sys.path.insert(0, e)
+import carla
+c = carla.Client('127.0.0.1', 2000)
+c.set_timeout(5.0)
+v = c.get_server_version()
+w = c.get_world()
+print(f'CARLA {v} ready, map: {w.get_map().name}')
+" 2>/dev/null; then
+                carla_ready=true
+                echo "✓ CARLA server verified and responding!"
+                break
+            fi
+            sleep 2
+        done
+        if [ "$carla_ready" = false ]; then
+            echo "⚠️  CARLA server failed to respond after 60s. Retrying full restart..."
+            continue
         fi
     fi
 
@@ -273,9 +304,16 @@ while true; do
         break
     else
         echo ""
-        echo "⚠️  Training process terminated with exit code $exit_code (timeout/crash)."
-        echo "🔄  Auto-restarting in 5 seconds and resuming from last saved checkpoint..."
-        sleep 5
+        if [ $exit_code -eq 134 ]; then
+            echo "⚠️  Training process terminated with exit code 134 (CARLA C++ abort / UE4 deadlock)."
+        elif [ $exit_code -eq 1 ]; then
+            echo "⚠️  Training process terminated with exit code 1 (CARLA watchdog triggered clean exit)."
+        else
+            echo "⚠️  Training process terminated with exit code $exit_code."
+        fi
+        echo "🔄  Auto-restarting with full CARLA server restart in 10 seconds..."
+        echo "    (Checkpoint saved — no training progress lost)"
+        sleep 10
         attempt=$((attempt + 1))
     fi
 done

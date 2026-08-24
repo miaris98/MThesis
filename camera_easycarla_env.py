@@ -4,6 +4,8 @@ import glob
 import time
 import math
 import random
+import signal
+import threading
 import numpy as np
 
 # Auto-add local CARLA 0.9.15 client package if present
@@ -564,13 +566,22 @@ class CameraEasyCarlaEnv(gym.Env):
 
         self.panorama_buffer.fill(0)
         
-        # Call underlying EasyCarla reset
-        for attempt in range(3):
-            try:
-                self.easy_env.reset()
-                break
-            except Exception as e:
-                time.sleep(1.0)
+        # Call underlying EasyCarla reset (with watchdog — reset also calls world.tick() internally)
+        _wd_reset = threading.Timer(90.0, lambda: (
+            print("\n⚠️  CARLA WATCHDOG: reset() hung for >90s. Forcing clean exit for auto-restart..."),
+            os._exit(1)
+        ))
+        _wd_reset.daemon = True
+        _wd_reset.start()
+        try:
+            for attempt in range(3):
+                try:
+                    self.easy_env.reset()
+                    break
+                except Exception as e:
+                    time.sleep(1.0)
+        finally:
+            _wd_reset.cancel()
         
         # Attach camera sensor to newly spawned ego vehicle
         self._setup_camera()
@@ -598,7 +609,18 @@ class CameraEasyCarlaEnv(gym.Env):
         scaled_action = [throttle, steer, brake]
 
         # Step underlying EasyCarla environment (which ticks world in synchronous mode)
-        easy_obs, easy_reward, cost, done, easy_info = self.easy_env.step(scaled_action)
+        # Watchdog: if world.tick() hangs >90s (CARLA UE4 deadlock), exit cleanly before
+        # the C++ 120s timeout fires std::terminate() / abort() (exit code 134).
+        _watchdog = threading.Timer(90.0, lambda: (
+            print("\n⚠️  CARLA WATCHDOG: world.tick() hung for >90s. Forcing clean exit for auto-restart..."),
+            os._exit(1)
+        ))
+        _watchdog.daemon = True
+        _watchdog.start()
+        try:
+            easy_obs, easy_reward, cost, done, easy_info = self.easy_env.step(scaled_action)
+        finally:
+            _watchdog.cancel()
 
         obs = self._get_obs()
         speed_kmh = float(obs["speed"][0])
