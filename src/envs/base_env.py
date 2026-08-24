@@ -1,9 +1,9 @@
-"""Base CARLA environment helpers, server connection probing, and package discovery."""
+"""Base CARLA environment helpers, server connection probing, and actor cleanup."""
 import os
 import sys
 import glob
 import time
-from typing import Optional
+from typing import Optional, List, Any
 
 # Auto-add local CARLA PythonAPI egg package if present
 carla_root = os.environ.get("CARLA_ROOT", "/workspace/carla")
@@ -47,3 +47,44 @@ def wait_for_carla_server(port: int = 2000, max_wait: int = 60) -> bool:
         except (Exception, BaseException):
             time.sleep(1.0)
     return False
+
+
+def safe_clear_carla_actors(world: Any, client: Any, actor_filters: List[str]) -> None:
+    """Safely stop controllers and batch-destroy actors without socket deadlocks."""
+    if world is None:
+        return
+    for actor_filter in actor_filters:
+        try:
+            for actor in world.get_actors().filter(actor_filter):
+                try:
+                    if hasattr(actor, 'stop') and callable(actor.stop):
+                        actor.stop()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    try:
+        world.tick()
+    except Exception:
+        pass
+
+    batch = []
+    seen_ids = set()
+    for actor_filter in actor_filters:
+        try:
+            for actor in world.get_actors().filter(actor_filter):
+                if actor.id not in seen_ids:
+                    seen_ids.add(actor.id)
+                    batch.append(carla.command.DestroyActor(actor.id))
+        except Exception:
+            pass
+
+    if batch and client is not None:
+        try:
+            client.apply_batch_sync(batch, False)
+        except Exception:
+            try:
+                client.apply_batch(batch)
+            except Exception:
+                pass

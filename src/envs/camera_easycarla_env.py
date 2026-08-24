@@ -37,7 +37,7 @@ except ImportError:
     except ImportError:
         CarlaEnv = object
 
-from src.envs.base_env import wait_for_carla_server
+from src.envs.base_env import wait_for_carla_server, safe_clear_carla_actors
 from src.envs.camera_sensor import CameraSensorManager
 from src.envs.reward_calculator import RewardCalculator
 
@@ -92,9 +92,6 @@ class CameraEasyCarlaEnv(gym.Env):
         self.reward_calc = RewardCalculator(desired_speed=self.params.get('desired_speed', 25.0))
 
         port = self.params.get('port', 2000)
-        town = self.params.get('town', 'Town10HD_Opt')
-
-        print(f"--> Connecting to CARLA server on port {port}...")
         wait_for_carla_server(port, max_wait=60)
 
         self.carla_client = carla.Client('127.0.0.1', port) if carla is not None else None
@@ -146,6 +143,10 @@ class CameraEasyCarlaEnv(gym.Env):
             'nearby_vehicles': np.zeros(20, dtype=np.float32),
             'waypoints': np.zeros(36, dtype=np.float32)
         }
+
+        self.easy_env._clear_all_actors = lambda filters: safe_clear_carla_actors(
+            self.easy_env.world, self.carla_client, filters
+        )
 
     def set_curriculum_factor(self, factor: float) -> None:
         """Set dynamic penalty scaling factor (in [0.2, 1.0]) for curriculum training."""
@@ -234,11 +235,16 @@ class CameraEasyCarlaEnv(gym.Env):
         brake = float(np.clip((action[2] - 0.2) / 0.8, 0.0, 1.0)) if action[2] > 0.2 else 0.0
         scaled_action = [throttle, steer, brake]
 
+        cost, done = 0.0, False
         _watchdog = threading.Timer(90.0, lambda: os._exit(1))
         _watchdog.daemon = True
         _watchdog.start()
         try:
             _, _, cost, done, _ = self.easy_env.step(scaled_action)
+        except Exception:
+            cost = 1.0
+            done = True
+            self.easy_env._is_collision = True
         finally:
             _watchdog.cancel()
 
@@ -246,25 +252,14 @@ class CameraEasyCarlaEnv(gym.Env):
         speed_kmh = float(obs["speed"][0])
 
         state = {
-            "speed_kmh": speed_kmh,
-            "heading_cos": 1.0,
-            "heading_cos_far": 1.0,
-            "lateral_dist": 0.0,
-            "curve_factor": 1.0,
-            "is_junction": False,
-            "steer": steer,
-            "throttle": throttle,
-            "brake": brake,
-            "is_at_red_light": False,
-            "min_obs_dist": 99.0,
-            "is_pedestrian": False,
-            "ttc_seconds": 99.0,
-            "is_collision": self.easy_env._is_collision,
-            "is_off_road": self.easy_env._is_off_road,
-            "time_step": self.easy_env.time_step
+            "speed_kmh": speed_kmh, "heading_cos": 1.0, "heading_cos_far": 1.0,
+            "lateral_dist": 0.0, "curve_factor": 1.0, "is_junction": False,
+            "steer": steer, "throttle": throttle, "brake": brake,
+            "is_at_red_light": False, "min_obs_dist": 99.0, "is_pedestrian": False,
+            "ttc_seconds": 99.0, "is_collision": self.easy_env._is_collision,
+            "is_off_road": self.easy_env._is_off_road, "time_step": self.easy_env.time_step
         }
 
-        # Query lane alignment and obstacle metrics from easy_env if available
         if hasattr(self.easy_env, 'ego') and self.easy_env.ego is not None:
             try:
                 tf = self.easy_env.ego.get_transform()
@@ -292,19 +287,15 @@ class CameraEasyCarlaEnv(gym.Env):
             reason = "Max Steps Reached"
 
         info = {
-            "cost": cost,
-            "is_collision": self.easy_env._is_collision,
-            "is_off_road": self.easy_env._is_off_road,
-            "termination_reason": reason,
-            "speed_kmh": speed_kmh,
-            **sub_info
+            "cost": cost, "is_collision": self.easy_env._is_collision,
+            "is_off_road": self.easy_env._is_off_road, "termination_reason": reason,
+            "speed_kmh": speed_kmh, **sub_info
         }
         return obs, reward, terminated, truncated, info
 
     def step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
         """Step environment with continuous action and frame-skip (action repeat)."""
-        total_reward = 0.0
-        total_cost = 0.0
+        total_reward, total_cost = 0.0, 0.0
         for _ in range(self.frame_skip):
             obs, reward, terminated, truncated, info = self._sub_step(action)
             total_reward += reward
