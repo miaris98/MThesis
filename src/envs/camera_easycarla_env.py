@@ -51,7 +51,37 @@ class CameraEasyCarlaEnv(gym.Env):
 
     def __init__(self, params: Optional[Dict[str, Any]] = None):
         super().__init__()
-        self.params = params or {}
+        default_params = {
+            'number_of_vehicles': 3,
+            'number_of_walkers': 10,
+            'display_size': 256,
+            'max_past_step': 1,
+            'dt': 0.05,
+            'discrete': False,
+            'discrete_acc': [-3.0, 1.5, 3.0],
+            'discrete_steer': [-0.2, 0.0, 0.2],
+            'continuous_accel_range': [-3.0, 3.0],
+            'continuous_steer_range': [-0.3, 0.3],
+            'ego_vehicle_filter': 'vehicle.tesla.model3',
+            'port': 2000,
+            'town': 'Town10HD_Opt',
+            'max_time_episode': 250,
+            'max_waypoints': 12,
+            'visualize_waypoints': False,
+            'desired_speed': 8,
+            'max_ego_spawn_times': 200,
+            'view_mode': 'top',
+            'traffic': 'off',
+            'lidar_max_range': 50.0,
+            'max_nearby_vehicles': 5,
+            'surrounding_vehicle_spawned_randomly': True,
+            'img_width': 256,
+            'img_height': 256,
+            'frame_skip': 2,
+        }
+        if params:
+            default_params.update(params)
+        self.params = default_params
         self.img_width = self.params.get('img_width', 256)
         self.img_height = self.params.get('img_height', 256)
         self.frame_skip = int(self.params.get('frame_skip', 2))

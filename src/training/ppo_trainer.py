@@ -76,7 +76,13 @@ class PPOTrainer:
                 'town': self.cfg.town,
                 'max_time_episode': self.cfg.rollout_steps * self.cfg.frame_skip,
                 'max_waypoints': 12,
+                'visualize_waypoints': False,
                 'desired_speed': 8,
+                'max_ego_spawn_times': 200,
+                'view_mode': 'top',
+                'traffic': 'off',
+                'lidar_max_range': 50.0,
+                'max_nearby_vehicles': 5,
                 'img_width': 256,
                 'img_height': 256,
             }
