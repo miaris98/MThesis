@@ -153,7 +153,7 @@ class CameraEasyCarlaEnv(gym.Env):
             print(f"--> Map check notice: {e}")
 
         self.carla_client = carla.Client('127.0.0.1', port)
-        self.carla_client.set_timeout(60.0)
+        self.carla_client.set_timeout(120.0)
         try:
             temp_world = self.carla_client.get_world()
             try:
@@ -167,15 +167,15 @@ class CameraEasyCarlaEnv(gym.Env):
         except Exception:
             pass
 
-        # Monkey-patch carla.Client during EasyCarla initialization to use 60s timeout and re-use active world map
+        # Monkey-patch carla.Client during EasyCarla initialization to use 120s timeout and re-use active world map
         orig_set_timeout = carla.Client.set_timeout
         orig_load_world = carla.Client.load_world
 
         def patched_set_timeout(client_self, timeout):
-            orig_set_timeout(client_self, max(timeout, 60.0))
+            orig_set_timeout(client_self, max(timeout, 120.0))
 
         def patched_load_world(client_self, town_name, reset_settings=True):
-            orig_set_timeout(client_self, 60.0)
+            orig_set_timeout(client_self, 120.0)
             for map_attempt in range(3):
                 try:
                     current_map = client_self.get_world().get_map().name
@@ -496,126 +496,68 @@ class CameraEasyCarlaEnv(gym.Env):
         }
 
     def reset(self, seed=None, options=None):
-        """Reset environment and attach camera sensor."""
+        """Reset environment safely using zero-latency in-place repositioning."""
         if seed is not None:
             np.random.seed(seed)
 
-        # 1. Temporarily switch OFF synchronous mode so all cleanup and destruction happens asynchronously in 0.01s!
-        if hasattr(self, 'carla_client') and self.carla_client is not None:
-            try:
-                self.carla_client.set_timeout(10.0)
-                temp_world = self.carla_client.get_world()
-                settings = temp_world.get_settings()
-                if settings.synchronous_mode:
-                    settings.synchronous_mode = False
-                    temp_world.apply_settings(settings)
-            except (Exception, BaseException):
-                pass
+        self.episode_count = getattr(self, 'episode_count', 0) + 1
+        self.stalled_steps = 0
+        self.prev_steer = 0.0
+        self.prev_throttle = 0.0
 
-        # 2. Stop and destroy 3-camera sensors safely via batch command
-        cam_destroy_cmds = []
+        # Check if cameras and ego are already alive and working (Fast in-place reset!)
+        all_cams_alive = (
+            all(self.camera_sensors.get(k) is not None and getattr(self.camera_sensors[k], 'is_alive', False) for k in ["left", "center", "right"])
+            and hasattr(self.easy_env, 'ego') and self.easy_env.ego is not None and getattr(self.easy_env.ego, 'is_alive', False)
+        )
+
+        # Do fast in-place reset (99% of the time) to prevent RPC socket bottleneck
+        if all_cams_alive and (self.episode_count % 100 != 0):
+            try:
+                # Pick a valid spawn point from map
+                spawn_points = self.easy_env.map.get_spawn_points()
+                if spawn_points:
+                    sp = random.choice(spawn_points)
+                    self.easy_env.ego.set_transform(sp)
+                
+                self.easy_env.ego.set_target_velocity(carla.Vector3D(0, 0, 0))
+                self.easy_env.ego.set_target_angular_velocity(carla.Vector3D(0, 0, 0))
+                
+                # Reset easy_env state flags
+                self.easy_env._is_collision = False
+                self.easy_env._is_off_road = False
+                self.easy_env.time_step = 0
+                self.easy_env.total_reward = 0.0
+                
+                # Tick world once to update camera frames
+                if hasattr(self.easy_env, 'world') and self.easy_env.world is not None:
+                    self.easy_env.world.tick()
+                    
+                time.sleep(0.02)
+                return self._get_obs(), {}
+            except Exception:
+                pass # Fallback to full reset on any error
+
+        # Full reset fallback (on startup, camera loss, or periodic maintenance)
         for cam_key in ["left", "center", "right"]:
             sensor = self.camera_sensors.get(cam_key)
             if sensor is not None:
                 try:
-                    if hasattr(sensor, 'is_listening') and sensor.is_listening:
-                        sensor.stop()
-                    if hasattr(sensor, 'is_alive') and sensor.is_alive:
-                        cam_destroy_cmds.append(carla.command.DestroyActor(sensor.id))
-                except (Exception, BaseException):
+                    sensor.stop()
+                    sensor.destroy()
+                except Exception:
                     pass
                 self.camera_sensors[cam_key] = None
 
-        if cam_destroy_cmds and hasattr(self, 'carla_client') and self.carla_client is not None:
-            try:
-                self.carla_client.apply_batch(cam_destroy_cmds)
-            except (Exception, BaseException):
-                pass
-
         self.panorama_buffer.fill(0)
-        self.stalled_steps = 0
-        self.prev_steer = 0.0
-        self.prev_throttle = 0.0
         
-        # 3. Call underlying EasyCarla reset with automatic retry logic & server auto-restart
+        # Call underlying EasyCarla reset
         for attempt in range(3):
             try:
                 self.easy_env.reset()
                 break
-            except (NameError, TypeError, AttributeError, SyntaxError, IndexError, KeyError):
-                raise
-            except (Exception, BaseException) as e:
-                print(f"Warning: CARLA reset attempt {attempt+1}/3 failed ({e}). Auto-restarting CARLA engine...")
-                if os.path.exists("/workspace/carla/CarlaUE4.sh"):
-                    port = self.params.get('port', 2000)
-                    town = self.params.get('town', 'Town10HD_Opt')
-                    os.system("pkill -9 -f CarlaUE4 2>/dev/null || true")
-                    os.system("fuser -k 2000/tcp 2001/tcp 2002/tcp 8000/tcp 2>/dev/null || true")
-                    os.system("tmux kill-session -t carla_server 2>/dev/null || true")
-                    time.sleep(1.0)
-                    os.system(f"tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port={port} -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
-                    _wait_for_carla_server(port, max_wait=60)
-                    self.carla_client = carla.Client('127.0.0.1', port)
-                    self.carla_client.set_timeout(60.0)
-
-                    # Re-create underlying CarlaEnv on fresh server instance with patch applied
-                    orig_set_timeout = carla.Client.set_timeout
-                    orig_load_world = carla.Client.load_world
-
-                    def patched_set_timeout(client_self, timeout):
-                        orig_set_timeout(client_self, max(timeout, 60.0))
-
-                    def patched_load_world(client_self, town_name, reset_settings=True):
-                        orig_set_timeout(client_self, 60.0)
-                        for map_attempt in range(3):
-                            try:
-                                current_map = client_self.get_world().get_map().name
-                                if town_name in current_map:
-                                    return client_self.get_world()
-                                return orig_load_world(client_self, town_name, reset_settings)
-                            except (Exception, BaseException):
-                                time.sleep(2.0)
-                        try:
-                            return client_self.get_world()
-                        except Exception:
-                            return None
-
-                    carla.Client.set_timeout = patched_set_timeout
-                    carla.Client.load_world = patched_load_world
-
-                    try:
-                        self.easy_env = CarlaEnv(self.params)
-                        def safe_clear_all_actors(actor_filters):
-                            for actor_filter in actor_filters:
-                                for actor in self.easy_env.world.get_actors().filter(actor_filter):
-                                    try:
-                                        if hasattr(actor, 'stop') and callable(actor.stop):
-                                            actor.stop()
-                                    except (Exception, BaseException):
-                                        pass
-                            try:
-                                self.easy_env.world.tick()
-                            except (Exception, BaseException):
-                                pass
-                            batch = []
-                            seen_ids = set()
-                            for actor_filter in actor_filters:
-                                for actor in self.easy_env.world.get_actors().filter(actor_filter):
-                                    if actor.id not in seen_ids:
-                                        seen_ids.add(actor.id)
-                                        batch.append(carla.command.DestroyActor(actor.id))
-                            if batch and hasattr(self, 'carla_client') and self.carla_client is not None:
-                                try:
-                                    self.carla_client.apply_batch(batch)
-                                except (Exception, BaseException):
-                                    pass
-                        self.easy_env._clear_all_actors = safe_clear_all_actors
-                        self._optimize_underlying_easy_env(self.easy_env)
-                    except (Exception, BaseException) as re_err:
-                        print(f"Re-initialization error: {re_err}")
-                    finally:
-                        carla.Client.set_timeout = orig_set_timeout
-                        carla.Client.load_world = orig_load_world
+            except Exception as e:
+                time.sleep(1.0)
         
         # Attach camera sensor to newly spawned ego vehicle
         self._setup_camera()
@@ -628,12 +570,7 @@ class CameraEasyCarlaEnv(gym.Env):
             pass
         time.sleep(0.05)
 
-        obs = self._get_obs()
-        info = {
-            "reset_step": self.easy_env.reset_step,
-            "time_step": self.easy_env.time_step
-        }
-        return obs, info
+        return self._get_obs(), {}
 
     def _sub_step(self, action):
         """Execute single physics simulation tick with continuous action [throttle, steer, brake]."""
@@ -737,8 +674,8 @@ class CameraEasyCarlaEnv(gym.Env):
 
         r_ttc = -3.0 * (max(0.0, (2.0 - ttc_seconds) / 2.0) ** 2) if ttc_seconds < 2.0 else 0.0
 
-        # 9. Idle & Stall Penalties on Open Road
-        if not is_at_red_light and min_obs_dist >= 10.0:
+        # 9. Idle & Stall Penalties on Open Road (with 30-step initial acceleration grace period)
+        if self.easy_env.time_step > 30 and not is_at_red_light and min_obs_dist >= 10.0:
             if speed_kmh < 2.0:
                 self.stalled_steps += 1
                 r_idle = -0.5
@@ -748,7 +685,7 @@ class CameraEasyCarlaEnv(gym.Env):
         else:
             r_idle = 0.0
 
-        is_stalled = bool(self.stalled_steps >= 25)
+        is_stalled = bool(self.stalled_steps >= 120)
 
         # 10. Terminal Failure Penalties (Stall, Off-road, Collision)
         r_terminal = 0.0
