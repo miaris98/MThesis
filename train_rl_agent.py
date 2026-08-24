@@ -92,44 +92,45 @@ class PretrainedVisionFeatureExtractor(nn.Module):
         """Extract multi-camera visual embedding (N, 3 * D) with batch-level Tensor Core efficiency."""
         img_x = image.float() / 255.0
 
-        if img_x.ndim == 4 and img_x.shape[-1] == 3:
-            N, H, W, C = img_x.shape
-            if W == H * 3:
-                # 3-camera horizontal panorama: split into Left, Center, Right
-                img_left = img_x[:, :, :H, :]
-                img_center = img_x[:, :, H:2*H, :]
-                img_right = img_x[:, :, 2*H:, :]
-                # Stack along batch: (3*N, 3, H, H)
-                cams = torch.cat([img_left, img_center, img_right], dim=0).permute(0, 3, 1, 2)
-                cams_normalized = (cams - self.mean) / self.std
-                if self.freeze_backbone:
-                    with torch.no_grad():
+        with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=img_x.is_cuda):
+            if img_x.ndim == 4 and img_x.shape[-1] == 3:
+                N, H, W, C = img_x.shape
+                if W == H * 3:
+                    # 3-camera horizontal panorama: split into Left, Center, Right
+                    img_left = img_x[:, :, :H, :]
+                    img_center = img_x[:, :, H:2*H, :]
+                    img_right = img_x[:, :, 2*H:, :]
+                    # Stack along batch: (3*N, 3, H, H)
+                    cams = torch.cat([img_left, img_center, img_right], dim=0).permute(0, 3, 1, 2)
+                    cams_normalized = (cams - self.mean) / self.std
+                    if self.freeze_backbone:
+                        with torch.no_grad():
+                            conv_out = self.backbone(cams_normalized).flatten(start_dim=1)
+                    else:
                         conv_out = self.backbone(cams_normalized).flatten(start_dim=1)
-                else:
-                    conv_out = self.backbone(cams_normalized).flatten(start_dim=1)
 
-                left_out, center_out, right_out = torch.chunk(conv_out, 3, dim=0)
-                visual_features = torch.cat([left_out, center_out, right_out], dim=1)
+                    left_out, center_out, right_out = torch.chunk(conv_out, 3, dim=0)
+                    visual_features = torch.cat([left_out, center_out, right_out], dim=1)
+                else:
+                    # Single camera input: (N, 3, H, W)
+                    img_perm = img_x.permute(0, 3, 1, 2)
+                    img_normalized = (img_perm - self.mean) / self.std
+                    if self.freeze_backbone:
+                        with torch.no_grad():
+                            single_out = self.backbone(img_normalized).flatten(start_dim=1)
+                    else:
+                        single_out = self.backbone(img_normalized).flatten(start_dim=1)
+                    visual_features = single_out.repeat(1, self.num_cameras)
             else:
-                # Single camera input: (N, 3, H, W)
-                img_perm = img_x.permute(0, 3, 1, 2)
-                img_normalized = (img_perm - self.mean) / self.std
+                img_normalized = (img_x - self.mean) / self.std
                 if self.freeze_backbone:
                     with torch.no_grad():
                         single_out = self.backbone(img_normalized).flatten(start_dim=1)
                 else:
                     single_out = self.backbone(img_normalized).flatten(start_dim=1)
                 visual_features = single_out.repeat(1, self.num_cameras)
-        else:
-            img_normalized = (img_x - self.mean) / self.std
-            if self.freeze_backbone:
-                with torch.no_grad():
-                    single_out = self.backbone(img_normalized).flatten(start_dim=1)
-            else:
-                single_out = self.backbone(img_normalized).flatten(start_dim=1)
-            visual_features = single_out.repeat(1, self.num_cameras)
 
-        return visual_features
+        return visual_features.float()
 
     def forward_with_visual_features(self, visual_features, speed):
         """Zero-backbone forward pass using cached visual features + speed scalar."""
@@ -164,24 +165,25 @@ class CNNFeatureExtractor(nn.Module):
 
     def extract_visual_features(self, image):
         img_x = image.float() / 255.0
-        if img_x.ndim == 4 and img_x.shape[-1] == 3:
-            N, H, W, C = img_x.shape
-            if W == H * 3:
-                img_left = img_x[:, :, :H, :]
-                img_center = img_x[:, :, H:2*H, :]
-                img_right = img_x[:, :, 2*H:, :]
-                cams = torch.cat([img_left, img_center, img_right], dim=0).permute(0, 3, 1, 2)
-                conv_out = self.conv(cams)
-                left_out, center_out, right_out = torch.chunk(conv_out, 3, dim=0)
-                visual_features = torch.cat([left_out, center_out, right_out], dim=1)
+        with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=img_x.is_cuda):
+            if img_x.ndim == 4 and img_x.shape[-1] == 3:
+                N, H, W, C = img_x.shape
+                if W == H * 3:
+                    img_left = img_x[:, :, :H, :]
+                    img_center = img_x[:, :, H:2*H, :]
+                    img_right = img_x[:, :, 2*H:, :]
+                    cams = torch.cat([img_left, img_center, img_right], dim=0).permute(0, 3, 1, 2)
+                    conv_out = self.conv(cams)
+                    left_out, center_out, right_out = torch.chunk(conv_out, 3, dim=0)
+                    visual_features = torch.cat([left_out, center_out, right_out], dim=1)
+                else:
+                    img_perm = img_x.permute(0, 3, 1, 2)
+                    single_out = self.conv(img_perm)
+                    visual_features = single_out.repeat(1, self.num_cameras)
             else:
-                img_perm = img_x.permute(0, 3, 1, 2)
-                single_out = self.conv(img_perm)
+                single_out = self.conv(img_x)
                 visual_features = single_out.repeat(1, self.num_cameras)
-        else:
-            single_out = self.conv(img_x)
-            visual_features = single_out.repeat(1, self.num_cameras)
-        return visual_features
+        return visual_features.float()
 
     def forward_with_visual_features(self, visual_features, speed):
         speed_x = speed.float().view(-1, 1) / 50.0
@@ -270,36 +272,37 @@ class ERFNetFeatureExtractor(nn.Module):
 
     def extract_visual_features(self, image):
         img_x = image.float() / 255.0
-        if img_x.ndim == 4 and img_x.shape[-1] == 3:
-            N, H, W, C = img_x.shape
-            if W == H * 3:
-                img_left = img_x[:, :, :H, :]
-                img_center = img_x[:, :, H:2*H, :]
-                img_right = img_x[:, :, 2*H:, :]
-                cams = torch.cat([img_left, img_center, img_right], dim=0).permute(0, 3, 1, 2)
-                if self.freeze_backbone:
-                    with torch.no_grad():
+        with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=img_x.is_cuda):
+            if img_x.ndim == 4 and img_x.shape[-1] == 3:
+                N, H, W, C = img_x.shape
+                if W == H * 3:
+                    img_left = img_x[:, :, :H, :]
+                    img_center = img_x[:, :, H:2*H, :]
+                    img_right = img_x[:, :, 2*H:, :]
+                    cams = torch.cat([img_left, img_center, img_right], dim=0).permute(0, 3, 1, 2)
+                    if self.freeze_backbone:
+                        with torch.no_grad():
+                            conv_out = self._forward_erfnet(cams)
+                    else:
                         conv_out = self._forward_erfnet(cams)
+                    left_out, center_out, right_out = torch.chunk(conv_out, 3, dim=0)
+                    visual_features = torch.cat([left_out, center_out, right_out], dim=1)
                 else:
-                    conv_out = self._forward_erfnet(cams)
-                left_out, center_out, right_out = torch.chunk(conv_out, 3, dim=0)
-                visual_features = torch.cat([left_out, center_out, right_out], dim=1)
+                    img_perm = img_x.permute(0, 3, 1, 2)
+                    if self.freeze_backbone:
+                        with torch.no_grad():
+                            single_out = self._forward_erfnet(img_perm)
+                    else:
+                        single_out = self._forward_erfnet(img_perm)
+                    visual_features = single_out.repeat(1, self.num_cameras)
             else:
-                img_perm = img_x.permute(0, 3, 1, 2)
                 if self.freeze_backbone:
                     with torch.no_grad():
-                        single_out = self._forward_erfnet(img_perm)
+                        single_out = self._forward_erfnet(img_x)
                 else:
-                    single_out = self._forward_erfnet(img_perm)
-                visual_features = single_out.repeat(1, self.num_cameras)
-        else:
-            if self.freeze_backbone:
-                with torch.no_grad():
                     single_out = self._forward_erfnet(img_x)
-            else:
-                single_out = self._forward_erfnet(img_x)
-            visual_features = single_out.repeat(1, self.num_cameras)
-        return visual_features
+                visual_features = single_out.repeat(1, self.num_cameras)
+        return visual_features.float()
 
     def forward_with_visual_features(self, visual_features, speed):
         speed_x = speed.float().view(-1, 1) / 50.0
@@ -676,9 +679,28 @@ def train():
             test_x = torch.ones(2, device="cuda")
             _ = test_x + 1
             torch.backends.cudnn.benchmark = True
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            if hasattr(torch, "set_float32_matmul_precision"):
+                torch.set_float32_matmul_precision("high")
         except Exception as cuda_err:
             print(f"⚠️  GPU CUDA kernel execution failed ({cuda_err}). Running policy on CPU.")
             device = torch.device("cpu")
+            
+    # Dynamic Hardware Auto-Tuning based on detected GPU VRAM
+    if device.type == "cuda":
+        total_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        free_vram_gb = torch.cuda.mem_get_info()[0] / (1024**3)
+        print(f"--> Hardware Telemetry: {torch.cuda.get_device_name(0)} | Total VRAM: {total_vram_gb:.1f} GB | Free VRAM: {free_vram_gb:.1f} GB")
+        
+        # Scale minibatch dynamically if user kept default 128 to maximize GPU saturation
+        if args.minibatch_size == 128:
+            if free_vram_gb >= 10.0:
+                args.minibatch_size = 256
+                print(f"⚡ [Dynamic Auto-Tune] Detected {free_vram_gb:.1f} GB free VRAM: Auto-scaled PPO Minibatch to 256 for higher GPU Tensor Core saturation.")
+            elif free_vram_gb >= 20.0:
+                args.minibatch_size = 512
+                print(f"⚡ [Dynamic Auto-Tune] Detected {free_vram_gb:.1f} GB free VRAM: Auto-scaled PPO Minibatch to 512 for maximum GPU throughput.")
     print(f"==============================================================")
     print(f"   🚀 Starting High-Throughput PPO Deep RL Training           ")
     print(f"==============================================================")
