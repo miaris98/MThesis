@@ -518,16 +518,27 @@ class Qwen500MVisionTransformer(nn.Module):
         visual_features = self.extract_visual_features(image)
         return self.forward_with_visual_features(visual_features, speed)
 
-class Qwen500MDecisionTransformer(nn.Module):
+class QwenDecisionTransformer(nn.Module):
     """
-    500M Parameter Qwen-Style Decision Transformer for PPO Actor-Critic.
-    - 28 Layers, 1024 Hidden Dim, 16 Attention Heads, 4096 SwiGLU FFN.
+    900M / 500M Parameter Qwen-Style Decision Transformer for PPO Actor-Critic.
+    - 24-28 Layers, 1536/1024 Hidden Dim, 24/16 Attention Heads, 6144/4096 SwiGLU FFN.
     - Trainable Attention Skip Connections (Qwen Alpha Gating).
     - Takes features from the vision backbone (LAV / ResNet) + speed state.
     - Outputs continuous driving action distribution mu(s), sigma(s) and state-value V(s).
     """
-    def __init__(self, in_features: int = 1536, action_dim: int = 3, depth: int = 28, embed_dim: int = 1024, num_heads: int = 16, ffn_dim: int = 4096):
+    def __init__(self, in_features: int = 1536, action_dim: int = 3, model_size: str = "900m"):
         super().__init__()
+        if model_size == "900m":
+            depth = 24
+            embed_dim = 1536
+            num_heads = 24
+            ffn_dim = 6144
+        else: # 500m
+            depth = 28
+            embed_dim = 1024
+            num_heads = 16
+            ffn_dim = 4096
+
         self.embed_dim = embed_dim
         
         # Project vision embeddings and speed into transformer token space
@@ -538,7 +549,7 @@ class Qwen500MDecisionTransformer(nn.Module):
         self.actor_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.critic_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         
-        # 28 Qwen Transformer Blocks with Trainable Attention Skip Connections
+        # Qwen Transformer Blocks with Trainable Attention Skip Connections
         self.blocks = nn.ModuleList([
             QwenTransformerBlock(dim=embed_dim, num_heads=num_heads, ffn_dim=ffn_dim)
             for _ in range(depth)
@@ -603,7 +614,7 @@ class ActorCriticPPO(nn.Module):
         action_dim=3, 
         features_dim=512, 
         backbone_name="lav", 
-        policy_arch="qwen500m", 
+        policy_arch="qwen900m", 
         freeze_backbone=True, 
         use_pretrained=True, 
         weights_path=None
@@ -628,18 +639,16 @@ class ActorCriticPPO(nn.Module):
         vis_dim = getattr(self.encoder, 'visual_feature_dim', features_dim)
 
         # 2. PPO Decision Policy Architecture
-        if policy_arch in ["qwen500m", "qwen", "transformer500m", "transformer"]:
-            print(f"--> Initializing 500M Parameter Qwen-Style Decision Transformer with Trainable Attention Skip Connections...")
-            self.decision_net = Qwen500MDecisionTransformer(
+        if policy_arch in ["qwen900m", "qwen500m", "qwen", "transformer"]:
+            model_size = "500m" if "500m" in policy_arch else "900m"
+            print(f"--> Initializing {model_size.upper()} Parameter Qwen-Style Decision Transformer with Trainable Attention Skip Connections...")
+            self.decision_net = QwenDecisionTransformer(
                 in_features=vis_dim,
                 action_dim=action_dim,
-                depth=28,
-                embed_dim=1024,
-                num_heads=16,
-                ffn_dim=4096
+                model_size=model_size
             )
             param_count = sum(p.numel() for p in self.decision_net.parameters())
-            print(f"✓ 500M Qwen Decision Transformer initialized! Policy Parameters: {param_count:,} ({param_count/1e6:.1f}M)")
+            print(f"✓ {model_size.upper()} Qwen Decision Transformer initialized! Policy Parameters: {param_count:,} ({param_count/1e6:.1f}M)")
         else:
             self.decision_net = None
             self.actor_mean = nn.Sequential(
@@ -806,9 +815,23 @@ class ExperimentLogger:
                 if active_run:
                     self.run_id = active_run.info.run_id
 
+                cf_url = None
+                if os.path.exists("/tmp/mlflow_tunnel.log"):
+                    try:
+                        with open("/tmp/mlflow_tunnel.log", "r") as f:
+                            log_txt = f.read()
+                        import re
+                        m = re.search(r'https://[-a-zA-Z0-9@:%._\+~#=]*\.trycloudflare\.com', log_txt)
+                        if m:
+                            cf_url = m.group(0)
+                    except Exception:
+                        pass
+
                 print(f"======================================================================")
                 print(f"   📊 MLFLOW DASHBOARD ONLINE (PORT {mlflow_port})                      ")
-                print(f"   👉 Clickable Public URL:  http://{public_ip}:{mlflow_port}          ")
+                if cf_url:
+                    print(f"   👉 Public HTTPS URL:      {cf_url}          ")
+                print(f"   👉 Vast.ai Tunnel:        Open Port {mlflow_port} in Vast.ai Tunnels UI")
                 print(f"   👉 Localhost URL:         http://127.0.0.1:{mlflow_port}             ")
                 print(f"   ✓ Experiment: '{experiment_name}' | Run ID: {self.run_id}")
                 print(f"======================================================================")
@@ -943,8 +966,9 @@ def train():
     parser.add_argument("--host", type=str, default="127.0.0.1", help="CARLA host IP")
     parser.add_argument("--port", type=int, default=2000, help="CARLA port")
     parser.add_argument("--env-type", type=str, default="camera_easycarla", choices=["camera_easycarla", "carla_gym"], help="Environment type")
-    parser.add_argument("--backbone", type=str, default="resnet18", choices=["resnet18", "resnet34", "lav", "erfnet", "qwen500m", "qwen", "transformer500m"], help="Vision backbone (resnet18, resnet34, lav, erfnet, qwen500m)")
-    parser.add_argument("--policy-arch", type=str, default="qwen500m", choices=["qwen500m", "mlp", "transformer"], help="Decision policy architecture (qwen500m, mlp)")
+    parser.add_argument("--backbone", type=str, default="resnet18", choices=["resnet18", "resnet34", "lav", "erfnet", "qwen900m", "qwen500m", "qwen", "transformer"], help="Vision backbone (resnet18, resnet34, lav, erfnet)")
+    parser.add_argument("--policy-arch", type=str, default="qwen900m", choices=["qwen900m", "qwen500m", "mlp", "transformer"], help="Decision policy architecture (qwen900m, qwen500m, mlp)")
+    parser.add_argument("--fresh", action="store_true", default=False, help="Start training fresh from scratch (clears previous checkpoints)")
     parser.add_argument("--weights-path", type=str, default=None, help="Optional path to custom pretrained vision checkpoint (.pth)")
     parser.add_argument("--freeze-backbone", action="store_true", default=True, help="Freeze vision backbone parameters")
     parser.add_argument("--no-freeze-backbone", action="store_false", dest="freeze_backbone", help="Fine-tune vision backbone parameters")
@@ -1025,7 +1049,7 @@ def train():
         experiment_name=args.experiment_name,
         use_mlflow=args.use_mlflow,
         mlflow_port=args.mlflow_port,
-        resume=args.resume
+        resume=args.resume and not args.fresh
     )
     writer.log_params(args)
     
@@ -1077,10 +1101,21 @@ def train():
 
     optimizer = optim.Adam(agent.parameters(), lr=args.lr)
 
-    # Resume from latest checkpoint if requested
+    # Fresh start vs Resume from latest checkpoint
     global_step = 0
     best_episode_reward = -float("inf")
-    if args.resume:
+    if args.fresh:
+        print("🧹 [START FRESH] Cleaning all previous checkpoints to train from step 0...")
+        if os.path.exists(args.checkpoint_dir):
+            for fname in os.listdir(args.checkpoint_dir):
+                fpath = os.path.join(args.checkpoint_dir, fname)
+                try:
+                    if os.path.isfile(fpath):
+                        os.remove(fpath)
+                except Exception:
+                    pass
+        args.resume = False
+    elif args.resume:
         latest_ckpt = os.path.join(args.checkpoint_dir, "ppo_carla_latest.pth")
         if not os.path.exists(latest_ckpt) and os.path.exists(os.path.join(args.checkpoint_dir, "ppo_carla_best.pth")):
             latest_ckpt = os.path.join(args.checkpoint_dir, "ppo_carla_best.pth")

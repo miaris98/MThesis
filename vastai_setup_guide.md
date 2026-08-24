@@ -137,61 +137,75 @@ python test_connection.py --host 127.0.0.1 --port 2000
 
 ---
 
-## 5. MLflow Tracking Dashboard (Port 10100)
+## 5. Accessing MLflow Dashboard via Vast.ai Web Tunnel or SSH
 
-When you launch `train_rl_agent.py`, the `ExperimentLogger` automatically starts an MLflow tracking server on **port 10100** and outputs clickable URLs to stdout:
+The training supervisor automatically launches an isolated MLflow UI server on **port 10100** (or port 7070) in a dedicated tmux session `mlflow_server`.
 
-```text
-======================================================================
-   📊 MLFLOW DASHBOARD ONLINE (PORT 10100)
-   👉 Clickable Public URL:  http://<YOUR_VAST_IP>:10100
-   👉 Localhost URL:         http://127.0.0.1:10100
-   ✓ Experiment: 'CARLA_PPO_RL' | Run ID: 4f8b9d...
-======================================================================
-```
+### Option A: Vast.ai Web Portal Tunnel (Easiest, No SSH Needed)
+1. On your Vast.ai web dashboard, navigate to **Tunnels (Open New Ports)** (`http://<VAST_IP>:<PORT>/#/tunnels`).
+2. Click the **"Create New Tunnel"** button.
+3. In the **Target Port** field, enter: `10100` (or the active MLflow port).
+4. Click **Create** $\to$ Vast.ai will generate a clickable public **Tunnel URL**.
+5. Click the link to open your live **MLflow Experiment Dashboard** directly in your browser!
 
-To start the MLflow server manually at any time:
+### Option B: Local SSH Tunnel
+From your local Windows PowerShell / Terminal:
 ```bash
-source /opt/conda/bin/activate carla_py38
-mlflow ui --host 0.0.0.0 --port 10100
+ssh -p <SSH_PORT> -L 10100:localhost:10100 root@<VAST_IP>
 ```
+Then open in your browser: 👉 **http://localhost:10100**
 
 ---
 
 ## 6. Multi-Pane `tmux` Monitoring Dashboard
 
-Launch the automated 3-pane monitoring & MLflow dashboard:
+Launch the automated 2-pane hardware monitoring dashboard (`nvitop` on top, `btop` on bottom):
 ```bash
 bash /workspace/MThesis/start_dashboard.sh
 ```
+*To kill the dashboard session when done:* `tmux kill-session -t dashboard`
 
 ---
 
-## 7. Train PPO Agent with LAV Pretrained Weights & VRAM Acceleration
+## 7. Train with Pretrained LAV Backbone + 900M Qwen Decision Transformer
 
-Run high-throughput PPO RL training utilizing your GPU's VRAM:
+The policy network combines the **pretrained LAV multi-camera panoramic feature extractor** with a **~906 Million Parameter Qwen-Style Decision Transformer** featuring **Trainable Attention Skip Connections** ($\boldsymbol{\alpha}_{\text{attn}} \odot \text{Attn}$ and $\boldsymbol{\alpha}_{\text{ffn}} \odot \text{SwiGLU}$), **SwiGLU FFN** (Dim 6144), **RMSNorm**, and **Frame-Skipping** ($k=2$ for $2\times$ simulation throughput).
+
+### A. Autonomous Auto-Restart Supervisor (Recommended)
+
+To start a **fresh run from Step 0** (clearing previous checkpoints):
+```bash
+cd /workspace/MThesis && git pull
+bash run_training_loop.sh 50000 lav Town10HD_Opt 3 10 --fresh
+```
+
+To **resume training from the latest checkpoint**:
+```bash
+bash run_training_loop.sh 50000 lav Town10HD_Opt 3 10
+```
+
+### B. Direct Python Execution
 
 ```bash
 source /opt/conda/bin/activate carla_py38
 cd /workspace/MThesis
 
-# Train 1,000,000 steps with LAV Pretrained Encoder, GPU Tensor Core batching (128), and MLflow
 python train_rl_agent.py \
     --env-type camera_easycarla \
     --backbone lav \
+    --policy-arch qwen900m \
+    --town Town10HD_Opt \
     --weights-path ./papers_and_code/LAV/lav_pretrained.pth \
     --freeze-backbone \
-    --minibatch-size 128 \
+    --frame-skip 2 \
+    --rollout-steps 500 \
+    --minibatch-size 256 \
     --use-mlflow \
     --mlflow-port 10100 \
-    --total-steps 1000000 \
     --log-dir /workspace/runs \
-    --checkpoint-dir /workspace/checkpoints
-```
-
-### Auto-Restart Supervisor (Resilient to Crash / Timeouts)
-```bash
-bash run_training_loop.sh 1000000 lav Town10HD_Opt 3 10
+    --checkpoint-dir /workspace/checkpoints \
+    --total-steps 50000 \
+    --fresh
 ```
 
 ---
@@ -199,7 +213,7 @@ bash run_training_loop.sh 1000000 lav Town10HD_Opt 3 10
 ## 8. CSV Telemetry Export & Model Artifacts
 
 * **Step-by-Step CSV Log**: All step inputs, outputs, actions, speed, raw rewards, sub-rewards, and curriculum parameters are written to `/workspace/runs/training_telemetry.csv`.
-* **MLflow Artifact Sync**: `training_telemetry.csv` and best model checkpoints (`ppo_carla_best.pth`) are automatically uploaded as MLflow artifacts and downloadable from the MLflow UI (`http://<VAST_IP>:10100`).
+* **MLflow Artifact Sync**: `training_telemetry.csv` and best model checkpoints (`ppo_carla_best.pth`) are automatically logged to MLflow and downloadable from the web UI.
 
 ---
 
@@ -210,6 +224,7 @@ Generate evaluation videos with real-time driving telemetry overlays:
 python record_eval_video.py \
     --checkpoint /workspace/checkpoints/ppo_carla_best.pth \
     --backbone lav \
+    --policy-arch qwen900m \
     --steps 300 \
     --output-video /workspace/output_screenshots/driving_multiview.mp4
 ```
@@ -219,6 +234,3 @@ In JupyterLab, play the recorded video cell:
 from IPython.display import Video
 Video('/workspace/output_screenshots/driving_multiview.mp4', embed=True, width=720)
 ```
-
-
-Mlflow : http://124.60.192.12:50559/#/

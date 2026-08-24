@@ -4,11 +4,42 @@
 #  Automatically restarts CARLA server & resumes training on any crash/timeout
 # ==============================================================================
 
-TOTAL_STEPS=${1:-20000}
-BACKBONE=${2:-lav}
-TOWN=${3:-Town10HD_Opt}
-NUM_VEHICLES=${4:-3}
-NUM_WALKERS=${5:-10}
+# Default configuration
+TOTAL_STEPS=50000
+BACKBONE=lav
+TOWN=Town10HD_Opt
+NUM_VEHICLES=3
+NUM_WALKERS=10
+START_FRESH=false
+
+# Robust argument parsing supporting --fresh in any position
+POS_ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --fresh|--from-scratch|fresh)
+            START_FRESH=true
+            ;;
+        *)
+            POS_ARGS+=("$arg")
+            ;;
+    esac
+done
+
+[ ${#POS_ARGS[@]} -ge 1 ] && [ -n "${POS_ARGS[0]}" ] && TOTAL_STEPS=${POS_ARGS[0]}
+[ ${#POS_ARGS[@]} -ge 2 ] && [ -n "${POS_ARGS[1]}" ] && BACKBONE=${POS_ARGS[1]}
+[ ${#POS_ARGS[@]} -ge 3 ] && [ -n "${POS_ARGS[2]}" ] && TOWN=${POS_ARGS[2]}
+[ ${#POS_ARGS[@]} -ge 4 ] && [ -n "${POS_ARGS[3]}" ] && NUM_VEHICLES=${POS_ARGS[3]}
+[ ${#POS_ARGS[@]} -ge 5 ] && [ -n "${POS_ARGS[4]}" ] && NUM_WALKERS=${POS_ARGS[4]}
+
+if [ "$START_FRESH" = true ]; then
+    echo "=============================================================="
+    echo "🧹 [START FRESH] Requested fresh training run from scratch."
+    echo "   Clearing previous checkpoints and telemetry logs..."
+    echo "=============================================================="
+    rm -rf /workspace/checkpoints/* /workspace/runs/* /workspace/telemetry.csv 2>/dev/null || true
+    rm -rf ./runs/* ./checkpoints/* ./telemetry.csv 2>/dev/null || true
+    echo "✓ Previous checkpoints and run logs cleared!"
+fi
 
 # Locate Python 3.8 binary in carla_py38 environment
 PYTHON_BIN=""
@@ -58,8 +89,10 @@ fi
 echo "=============================================================="
 echo "   🔄 Starting Autonomous Auto-Restart Training Supervisor    "
 echo "=============================================================="
-echo "Target Steps: $TOTAL_STEPS | Backbone: $BACKBONE | Town: $TOWN"
-echo "NPC Vehicles: $NUM_VEHICLES | Pedestrians: $NUM_WALKERS"
+echo "Target Steps: $TOTAL_STEPS | Vision Backbone: $BACKBONE"
+echo "Policy Architecture: QWEN-900M (Trainable Attention Skip Connections)"
+echo "CARLA Map: $TOWN | Mode: $([ "$START_FRESH" = true ] && echo 'FRESH (From Scratch)' || echo 'RESUME (From Checkpoint)')"
+echo "NPC Traffic: $NUM_VEHICLES Vehicles | $NUM_WALKERS Walkers"
 echo "Python Executable: $PYTHON_BIN"
 echo "=============================================================="
 
@@ -125,9 +158,35 @@ else
         "$PYTHON_BIN -m mlflow ui --host 0.0.0.0 --port ${MLFLOW_PORT} --backend-store-uri /workspace/MThesis/mlruns > /workspace/mlflow_server.log 2>&1"
     sleep 3
     echo "✓ MLflow UI server started in tmux session 'mlflow_server' (port ${MLFLOW_PORT})"
-    echo "  This session is fully isolated from training restarts."
 fi
-echo "  📊 MLflow port: ${MLFLOW_PORT}"
+
+# Ensure cloudflared is installed for 1-click public HTTPS dashboard access
+if ! command -v cloudflared &>/dev/null; then
+    echo "--> Installing cloudflared for direct public HTTPS dashboard access..."
+    (wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -O /tmp/cloudflared.deb 2>/dev/null && \
+     dpkg -i /tmp/cloudflared.deb >/dev/null 2>&1 && rm -f /tmp/cloudflared.deb) || true
+fi
+
+# Launch or recover Cloudflare public tunnel for MLflow
+CLOUDFLARE_URL=""
+if command -v cloudflared &>/dev/null; then
+    if ! tmux has-session -t mlflow_tunnel 2>/dev/null; then
+        tmux new-session -d -s mlflow_tunnel \
+            "cloudflared tunnel --url http://127.0.0.1:${MLFLOW_PORT} 2>&1 | tee /tmp/mlflow_tunnel.log"
+        sleep 4
+    fi
+    if [ -f /tmp/mlflow_tunnel.log ]; then
+        CLOUDFLARE_URL=$(grep -o 'https://[-a-zA-Z0-9@:%._\+~#=]*\.trycloudflare\.com' /tmp/mlflow_tunnel.log | head -n 1)
+    fi
+fi
+
+echo "=============================================================="
+echo "   📊 MLFLOW DASHBOARD ONLINE (PORT ${MLFLOW_PORT})           "
+if [ -n "$CLOUDFLARE_URL" ]; then
+    echo "   👉 Public HTTPS URL:  $CLOUDFLARE_URL"
+fi
+echo "   👉 Vast.ai Tunnel:    Open Port ${MLFLOW_PORT} in Vast.ai Tunnels UI"
+echo "   👉 Localhost URL:     http://127.0.0.1:${MLFLOW_PORT}"
 echo "=============================================================="
 
 attempt=1
@@ -174,11 +233,20 @@ while true; do
         WEIGHTS_ARG="--weights-path /workspace/pretrained_carla/model_0030_0.pth"
     fi
 
+    # Configure resume vs fresh start
+    RESUME_ARG="--resume"
+    if [ "$START_FRESH" = true ] && [ "$attempt" -eq 1 ]; then
+        RESUME_ARG="--fresh"
+        echo "🌱 Launching FRESH training run from step 0 (Qwen-900M Decision Policy + LAV Vision Backbone)..."
+    else
+        echo "🔄 Resuming training from latest saved checkpoint..."
+    fi
+
     # 3. Launch / Resume Training
     "$PYTHON_BIN" train_rl_agent.py \
         --env-type camera_easycarla \
         --backbone "$BACKBONE" \
-        --policy-arch qwen500m \
+        --policy-arch qwen900m \
         --town "$TOWN" \
         --num-vehicles "$NUM_VEHICLES" \
         --num-walkers "$NUM_WALKERS" \
@@ -188,8 +256,10 @@ while true; do
         --ent-coef 0.05 \
         --use-mlflow \
         --mlflow-port $MLFLOW_PORT \
+        --log-dir /workspace/runs \
+        --checkpoint-dir /workspace/checkpoints \
         $WEIGHTS_ARG \
-        --resume \
+        $RESUME_ARG \
         --total-steps "$TOTAL_STEPS"
 
     exit_code=$?
