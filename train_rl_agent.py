@@ -596,7 +596,10 @@ class QwenDecisionTransformer(nn.Module):
         
         with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=visual_features.is_cuda):
             for block in self.blocks:
-                tokens = block(tokens)
+                if self.training and tokens.requires_grad:
+                    tokens = torch.utils.checkpoint.checkpoint(block, tokens, use_reentrant=False)
+                else:
+                    tokens = block(tokens)
             tokens = self.final_norm(tokens)
             
             actor_repr = tokens[:, 0]
@@ -614,7 +617,7 @@ class ActorCriticPPO(nn.Module):
         action_dim=3, 
         features_dim=512, 
         backbone_name="lav", 
-        policy_arch="qwen900m", 
+        policy_arch="qwen500m", 
         freeze_backbone=True, 
         use_pretrained=True, 
         weights_path=None
@@ -967,7 +970,7 @@ def train():
     parser.add_argument("--port", type=int, default=2000, help="CARLA port")
     parser.add_argument("--env-type", type=str, default="camera_easycarla", choices=["camera_easycarla", "carla_gym"], help="Environment type")
     parser.add_argument("--backbone", type=str, default="resnet18", choices=["resnet18", "resnet34", "lav", "erfnet", "qwen900m", "qwen500m", "qwen", "transformer"], help="Vision backbone (resnet18, resnet34, lav, erfnet)")
-    parser.add_argument("--policy-arch", type=str, default="qwen900m", choices=["qwen900m", "qwen500m", "mlp", "transformer"], help="Decision policy architecture (qwen900m, qwen500m, mlp)")
+    parser.add_argument("--policy-arch", type=str, default="qwen500m", choices=["qwen500m", "qwen900m", "mlp", "transformer"], help="Decision policy architecture (qwen500m, qwen900m, mlp)")
     parser.add_argument("--fresh", action="store_true", default=False, help="Start training fresh from scratch (clears previous checkpoints)")
     parser.add_argument("--weights-path", type=str, default=None, help="Optional path to custom pretrained vision checkpoint (.pth)")
     parser.add_argument("--freeze-backbone", action="store_true", default=True, help="Freeze vision backbone parameters")
@@ -1370,6 +1373,9 @@ def train():
         minibatch_size = getattr(args, 'minibatch_size', 128)
         b_inds = np.arange(args.rollout_steps)
 
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         ppo_start_time = time.time()
 
         for epoch in range(args.ppo_epochs):
@@ -1416,6 +1422,9 @@ def train():
 
                 policy_losses.append(pg_loss.item())
                 value_losses.append(v_loss.item())
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         ppo_elapsed = time.time() - ppo_start_time
 

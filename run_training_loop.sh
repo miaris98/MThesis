@@ -90,7 +90,7 @@ echo "=============================================================="
 echo "   🔄 Starting Autonomous Auto-Restart Training Supervisor    "
 echo "=============================================================="
 echo "Target Steps: $TOTAL_STEPS | Vision Backbone: $BACKBONE"
-echo "Policy Architecture: QWEN-900M (Trainable Attention Skip Connections)"
+echo "Policy Architecture: QWEN-500M (Trainable Attention Skip Connections)"
 echo "CARLA Map: $TOWN | Mode: $([ "$START_FRESH" = true ] && echo 'FRESH (From Scratch)' || echo 'RESUME (From Checkpoint)')"
 echo "NPC Traffic: $NUM_VEHICLES Vehicles | $NUM_WALKERS Walkers"
 echo "Python Executable: $PYTHON_BIN"
@@ -237,7 +237,7 @@ while true; do
     RESUME_ARG="--resume"
     if [ "$START_FRESH" = true ] && [ "$attempt" -eq 1 ]; then
         RESUME_ARG="--fresh"
-        echo "🌱 Launching FRESH training run from step 0 (Qwen-900M Decision Policy + LAV Vision Backbone)..."
+        echo "🌱 Launching FRESH training run from step 0 (Qwen-500M Decision Policy + LAV Vision Backbone)..."
     else
         echo "🔄 Resuming training from latest saved checkpoint..."
     fi
@@ -246,7 +246,7 @@ while true; do
     "$PYTHON_BIN" train_rl_agent.py \
         --env-type camera_easycarla \
         --backbone "$BACKBONE" \
-        --policy-arch qwen900m \
+        --policy-arch qwen500m \
         --town "$TOWN" \
         --num-vehicles "$NUM_VEHICLES" \
         --num-walkers "$NUM_WALKERS" \

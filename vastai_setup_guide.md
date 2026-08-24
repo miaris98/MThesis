@@ -167,9 +167,9 @@ bash /workspace/MThesis/start_dashboard.sh
 
 ---
 
-## 7. Train with Pretrained LAV Backbone + 900M Qwen Decision Transformer
+## 7. Train with Pretrained LAV Backbone + 500M Qwen Decision Transformer
 
-The policy network combines the **pretrained LAV multi-camera panoramic feature extractor** with a **~906 Million Parameter Qwen-Style Decision Transformer** featuring **Trainable Attention Skip Connections** ($\boldsymbol{\alpha}_{\text{attn}} \odot \text{Attn}$ and $\boldsymbol{\alpha}_{\text{ffn}} \odot \text{SwiGLU}$), **SwiGLU FFN** (Dim 6144), **RMSNorm**, and **Frame-Skipping** ($k=2$ for $2\times$ simulation throughput).
+The policy network combines the **pretrained LAV multi-camera panoramic feature extractor** with a **~472 Million Parameter Qwen-Style Decision Transformer** featuring **Trainable Attention Skip Connections** ($\boldsymbol{\alpha}_{\text{attn}} \odot \text{Attn}$ and $\boldsymbol{\alpha}_{\text{ffn}} \odot \text{SwiGLU}$), **SwiGLU FFN** (Dim 4096), **RMSNorm**, and **Frame-Skipping** ($k=2$ for $2\times$ simulation throughput).
 
 ### A. Autonomous Auto-Restart Supervisor (Recommended)
 
@@ -193,7 +193,7 @@ cd /workspace/MThesis
 python train_rl_agent.py \
     --env-type camera_easycarla \
     --backbone lav \
-    --policy-arch qwen900m \
+    --policy-arch qwen500m \
     --town Town10HD_Opt \
     --weights-path ./papers_and_code/LAV/lav_pretrained.pth \
     --freeze-backbone \
@@ -224,7 +224,7 @@ Generate evaluation videos with real-time driving telemetry overlays:
 python record_eval_video.py \
     --checkpoint /workspace/checkpoints/ppo_carla_best.pth \
     --backbone lav \
-    --policy-arch qwen900m \
+    --policy-arch qwen500m \
     --steps 300 \
     --output-video /workspace/output_screenshots/driving_multiview.mp4
 ```
