@@ -282,10 +282,10 @@ while true; do
         
         touch "$LOG_FILE" && chmod 666 "$LOG_FILE" 2>/dev/null || true
         > "$LOG_FILE" 2>/dev/null || true
-        LAUNCH_CMD="/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -quality-level=Low -benchmark -fps=20"
+        LAUNCH_CMD="/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -quality-level=Low -benchmark -fps=20"
 
         tmux new-session -d -s "$SESSION_NAME" \
-            "su -s /bin/bash carlauser -c '$CARLA_USER_ENV; $LAUNCH_CMD' > $LOG_FILE 2>&1"
+            "su carlauser -c '$CARLA_USER_ENV; $LAUNCH_CMD' > $LOG_FILE 2>&1"
         sleep 2
     done
     sleep 2
@@ -353,7 +353,7 @@ v = c.get_server_version()
             touch "$LOG_FILE" && chmod 666 "$LOG_FILE" 2>/dev/null || true
             > "$LOG_FILE" 2>/dev/null || true
             tmux new-session -d -s "$SESSION_NAME" \
-                "su -s /bin/bash carlauser -c '$CARLA_USER_ENV; $LAUNCH_CMD' > $LOG_FILE 2>&1"
+                "su carlauser -c '$CARLA_USER_ENV; $LAUNCH_CMD' > $LOG_FILE 2>&1"
             echo -n "   [CARLA #$((i+1))/$NUM_ENVS | Port $PORT (Retry)] Waiting for initialization"
             for attempt_check in $(seq 1 40); do
                 echo -n "."
