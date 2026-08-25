@@ -56,6 +56,9 @@ class PPOTrainer:
         self.global_step = 0
         self.best_reward = -float("inf")
         self.episode_count = 1
+        self.train_start_time = None
+        self.last_progress_step = 0
+        self.last_progress_time = None
         self._handle_checkpoints()
 
     def _init_cuda_optimizations(self) -> None:
@@ -132,6 +135,10 @@ class PPOTrainer:
         except Exception as e:
             print(f"⚠️ [Initial Environment Reset Failed: {e}] Attempting in-process recovery...")
             obs = self._recover_env()
+
+        self.train_start_time = time.time()
+        self.last_progress_time = time.time()
+        self.last_progress_step = self.global_step
 
         buffer = RolloutBuffer(
             buffer_size=self.cfg.rollout_steps,
@@ -227,6 +234,18 @@ class PPOTrainer:
                         ep_lengths[e] = 0
                         ep_speeds[e] = []
 
+                # Periodic heartbeat logging every 20 steps
+                if (self.global_step - self.last_progress_step) >= max(20, self.num_envs * 10):
+                    now_str = time.strftime("%H:%M:%S")
+                    step_delta = self.global_step - self.last_progress_step
+                    time_delta = max(1e-5, time.time() - (self.last_progress_time or time.time()))
+                    instant_sps = step_delta / time_delta
+                    instant_fps = instant_sps * self.cfg.frame_skip
+                    pct = min(100.0, 100.0 * self.global_step / float(self.cfg.total_steps))
+                    print(f"[{now_str} | Step {self.global_step:05d}/{self.cfg.total_steps} ({pct:4.1f}%) | {instant_sps:4.1f} Steps/s ({instant_fps:4.1f} FPS) | Episodes: {self.episode_count}]", flush=True)
+                    self.last_progress_step = self.global_step
+                    self.last_progress_time = time.time()
+
                 obs = next_obs
 
             # 2. Advantage Estimation & PPO Update
@@ -239,10 +258,16 @@ class PPOTrainer:
         self.csv_logger.flush()
         avg_speed = np.mean(ep_speeds) if ep_speeds else 0.0
         reason = info.get("termination_reason", "Finished")
-        print(f"[Step {self.global_step:05d}/{self.cfg.total_steps} | Env #{env_id}] Episode Finished | Reward: {ep_reward:+.2f} | Avg Speed: {avg_speed:.1f} km/h | Reason: {reason}")
+        now_str = time.strftime("%H:%M:%S")
+        elapsed = max(1e-5, time.time() - (self.train_start_time or time.time()))
+        overall_sps = self.global_step / elapsed
+        overall_fps = overall_sps * self.cfg.frame_skip
+        print(f"[{now_str} | Step {self.global_step:05d}/{self.cfg.total_steps} | Env #{env_id}] Episode #{self.episode_count:03d} Finished | Reward: {ep_reward:+.2f} | Avg Speed: {avg_speed:4.1f} km/h | Reason: {reason} | Speed: {overall_sps:4.1f} Steps/s ({overall_fps:4.1f} FPS)", flush=True)
         self.logger.add_scalar("Reward/Episode_Total", ep_reward, self.global_step)
         self.logger.add_scalar("Speed/Avg_kmh", avg_speed, self.global_step)
         self.logger.add_scalar(f"Reward/Env_{env_id}_Total", ep_reward, self.global_step)
+        self.logger.add_scalar("Perf/Steps_Per_Second", overall_sps, self.global_step)
+        self.logger.add_scalar("Perf/Frames_Per_Second", overall_fps, self.global_step)
 
         if ep_reward > self.best_reward:
             self.best_reward = ep_reward
@@ -294,9 +319,13 @@ class PPOTrainer:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+        now_str = time.strftime("%H:%M:%S")
         sps = total_samples / max(1e-4, time.time() - rollout_start)
+        fps = sps * self.cfg.frame_skip
         ppo_elapsed = time.time() - ppo_start
-        print(f"--- Rollout Update Complete | Step: {self.global_step}/{self.cfg.total_steps} | SPS: {sps:.1f} | PPO Opt: {ppo_elapsed*1000.0:.1f}ms | Loss: {np.mean(policy_losses):.4f} ---")
+        mean_p_loss = float(np.mean(policy_losses)) if policy_losses else 0.0
+        mean_v_loss = float(np.mean(value_losses)) if value_losses else 0.0
+        print(f"[{now_str} | PPO Policy Update] Step: {self.global_step:05d}/{self.cfg.total_steps} | Rollout: {sps:4.1f} Steps/s ({fps:4.1f} FPS) | PPO Opt: {ppo_elapsed*1000.0:5.1f}ms | Policy Loss: {mean_p_loss:+.4f} | Value Loss: {mean_v_loss:.4f}", flush=True)
 
         latest_path = os.path.join(self.cfg.checkpoint_dir, "ppo_carla_latest.pth")
         torch.save(self.agent.state_dict(), latest_path)

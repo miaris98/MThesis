@@ -182,6 +182,19 @@ class CameraEasyCarlaEnv(gym.Env):
             'waypoints': np.zeros(36, dtype=np.float32)
         }
 
+        # Override collision and lane invasion callbacks to eliminate raw unformatted prints
+        def clean_on_collision(event):
+            self.easy_env._is_collision = True
+            if hasattr(self.easy_env, 'collision_hist') and self.easy_env.collision_hist is not None:
+                self.easy_env.collision_hist.append(event)
+
+        def clean_on_invasion(event):
+            self.easy_env._is_off_road = True
+
+        self.easy_env._on_collision = clean_on_collision
+        self.easy_env._on_lane_invasion = clean_on_invasion
+        self.easy_env._on_invasion = clean_on_invasion
+
         self.easy_env._clear_all_actors = lambda filters: safe_clear_carla_actors(
             self.easy_env.world, self.carla_client, filters
         )
