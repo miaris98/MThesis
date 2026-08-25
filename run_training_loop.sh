@@ -193,7 +193,7 @@ if command -v cloudflared &>/dev/null; then
         rm -f /tmp/mlflow_tunnel.log
         echo "--> 🌐 Launching public Cloudflare HTTPS tunnel for MLflow (port ${MLFLOW_PORT})..."
         tmux new-session -d -s mlflow_tunnel \
-            "cloudflared tunnel --url http://127.0.0.1:${MLFLOW_PORT} --http-host-header 127.0.0.1:${MLFLOW_PORT} 2>&1 | tee /tmp/mlflow_tunnel.log"
+            "cloudflared tunnel --url http://127.0.0.1:${MLFLOW_PORT} 2>&1 | tee /tmp/mlflow_tunnel.log"
     fi
 
     echo "--> Waiting for Cloudflare public tunnel URL to initialize..."
