@@ -259,7 +259,7 @@ import sys, glob
 for e in glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg'): sys.path.insert(0, e)
 import carla
 c = carla.Client('127.0.0.1', $PORT)
-c.set_timeout(1.5)
+c.set_timeout(5.0)
 v = c.get_server_version()
 " 2>/dev/null; then
                 ready=true
@@ -267,10 +267,10 @@ v = c.get_server_version()
                 echo "✓ CARLA Server on port $PORT is online and verified!"
                 break
             fi
-            sleep 1
+            sleep 2
         done
 
-        # If Vulkan didn't respond in 30s, fallback to OpenGL for this instance
+        # If Vulkan crashed or failed after 60s, fallback to OpenGL for this instance
         if [ "$ready" = false ]; then
             echo ""
             echo "⚠️  CARLA on port $PORT not responding with Vulkan. Retrying with OpenGL mode..."
@@ -287,7 +287,7 @@ import sys, glob
 for e in glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg'): sys.path.insert(0, e)
 import carla
 c = carla.Client('127.0.0.1', $PORT)
-c.set_timeout(1.5)
+c.set_timeout(5.0)
 v = c.get_server_version()
 " 2>/dev/null; then
                     ready=true
@@ -295,7 +295,7 @@ v = c.get_server_version()
                     echo "✓ CARLA Server on port $PORT (OpenGL) is online and verified!"
                     break
                 fi
-                sleep 1
+                sleep 2
             done
         fi
 
