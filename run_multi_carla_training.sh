@@ -282,7 +282,7 @@ while true; do
         
         touch "$LOG_FILE" && chmod 666 "$LOG_FILE" 2>/dev/null || true
         > "$LOG_FILE" 2>/dev/null || true
-        LAUNCH_CMD="/workspace/carla/CarlaUE4.sh -carla-rpc-port=${PORT} -port=${PORT} -RenderOffScreen -nosound -quality-level=Low -benchmark -fps=20"
+        LAUNCH_CMD="/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -quality-level=Low -benchmark -fps=20"
 
         tmux new-session -d -s "$SESSION_NAME" \
             "su -s /bin/bash carlauser -c '$CARLA_USER_ENV; $LAUNCH_CMD' > $LOG_FILE 2>&1"
