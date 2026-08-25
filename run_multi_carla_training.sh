@@ -40,6 +40,11 @@ done
 [ ${#POS_ARGS[@]} -ge 4 ] && [ -n "${POS_ARGS[3]}" ] && BACKBONE=${POS_ARGS[3]}
 [ ${#POS_ARGS[@]} -ge 5 ] && [ -n "${POS_ARGS[4]}" ] && TOWN=${POS_ARGS[4]}
 
+# Normalize system and tmux socket permissions at startup
+chmod 1777 /tmp 2>/dev/null || true
+chmod 700 /tmp/tmux-* 2>/dev/null || true
+chown root:root /tmp/tmux-0 2>/dev/null || true
+
 # Compute non-overlapping CARLA port list (stride of 4 per instance)
 PORTS=()
 PORTS_CSV=""
@@ -230,12 +235,16 @@ while true; do
     done
     sleep 2  # Allow OS & GPU driver to release sockets and Vulkan contexts
 
-    # Fix GPU, workspace, and temporary directory permissions
-    chmod -R 777 /dev/nvidia* /dev/dri /tmp 2>/dev/null || true
+    # Fix GPU, workspace, and tmux socket permissions
+    chmod 1777 /tmp 2>/dev/null || true
+    chmod 700 /tmp/tmux-* 2>/dev/null || true
+    chown root:root /tmp/tmux-0 2>/dev/null || true
+    chmod -R 666 /dev/nvidia* 2>/dev/null || true
+    chmod -R 777 /dev/dri 2>/dev/null || true
+    chmod -R 777 /workspace/carla 2>/dev/null || true
     if id "carlauser" &>/dev/null; then
         usermod -aG video,render,sudo carlauser 2>/dev/null || true
-        chown -R carlauser:carlauser /workspace/carla /tmp 2>/dev/null || true
-        chmod -R 777 /workspace/carla 2>/dev/null || true
+        chown -R carlauser:carlauser /workspace/carla 2>/dev/null || true
     fi
 
     # 2. Launch CARLA servers (staggered by 2s to prevent Vulkan driver race conditions)

@@ -36,6 +36,11 @@ done
 [ ${#POS_ARGS[@]} -ge 5 ] && [ -n "${POS_ARGS[4]}" ] && NUM_VEHICLES=${POS_ARGS[4]}
 [ ${#POS_ARGS[@]} -ge 6 ] && [ -n "${POS_ARGS[5]}" ] && NUM_WALKERS=${POS_ARGS[5]}
 
+# Normalize system and tmux socket permissions at startup
+chmod 1777 /tmp 2>/dev/null || true
+chmod 700 /tmp/tmux-* 2>/dev/null || true
+chown root:root /tmp/tmux-0 2>/dev/null || true
+
 if [ "$START_FRESH" = true ]; then
     echo "=============================================================="
     echo "🧹 [START FRESH] Requested fresh training run from scratch."
@@ -238,12 +243,16 @@ while true; do
     fuser -k -9 2000/tcp 2001/tcp 2002/tcp 8000/tcp 2>/dev/null || true
     sleep 2
 
-    # Fix GPU, workspace, and temporary directory permissions
-    chmod -R 777 /dev/nvidia* /dev/dri /tmp 2>/dev/null || true
+    # Fix GPU, workspace, and tmux socket permissions
+    chmod 1777 /tmp 2>/dev/null || true
+    chmod 700 /tmp/tmux-* 2>/dev/null || true
+    chown root:root /tmp/tmux-0 2>/dev/null || true
+    chmod -R 666 /dev/nvidia* 2>/dev/null || true
+    chmod -R 777 /dev/dri 2>/dev/null || true
+    chmod -R 777 /workspace/carla 2>/dev/null || true
     if id "carlauser" &>/dev/null; then
         usermod -aG video,render,sudo carlauser 2>/dev/null || true
-        chown -R carlauser:carlauser /workspace/carla /tmp 2>/dev/null || true
-        chmod -R 777 /workspace/carla 2>/dev/null || true
+        chown -R carlauser:carlauser /workspace/carla 2>/dev/null || true
     fi
 
     # 2. Start clean CARLA Server instance
