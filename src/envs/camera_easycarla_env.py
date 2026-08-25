@@ -121,13 +121,26 @@ class CameraEasyCarlaEnv(gym.Env):
         })
 
     def _init_easy_env(self, params: Dict[str, Any]) -> None:
-        """Initialize EasyCarla environment with safe 120s timeout, retries, and map preservation."""
+        """Initialize EasyCarla environment with map-reuse and safe 120s timeout."""
         if carla is None:
             self.easy_env = None
             return
 
         orig_set_timeout = carla.Client.set_timeout
+        orig_load_world = carla.Client.load_world
+
+        def safe_load_world(client_self, town_name, *args, **kwargs):
+            try:
+                curr_world = client_self.get_world()
+                curr_map = curr_world.get_map().name
+                if town_name.lower() in curr_map.lower():
+                    return curr_world
+            except Exception:
+                pass
+            return orig_load_world(client_self, town_name, *args, **kwargs)
+
         carla.Client.set_timeout = lambda s, t: orig_set_timeout(s, max(t, 120.0))
+        carla.Client.load_world = safe_load_world
         try:
             for attempt in range(10):
                 try:
@@ -136,9 +149,10 @@ class CameraEasyCarlaEnv(gym.Env):
                 except Exception as e:
                     if attempt == 9:
                         raise
-                    time.sleep(1.5)
+                    time.sleep(2.0)
         finally:
             carla.Client.set_timeout = orig_set_timeout
+            carla.Client.load_world = orig_load_world
 
     def _optimize_easy_env(self) -> None:
         """Optimize EasyCarla: minimize unused LiDAR raycasting and bypass unused math."""
