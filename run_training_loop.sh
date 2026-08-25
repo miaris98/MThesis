@@ -230,59 +230,139 @@ while true; do
     # 1. Kill ALL stale CARLA and training processes, release GPU memory
     echo "--> Cleaning up stale processes and GPU memory..."
     pkill -9 -f train_rl_agent 2>/dev/null || true
+    pkill -u carlauser -9 2>/dev/null || true
     pkill -9 -f CarlaUE4 2>/dev/null || true
+    pkill -9 -f CarlaUE4-Linux-Shipping 2>/dev/null || true
+    killall -9 CarlaUE4-Linux-Shipping CarlaUE4 CarlaUE4.sh 2>/dev/null || true
     tmux kill-session -t carla_server 2>/dev/null || true
-    fuser -k 2000/tcp 2001/tcp 2002/tcp 8000/tcp 2>/dev/null || true
-    # Force GPU memory release (CARLA Vulkan allocations persist after kill)
-    nvidia-smi --gpu-reset 2>/dev/null || true
-    sleep 5  # Wait for GPU memory to fully release after process kill
+    fuser -k -9 2000/tcp 2001/tcp 2002/tcp 8000/tcp 2>/dev/null || true
+    sleep 2
 
-    # 2. Start clean CARLA Server instance (Vulkan primary -> OpenGL fallback)
+    # Fix GPU, workspace, and temporary directory permissions
+    chmod -R 777 /dev/nvidia* /dev/dri /tmp 2>/dev/null || true
+    if id "carlauser" &>/dev/null; then
+        usermod -aG video,render,sudo carlauser 2>/dev/null || true
+        chown -R carlauser:carlauser /workspace/carla /tmp 2>/dev/null || true
+        chmod -R 777 /workspace/carla 2>/dev/null || true
+    fi
+
+    # 2. Start clean CARLA Server instance
     if [ -f "/workspace/carla/CarlaUE4.sh" ]; then
-        echo "--> Attempting CARLA server launch with Vulkan graphics (-vulkan)..."
-        tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low -benchmark -fps=20' > /workspace/carla_server.log 2>&1"
-        sleep 6
+        LOG_FILE="/workspace/carla_server.log"
+        > "$LOG_FILE" 2>/dev/null || true
+        echo "--> Launching CARLA server on port 2000 (tmux: carla_server)..."
+        LAUNCH_CMD="/workspace/carla/CarlaUE4.sh -carla-rpc-port=2000 -port=2000 -RenderOffScreen -nosound -quality-level=Low -benchmark -fps=20"
+        export SDL_VIDEODRIVER=offscreen
+        export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json
 
-        # Check if Vulkan launch failed (Illegal instruction or early crash)
-        if grep -i -E "Illegal instruction|Fatal error|Signal 11" /workspace/carla_server.log >/dev/null 2>&1 || ! pgrep -f CarlaUE4 >/dev/null 2>&1; then
-            echo -e "\033[1;33m======================================================================\033[0m"
-            echo -e "\033[1;33m ⚠️  WARNING: CARLA Vulkan render engine failed (Illegal instruction).\033[0m"
-            echo -e "\033[1;33m 🔄  Falling back automatically to OpenGL rendering mode (-opengl)...\033[0m"
-            echo -e "\033[1;33m======================================================================\033[0m"
-            pkill -9 -f CarlaUE4 2>/dev/null || true
-            tmux kill-session -t carla_server 2>/dev/null || true
-            sleep 2
-            tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -opengl -quality-level=Low -benchmark -fps=20' > /workspace/carla_server.log 2>&1"
-            sleep 10
+        if id "carlauser" &>/dev/null; then
+            tmux new-session -d -s carla_server \
+                "su carlauser -c 'export SDL_VIDEODRIVER=offscreen; export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json; $LAUNCH_CMD' > $LOG_FILE 2>&1"
         else
-            echo "✓ CARLA Vulkan server running smoothly!"
+            tmux new-session -d -s carla_server \
+                "export SDL_VIDEODRIVER=offscreen; export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json; $LAUNCH_CMD > $LOG_FILE 2>&1"
         fi
+        sleep 2
 
         # 3. Verify CARLA is actually responding on port 2000 before launching training
-        echo "--> Waiting for CARLA RPC server to accept connections on port 2000..."
+        echo -n "--> Waiting for CARLA RPC server to accept connections on port 2000"
         carla_ready=false
-        for i in $(seq 1 30); do
-            if "$PYTHON_BIN" -c "
-import sys
-sys.path.insert(0, '/workspace/carla/PythonAPI/carla/dist')
-import glob
-eggs = glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg')
-for e in eggs: sys.path.insert(0, e)
+        for i in $(seq 1 40); do
+            echo -n "."
+            if [ "$i" -ge 4 ]; then
+                if ! tmux has-session -t carla_server 2>/dev/null || ! pgrep -f "CarlaUE4.*port=2000" >/dev/null 2>&1; then
+                    echo ""
+                    echo "⚠️  CARLA process died unexpectedly!"
+                    if [ -f "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
+                        echo "--- Last 20 lines of $LOG_FILE ---"
+                        tail -n 20 "$LOG_FILE"
+                        echo "-----------------------------------"
+                    fi
+                    break
+                fi
+            fi
+
+            if "$PYTHON_BIN" -W ignore -c "
+import sys, glob, socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(0.4)
+res = s.connect_ex(('127.0.0.1', 2000))
+s.close()
+if res != 0:
+    sys.exit(1)
+for e in glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg'):
+    if e not in sys.path: sys.path.insert(0, e)
 import carla
 c = carla.Client('127.0.0.1', 2000)
-c.set_timeout(5.0)
+c.set_timeout(2.0)
 v = c.get_server_version()
-w = c.get_world()
-print(f'CARLA {v} ready, map: {w.get_map().name}')
 " 2>/dev/null; then
                 carla_ready=true
-                echo "✓ CARLA server verified and responding!"
+                echo ""
+                echo "✓ CARLA server verified and responding on port 2000!"
                 break
             fi
-            sleep 2
+            sleep 1.5
         done
+
+        # If carlauser failed, fallback to direct root execution
+        if [ "$carla_ready" = false ] && id "carlauser" &>/dev/null; then
+            echo ""
+            echo "⚠️  CARLA not responding under 'carlauser'. Retrying direct root execution..."
+            tmux kill-session -t carla_server 2>/dev/null || true
+            fuser -k -9 2000/tcp 2001/tcp 2002/tcp 2>/dev/null || true
+            sleep 2
+            > "$LOG_FILE" 2>/dev/null || true
+            tmux new-session -d -s carla_server \
+                "export SDL_VIDEODRIVER=offscreen; export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json; /workspace/carla/CarlaUE4.sh -carla-rpc-port=2000 -port=2000 -RenderOffScreen -nosound -quality-level=Low -benchmark -fps=20 > $LOG_FILE 2>&1"
+            echo -n "--> Waiting for direct CARLA server on port 2000"
+            for i in $(seq 1 30); do
+                echo -n "."
+                if [ "$i" -ge 4 ]; then
+                    if ! tmux has-session -t carla_server 2>/dev/null || ! pgrep -f "CarlaUE4.*port=2000" >/dev/null 2>&1; then
+                        echo ""
+                        echo "⚠️  Direct CARLA process died!"
+                        if [ -f "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
+                            echo "--- Last 20 lines of $LOG_FILE ---"
+                            tail -n 20 "$LOG_FILE"
+                            echo "-----------------------------------"
+                        fi
+                        break
+                    fi
+                fi
+                if "$PYTHON_BIN" -W ignore -c "
+import sys, glob, socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(0.4)
+res = s.connect_ex(('127.0.0.1', 2000))
+s.close()
+if res != 0:
+    sys.exit(1)
+for e in glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg'):
+    if e not in sys.path: sys.path.insert(0, e)
+import carla
+c = carla.Client('127.0.0.1', 2000)
+c.set_timeout(2.0)
+v = c.get_server_version()
+" 2>/dev/null; then
+                    carla_ready=true
+                    echo ""
+                    echo "✓ CARLA server (Direct) verified and responding on port 2000!"
+                    break
+                fi
+                sleep 1.5
+            done
+        fi
+
         if [ "$carla_ready" = false ]; then
-            echo "⚠️  CARLA server failed to respond after 60s. Retrying full restart..."
+            echo ""
+            echo "⚠️  CARLA server failed to respond after retry. Retrying full restart in 10s..."
+            if [ -f "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
+                echo "--- Last 25 lines of $LOG_FILE ---"
+                tail -n 25 "$LOG_FILE"
+                echo "-----------------------------------"
+            fi
+            sleep 10
             continue
         fi
     fi

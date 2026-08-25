@@ -228,20 +228,38 @@ while true; do
         P=${PORTS[$i]}
         fuser -k -9 ${P}/tcp $((P+1))/tcp $((P+2))/tcp 2>/dev/null || true
     done
-    sleep 3  # Allow OS & GPU driver to release sockets and Vulkan contexts
+    sleep 2  # Allow OS & GPU driver to release sockets and Vulkan contexts
+
+    # Fix GPU, workspace, and temporary directory permissions
+    chmod -R 777 /dev/nvidia* /dev/dri /tmp 2>/dev/null || true
+    if id "carlauser" &>/dev/null; then
+        usermod -aG video,render,sudo carlauser 2>/dev/null || true
+        chown -R carlauser:carlauser /workspace/carla /tmp 2>/dev/null || true
+        chmod -R 777 /workspace/carla 2>/dev/null || true
+    fi
 
     # 2. Launch CARLA servers (staggered by 2s to prevent Vulkan driver race conditions)
+    export SDL_VIDEODRIVER=offscreen
+    export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json
     for ((i=0; i<NUM_ENVS; i++)); do
         PORT=${PORTS[$i]}
         SESSION_NAME="carla_server_${i}"
         LOG_FILE="/workspace/carla_server_${PORT}.log"
         echo "--> Launching CARLA Server #$((i+1))/$NUM_ENVS on port $PORT (tmux: $SESSION_NAME)..."
         
-        tmux new-session -d -s "$SESSION_NAME" \
-            "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -quality-level=Low -benchmark -fps=20' > $LOG_FILE 2>&1"
+        > "$LOG_FILE" 2>/dev/null || true
+        LAUNCH_CMD="/workspace/carla/CarlaUE4.sh -carla-rpc-port=${PORT} -port=${PORT} -RenderOffScreen -nosound -quality-level=Low -benchmark -fps=20"
+
+        if id "carlauser" &>/dev/null; then
+            tmux new-session -d -s "$SESSION_NAME" \
+                "su carlauser -c 'export SDL_VIDEODRIVER=offscreen; export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json; $LAUNCH_CMD' > $LOG_FILE 2>&1"
+        else
+            tmux new-session -d -s "$SESSION_NAME" \
+                "export SDL_VIDEODRIVER=offscreen; export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json; $LAUNCH_CMD > $LOG_FILE 2>&1"
+        fi
         sleep 2
     done
-    sleep 3
+    sleep 2
 
     # 3. Health check all CARLA server instances
     echo "--> Probing all $NUM_ENVS CARLA server instances..."
@@ -252,14 +270,36 @@ while true; do
         LOG_FILE="/workspace/carla_server_${PORT}.log"
         echo -n "   [CARLA #$((i+1))/$NUM_ENVS | Port $PORT] Waiting for server initialization"
         ready=false
-        for attempt_check in $(seq 1 30); do
+        for attempt_check in $(seq 1 40); do
             echo -n "."
+            
+            # Check if CARLA process died prematurely
+            if [ "$attempt_check" -ge 4 ]; then
+                if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null || ! pgrep -f "CarlaUE4.*port=${PORT}" >/dev/null 2>&1; then
+                    echo ""
+                    echo "⚠️  CARLA process on port $PORT died unexpectedly!"
+                    if [ -f "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
+                        echo "--- Last 20 lines of $LOG_FILE ---"
+                        tail -n 20 "$LOG_FILE"
+                        echo "-----------------------------------"
+                    fi
+                    break
+                fi
+            fi
+
             if "$PYTHON_BIN" -W ignore -c "
-import sys, glob
-for e in glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg'): sys.path.insert(0, e)
+import sys, glob, socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(0.4)
+res = s.connect_ex(('127.0.0.1', $PORT))
+s.close()
+if res != 0:
+    sys.exit(1)
+for e in glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg'):
+    if e not in sys.path: sys.path.insert(0, e)
 import carla
 c = carla.Client('127.0.0.1', $PORT)
-c.set_timeout(5.0)
+c.set_timeout(2.0)
 v = c.get_server_version()
 " 2>/dev/null; then
                 ready=true
@@ -267,41 +307,66 @@ v = c.get_server_version()
                 echo "✓ CARLA Server on port $PORT is online and verified!"
                 break
             fi
-            sleep 2
+            sleep 1.5
         done
 
-        # If Vulkan crashed or failed after 60s, fallback to OpenGL for this instance
-        if [ "$ready" = false ]; then
+        # If carlauser failed, attempt direct launch fallback as current user (root)
+        if [ "$ready" = false ] && id "carlauser" &>/dev/null; then
             echo ""
-            echo "⚠️  CARLA on port $PORT not responding with Vulkan. Retrying with OpenGL mode..."
+            echo "⚠️  CARLA on port $PORT not responding under 'carlauser'. Retrying direct root execution..."
             tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
             fuser -k -9 ${PORT}/tcp $((PORT+1))/tcp $((PORT+2))/tcp 2>/dev/null || true
             sleep 2
+            > "$LOG_FILE" 2>/dev/null || true
             tmux new-session -d -s "$SESSION_NAME" \
-                "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -opengl -quality-level=Low -benchmark -fps=20' > $LOG_FILE 2>&1"
-            echo -n "   [CARLA #$((i+1))/$NUM_ENVS | Port $PORT (OpenGL)] Waiting for initialization"
-            for attempt_check in $(seq 1 25); do
+                "export SDL_VIDEODRIVER=offscreen; export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json; /workspace/carla/CarlaUE4.sh -carla-rpc-port=${PORT} -port=${PORT} -RenderOffScreen -nosound -quality-level=Low -benchmark -fps=20 > $LOG_FILE 2>&1"
+            echo -n "   [CARLA #$((i+1))/$NUM_ENVS | Port $PORT (Direct)] Waiting for initialization"
+            for attempt_check in $(seq 1 30); do
                 echo -n "."
+                if [ "$attempt_check" -ge 4 ]; then
+                    if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null || ! pgrep -f "CarlaUE4.*port=${PORT}" >/dev/null 2>&1; then
+                        echo ""
+                        echo "⚠️  Direct CARLA process on port $PORT died!"
+                        if [ -f "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
+                            echo "--- Last 20 lines of $LOG_FILE ---"
+                            tail -n 20 "$LOG_FILE"
+                            echo "-----------------------------------"
+                        fi
+                        break
+                    fi
+                fi
                 if "$PYTHON_BIN" -W ignore -c "
-import sys, glob
-for e in glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg'): sys.path.insert(0, e)
+import sys, glob, socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(0.4)
+res = s.connect_ex(('127.0.0.1', $PORT))
+s.close()
+if res != 0:
+    sys.exit(1)
+for e in glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg'):
+    if e not in sys.path: sys.path.insert(0, e)
 import carla
 c = carla.Client('127.0.0.1', $PORT)
-c.set_timeout(5.0)
+c.set_timeout(2.0)
 v = c.get_server_version()
 " 2>/dev/null; then
                     ready=true
                     echo ""
-                    echo "✓ CARLA Server on port $PORT (OpenGL) is online and verified!"
+                    echo "✓ CARLA Server on port $PORT (Direct) is online and verified!"
                     break
                 fi
-                sleep 2
+                sleep 1.5
             done
         fi
 
         if [ "$ready" = false ]; then
             echo ""
-            echo "⚠️  CARLA Server on port $PORT failed to respond. Check log: tail -n 20 $LOG_FILE"
+            echo "⚠️  CARLA Server on port $PORT failed to start."
+            if [ -f "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
+                echo "--- Last 25 lines of $LOG_FILE ---"
+                tail -n 25 "$LOG_FILE"
+                echo "-----------------------------------"
+            fi
             all_ready=false
             break
         fi
