@@ -41,6 +41,14 @@ class MockCarlaEnv:
         pass
 
 
+class MockEnvFactory:
+    def __init__(self, env_id: int):
+        self.env_id = env_id
+
+    def __call__(self):
+        return MockCarlaEnv(self.env_id)
+
+
 class TestVectorEnv(unittest.TestCase):
     """Test suite verifying vector environment step, auto-reset, and observation batching."""
 
@@ -48,8 +56,8 @@ class TestVectorEnv(unittest.TestCase):
         from src.envs.vector_carla_env import DummyCarlaVectorEnv
 
         num_envs = 3
-        env_fns = [lambda i=i: MockCarlaEnv(env_id=i) for i in range(num_envs)]
-        vec_env = DummyCarlaVectorEnv(env_fns)
+        factories = [MockEnvFactory(i) for i in range(num_envs)]
+        vec_env = DummyCarlaVectorEnv(factories)
 
         obs, infos = vec_env.reset()
         self.assertEqual(obs["image"].shape, (num_envs, 256, 768, 3))
@@ -72,6 +80,27 @@ class TestVectorEnv(unittest.TestCase):
                 self.assertTrue(np.all(term))
                 for info in infos:
                     self.assertIn("terminal_observation", info)
+
+        vec_env.close()
+
+    def test_subproc_vector_env(self):
+        from src.envs.vector_carla_env import SubprocCarlaVectorEnv
+
+        num_envs = 2
+        factories = [MockEnvFactory(i) for i in range(num_envs)]
+        vec_env = SubprocCarlaVectorEnv(factories)
+
+        obs, infos = vec_env.reset()
+        self.assertEqual(obs["image"].shape, (num_envs, 256, 768, 3))
+        self.assertEqual(obs["speed"].shape, (num_envs, 1))
+        self.assertEqual(len(infos), num_envs)
+
+        actions = np.zeros((num_envs, 3), dtype=np.float32)
+        obs, rewards, term, trunc, infos = vec_env.step(actions)
+        self.assertEqual(obs["image"].shape, (num_envs, 256, 768, 3))
+        self.assertEqual(obs["speed"].shape, (num_envs, 1))
+        self.assertEqual(rewards.shape, (num_envs,))
+        self.assertEqual(len(infos), num_envs)
 
         vec_env.close()
 

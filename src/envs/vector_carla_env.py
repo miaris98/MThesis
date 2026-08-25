@@ -5,6 +5,7 @@ import time
 from typing import List, Callable, Dict, Any, Tuple, Optional
 import numpy as np
 import multiprocessing as mp
+from multiprocessing.connection import Connection
 
 try:
     import gymnasium as gym
@@ -22,10 +23,10 @@ from src.envs.carla_gym_env import CarlaGymEnv
 from src.config.training_config import TrainingConfig
 
 
-def _carla_worker(remote: mp.connection.Connection, parent_remote: mp.connection.Connection, env_fn_wrapper) -> None:
+def _carla_worker(remote: Any, parent_remote: Any, env_factory: Any) -> None:
     """Worker process loop communicating with a single dedicated CARLA server instance."""
     parent_remote.close()
-    env = env_fn_wrapper.x()
+    env = env_factory()
     try:
         while True:
             cmd, data = remote.recv()
@@ -65,35 +66,21 @@ def _carla_worker(remote: mp.connection.Connection, parent_remote: mp.connection
             pass
 
 
-class CloudpickleWrapper:
-    """Wrapper to enable pickling of lambda/factory callables for multiprocessing."""
-    def __init__(self, x):
-        self.x = x
-
-    def __getstate__(self):
-        import pickle
-        return pickle.dumps(self.x)
-
-    def __setstate__(self, ob):
-        import pickle
-        self.x = pickle.loads(ob)
-
-
 class SubprocCarlaVectorEnv:
     """
     Subprocess-based Vectorized CARLA Environment.
     Runs each CARLA server client in its own dedicated Python process to eliminate GIL
     bottlenecks and prevent server tick latency jitter between instances.
     """
-    def __init__(self, env_fns: List[Callable[[], Any]]):
-        self.num_envs = len(env_fns)
+    def __init__(self, env_factories: List[Any]):
+        self.num_envs = len(env_factories)
         self.closed = False
         
-        ctx = mp.get_context("spawn" if sys.platform == "win32" else "forkserver" if "forkserver" in mp.get_all_start_methods() else "spawn")
+        ctx = mp.get_context("spawn")
         self.remotes, self.work_remotes = zip(*[ctx.Pipe() for _ in range(self.num_envs)])
         self.ps = [
-            ctx.Process(target=_carla_worker, args=(work_remote, remote, CloudpickleWrapper(env_fn)), daemon=True)
-            for (work_remote, remote, env_fn) in zip(self.work_remotes, self.remotes, env_fns)
+            ctx.Process(target=_carla_worker, args=(work_remote, remote, factory), daemon=True)
+            for (work_remote, remote, factory) in zip(self.work_remotes, self.remotes, env_factories)
         ]
         
         for p in self.ps:
@@ -159,8 +146,8 @@ class SubprocCarlaVectorEnv:
 
 class DummyCarlaVectorEnv:
     """Single-process vectorized wrapper for single environment execution or debugging."""
-    def __init__(self, env_fns: List[Callable[[], Any]]):
-        self.envs = [fn() for fn in env_fns]
+    def __init__(self, env_factories: List[Any]):
+        self.envs = [factory() for factory in env_factories]
         self.num_envs = len(self.envs)
 
     def reset(self, seed: Optional[int] = None) -> Tuple[Dict[str, np.ndarray], List[Dict[str, Any]]]:
@@ -209,20 +196,24 @@ class DummyCarlaVectorEnv:
             env.close()
 
 
-def make_carla_env(cfg: TrainingConfig, port: int) -> Callable[[], Any]:
-    """Factory helper creating an isolated CARLA environment instance bound to a specific port."""
-    def _thunk() -> Any:
-        if cfg.env_type == "camera_easycarla":
+class CarlaEnvFactory:
+    """Picklable top-level factory creating an isolated CARLA environment instance."""
+    def __init__(self, cfg: TrainingConfig, port: int):
+        self.cfg = cfg
+        self.port = port
+
+    def __call__(self) -> Any:
+        if self.cfg.env_type == "camera_easycarla":
             easy_params = {
-                'number_of_vehicles': cfg.num_vehicles,
-                'number_of_walkers': cfg.num_walkers,
-                'frame_skip': cfg.frame_skip,
+                'number_of_vehicles': self.cfg.num_vehicles,
+                'number_of_walkers': self.cfg.num_walkers,
+                'frame_skip': self.cfg.frame_skip,
                 'dt': 0.05,
                 'ego_vehicle_filter': 'vehicle.tesla.model3',
                 'surrounding_vehicle_spawned_randomly': True,
-                'port': port,
-                'town': cfg.town,
-                'max_time_episode': cfg.rollout_steps * cfg.frame_skip,
+                'port': self.port,
+                'town': self.cfg.town,
+                'max_time_episode': self.cfg.rollout_steps * self.cfg.frame_skip,
                 'max_waypoints': 12,
                 'visualize_waypoints': False,
                 'desired_speed': 8,
@@ -235,16 +226,15 @@ def make_carla_env(cfg: TrainingConfig, port: int) -> Callable[[], Any]:
                 'img_height': 256,
             }
             return CameraEasyCarlaEnv(params=easy_params)
-        return CarlaGymEnv(host=cfg.host, port=port, img_width=256, img_height=256, max_steps=cfg.rollout_steps)
-    return _thunk
+        return CarlaGymEnv(host=self.cfg.host, port=self.port, img_width=256, img_height=256, max_steps=self.cfg.rollout_steps)
 
 
 def create_vector_carla_env(cfg: TrainingConfig) -> Any:
     """Instantiate vectorized multi-server environment based on configuration."""
     ports = cfg.get_ports()
     print(f"--> Initializing {len(ports)} Parallel CARLA Environment Workers on ports: {ports}")
-    env_fns = [make_carla_env(cfg, p) for p in ports]
+    factories = [CarlaEnvFactory(cfg, p) for p in ports]
     
     if len(ports) > 1:
-        return SubprocCarlaVectorEnv(env_fns)
-    return DummyCarlaVectorEnv(env_fns)
+        return SubprocCarlaVectorEnv(factories)
+    return DummyCarlaVectorEnv(factories)
