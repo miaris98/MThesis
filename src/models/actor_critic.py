@@ -51,8 +51,13 @@ class ActorCriticPPO(nn.Module):
         vis_dim = getattr(self.encoder, 'visual_feature_dim', features_dim)
 
         # 2. PPO Decision Policy Architecture
-        if policy_arch in ["qwen900m", "qwen500m", "qwen", "transformer"]:
-            model_size = "500m" if "500m" in policy_arch else "900m"
+        if policy_arch in ["qwen100m", "qwen500m", "qwen900m", "qwen", "transformer"]:
+            if "900m" in policy_arch:
+                model_size = "900m"
+            elif "500m" in policy_arch:
+                model_size = "500m"
+            else:
+                model_size = "100m"
             print(f"--> Initializing {model_size.upper()} Parameter Qwen-Style Decision Transformer...")
             self.decision_net = QwenDecisionTransformer(
                 in_features=vis_dim,

@@ -10,9 +10,11 @@ class TrainingConfig:
     """Hyperparameters and runtime settings for PPO training in CARLA simulator."""
     host: str = "127.0.0.1"
     port: int = 2000
+    num_envs: int = 1
+    carla_ports: Optional[List[int]] = None
     env_type: str = "camera_easycarla"
     backbone: str = "resnet18"
-    policy_arch: str = "qwen500m"
+    policy_arch: str = "qwen100m"
     fresh: bool = False
     weights_path: Optional[str] = None
     freeze_backbone: bool = True
@@ -43,15 +45,24 @@ class TrainingConfig:
     mlflow_port: int = 10100
     compile: bool = False
 
+    def get_ports(self) -> List[int]:
+        """Return list of active CARLA ports for parallel environments."""
+        if self.carla_ports and len(self.carla_ports) > 0:
+            return self.carla_ports
+        # CARLA uses 3 consecutive ports per instance (P, P+1, P+2). Stride by 4 to prevent collisions.
+        return [self.port + (i * 4) for i in range(self.num_envs)]
+
     @classmethod
     def from_args(cls, args_list: Optional[List[str]] = None) -> "TrainingConfig":
         """Build TrainingConfig instance by parsing command-line flags or explicit argument list."""
         parser = argparse.ArgumentParser(description="Train PPO Deep RL Agent in CARLA Simulator.")
         parser.add_argument("--host", type=str, default="127.0.0.1", help="CARLA host IP")
-        parser.add_argument("--port", type=int, default=2000, help="CARLA port")
+        parser.add_argument("--port", type=int, default=2000, help="CARLA primary port")
+        parser.add_argument("--num-envs", type=int, default=1, help="Number of parallel CARLA server environments")
+        parser.add_argument("--carla-ports", type=str, default=None, help="Comma-separated list of CARLA server ports (e.g. 2000,2004)")
         parser.add_argument("--env-type", type=str, default="camera_easycarla", choices=["camera_easycarla", "carla_gym"])
-        parser.add_argument("--backbone", type=str, default="resnet18", choices=["resnet18", "resnet34", "lav", "erfnet", "qwen900m", "qwen500m", "qwen", "transformer"])
-        parser.add_argument("--policy-arch", type=str, default="qwen500m", choices=["qwen500m", "qwen900m", "mlp", "transformer"])
+        parser.add_argument("--backbone", type=str, default="resnet18", choices=["resnet18", "resnet34", "lav", "erfnet", "qwen100m", "qwen500m", "qwen900m", "qwen", "transformer"])
+        parser.add_argument("--policy-arch", type=str, default="qwen100m", choices=["qwen100m", "qwen500m", "qwen900m", "mlp", "transformer"])
         parser.add_argument("--fresh", action="store_true", default=False, help="Start training fresh from scratch")
         parser.add_argument("--weights-path", type=str, default=None, help="Path to custom pretrained checkpoint (.pth)")
         parser.add_argument("--freeze-backbone", action="store_true", default=True, help="Freeze vision backbone parameters")
@@ -85,10 +96,19 @@ class TrainingConfig:
         parser.add_argument("--compile", action="store_true", default=False)
 
         parsed = parser.parse_args(args_list) if args_list is not None else parser.parse_args()
+
+        ports_list = None
+        if parsed.carla_ports:
+            ports_list = [int(p.strip()) for p in parsed.carla_ports.split(",") if p.strip()]
+            num_envs = len(ports_list)
+        else:
+            num_envs = parsed.num_envs
         
         return cls(
             host=parsed.host,
             port=parsed.port,
+            num_envs=num_envs,
+            carla_ports=ports_list,
             env_type=parsed.env_type,
             backbone=parsed.backbone,
             policy_arch=parsed.policy_arch,

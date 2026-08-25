@@ -12,7 +12,7 @@ class CSVTelemetryLogger:
     def __init__(self, filepath: str):
         self.filepath = filepath
         self.fieldnames = [
-            "global_step", "episode", "step_in_ep",
+            "global_step", "env_id", "episode", "step_in_ep",
             "speed_kmh", "action_throttle", "action_steer", "action_brake",
             "raw_reward", "normalized_reward", "curriculum_alpha",
             "r_speed", "r_heading", "r_lateral", "r_boundary", "r_steer",
@@ -23,7 +23,7 @@ class CSVTelemetryLogger:
         os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
         file_exists = os.path.exists(filepath)
         self.file = open(filepath, "a", newline="", encoding="utf-8")
-        self.writer = csv.DictWriter(self.file, fieldnames=self.fieldnames)
+        self.writer = csv.DictWriter(self.file, fieldnames=self.fieldnames, extrasaction="ignore")
         if not file_exists:
             self.writer.writeheader()
             self.file.flush()

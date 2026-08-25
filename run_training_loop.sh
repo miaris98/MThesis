@@ -7,6 +7,7 @@
 # Default configuration
 TOTAL_STEPS=50000
 BACKBONE=lav
+POLICY_ARCH=qwen100m
 TOWN=Town10HD_Opt
 NUM_VEHICLES=3
 NUM_WALKERS=10
@@ -19,6 +20,9 @@ for arg in "$@"; do
         --fresh|--from-scratch|fresh)
             START_FRESH=true
             ;;
+        --policy=*)
+            POLICY_ARCH="${arg#*=}"
+            ;;
         *)
             POS_ARGS+=("$arg")
             ;;
@@ -27,9 +31,10 @@ done
 
 [ ${#POS_ARGS[@]} -ge 1 ] && [ -n "${POS_ARGS[0]}" ] && TOTAL_STEPS=${POS_ARGS[0]}
 [ ${#POS_ARGS[@]} -ge 2 ] && [ -n "${POS_ARGS[1]}" ] && BACKBONE=${POS_ARGS[1]}
-[ ${#POS_ARGS[@]} -ge 3 ] && [ -n "${POS_ARGS[2]}" ] && TOWN=${POS_ARGS[2]}
-[ ${#POS_ARGS[@]} -ge 4 ] && [ -n "${POS_ARGS[3]}" ] && NUM_VEHICLES=${POS_ARGS[3]}
-[ ${#POS_ARGS[@]} -ge 5 ] && [ -n "${POS_ARGS[4]}" ] && NUM_WALKERS=${POS_ARGS[4]}
+[ ${#POS_ARGS[@]} -ge 3 ] && [ -n "${POS_ARGS[2]}" ] && POLICY_ARCH=${POS_ARGS[2]}
+[ ${#POS_ARGS[@]} -ge 4 ] && [ -n "${POS_ARGS[3]}" ] && TOWN=${POS_ARGS[3]}
+[ ${#POS_ARGS[@]} -ge 5 ] && [ -n "${POS_ARGS[4]}" ] && NUM_VEHICLES=${POS_ARGS[4]}
+[ ${#POS_ARGS[@]} -ge 6 ] && [ -n "${POS_ARGS[5]}" ] && NUM_WALKERS=${POS_ARGS[5]}
 
 if [ "$START_FRESH" = true ]; then
     echo "=============================================================="
@@ -278,7 +283,7 @@ print(f'CARLA {v} ready, map: {w.get_map().name}')
     "$PYTHON_BIN" train_rl_agent.py \
         --env-type camera_easycarla \
         --backbone "$BACKBONE" \
-        --policy-arch qwen500m \
+        --policy-arch "$POLICY_ARCH" \
         --town "$TOWN" \
         --num-vehicles "$NUM_VEHICLES" \
         --num-walkers "$NUM_WALKERS" \

@@ -119,24 +119,33 @@ class Qwen500MVisionTransformer(nn.Module):
 
 class QwenDecisionTransformer(nn.Module):
     """
-    900M / 500M Parameter Qwen-Style Decision Transformer for PPO Actor-Critic.
-    - 28 Layers, 1024 Hidden Dim (500M) / 24 Layers, 1536 Hidden Dim (900M).
-    - Trainable Attention Skip Connections (Qwen Alpha Gating).
+    100M / 500M / 900M Parameter Qwen-Style Decision Transformer for PPO Actor-Critic.
+    - 100M: 12 Layers, 768 Hidden Dim, 12 Heads, 2816 SwiGLU FFN (~106M params).
+    - 500M: 28 Layers, 1024 Hidden Dim, 16 Heads, 4096 SwiGLU FFN (~490M params).
+    - 900M: 24 Layers, 1536 Hidden Dim, 24 Heads, 6144 SwiGLU FFN (~920M params).
+    - Trainable Attention Skip Connections (Qwen Alpha Gating) & RMSNorm.
     """
-    def __init__(self, in_features: int = 1536, action_dim: int = 3, model_size: str = "500m"):
+    def __init__(self, in_features: int = 1536, action_dim: int = 3, model_size: str = "100m"):
         super().__init__()
-        if model_size == "900m":
+        model_size_str = str(model_size).lower()
+        if "900m" in model_size_str:
             depth = 24
             embed_dim = 1536
             num_heads = 24
             ffn_dim = 6144
-        else:
+        elif "500m" in model_size_str:
             depth = 28
             embed_dim = 1024
             num_heads = 16
             ffn_dim = 4096
+        else:  # 100m default / preset
+            depth = 12
+            embed_dim = 768
+            num_heads = 12
+            ffn_dim = 2816
 
         self.embed_dim = embed_dim
+        self.model_size = model_size_str
         
         self.vision_proj = nn.Linear(in_features, embed_dim)
         self.speed_proj = nn.Linear(1, embed_dim)
