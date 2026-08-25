@@ -1,24 +1,29 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  🚀 CARLA Multi-Camera PPO Continuous Auto-Restart Training Supervisor
-#  Automatically restarts CARLA server & resumes training on any crash/timeout
+#  🚀 Multi-CARLA Server Parallel PPO Continuous Auto-Restart Training Supervisor
+#  Runs N CARLA simulators concurrently and feeds 100M Qwen Decision Policy
 # ==============================================================================
 
 # Default configuration
+NUM_ENVS=2
+START_PORT=2000
 TOTAL_STEPS=50000
-BACKBONE=lav
 POLICY_ARCH=qwen100m
+BACKBONE=lav
 TOWN=Town10HD_Opt
 NUM_VEHICLES=3
 NUM_WALKERS=10
 START_FRESH=false
 
-# Robust argument parsing supporting --fresh in any position
+# Argument parsing
 POS_ARGS=()
 for arg in "$@"; do
     case "$arg" in
         --fresh|--from-scratch|fresh)
             START_FRESH=true
+            ;;
+        --num-envs=*)
+            NUM_ENVS="${arg#*=}"
             ;;
         --policy=*)
             POLICY_ARCH="${arg#*=}"
@@ -29,12 +34,11 @@ for arg in "$@"; do
     esac
 done
 
-[ ${#POS_ARGS[@]} -ge 1 ] && [ -n "${POS_ARGS[0]}" ] && TOTAL_STEPS=${POS_ARGS[0]}
-[ ${#POS_ARGS[@]} -ge 2 ] && [ -n "${POS_ARGS[1]}" ] && BACKBONE=${POS_ARGS[1]}
+[ ${#POS_ARGS[@]} -ge 1 ] && [ -n "${POS_ARGS[0]}" ] && NUM_ENVS=${POS_ARGS[0]}
+[ ${#POS_ARGS[@]} -ge 2 ] && [ -n "${POS_ARGS[1]}" ] && TOTAL_STEPS=${POS_ARGS[1]}
 [ ${#POS_ARGS[@]} -ge 3 ] && [ -n "${POS_ARGS[2]}" ] && POLICY_ARCH=${POS_ARGS[2]}
-[ ${#POS_ARGS[@]} -ge 4 ] && [ -n "${POS_ARGS[3]}" ] && TOWN=${POS_ARGS[3]}
-[ ${#POS_ARGS[@]} -ge 5 ] && [ -n "${POS_ARGS[4]}" ] && NUM_VEHICLES=${POS_ARGS[4]}
-[ ${#POS_ARGS[@]} -ge 6 ] && [ -n "${POS_ARGS[5]}" ] && NUM_WALKERS=${POS_ARGS[5]}
+[ ${#POS_ARGS[@]} -ge 4 ] && [ -n "${POS_ARGS[3]}" ] && BACKBONE=${POS_ARGS[3]}
+[ ${#POS_ARGS[@]} -ge 5 ] && [ -n "${POS_ARGS[4]}" ] && TOWN=${POS_ARGS[4]}
 
 # Normalize system and tmux socket permissions at startup
 chmod 1777 /tmp 2>/dev/null || true
@@ -64,6 +68,19 @@ esac
 EOF
     chmod +x /usr/local/bin/xdg-user-dir 2>/dev/null || true
 fi
+
+# Compute non-overlapping CARLA port list (stride of 4 per instance)
+PORTS=()
+PORTS_CSV=""
+for ((i=0; i<NUM_ENVS; i++)); do
+    P=$((START_PORT + i * 4))
+    PORTS+=("$P")
+    if [ -z "$PORTS_CSV" ]; then
+        PORTS_CSV="$P"
+    else
+        PORTS_CSV="${PORTS_CSV},$P"
+    fi
+done
 
 if [ "$START_FRESH" = true ]; then
     echo "=============================================================="
@@ -104,90 +121,63 @@ for p in "/workspace/miniconda" "/opt/conda" "$HOME/miniconda3" "$HOME/anaconda3
     fi
 done
 
-# GPU and PyTorch CUDA optimizations
 export CUDA_MODULE_LOADING=LAZY
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
-# Verify PyTorch CUDA kernel compatibility with current GPU
-echo "--> Verifying PyTorch CUDA compatibility with $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'GPU')..."
-if ! "$PYTHON_BIN" -c "import torch; x = torch.ones(2, device='cuda'); y = x + 1" >/dev/null 2>&1; then
-    echo "⚠️  Current PyTorch build does not have active CUDA kernels for this GPU architecture."
-    echo "🔄 Installing official PyTorch CUDA 12.1/12.4 build (Ampere / Ada / RTX A4000 support)..."
-    "$PYTHON_BIN" -m pip install --force-reinstall torch==2.4.1+cu121 torchvision==0.19.1+cu121 --index-url https://download.pytorch.org/whl/cu121 || \
-    "$PYTHON_BIN" -m pip install --force-reinstall torch==2.4.1+cu124 torchvision==0.19.1+cu124 --index-url https://download.pytorch.org/whl/cu124 || true
-fi
-
 # Ensure required tracking packages exist in target environment
-"$PYTHON_BIN" -c "import tensorboard, mlflow" 2>/dev/null || "$PYTHON_BIN" -m pip install tensorboard mlflow 2>/dev/null || true
+export PYTHONWARNINGS="ignore"
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
 
 echo "=============================================================="
-echo "   🔄 Starting Autonomous Auto-Restart Training Supervisor    "
+echo "   🔄 Starting Multi-CARLA Auto-Restart Training Supervisor   "
 echo "=============================================================="
-echo "Target Steps: $TOTAL_STEPS | Vision Backbone: $BACKBONE"
-echo "Policy Architecture: QWEN-500M (Trainable Attention Skip Connections)"
-echo "CARLA Map: $TOWN | Mode: $([ "$START_FRESH" = true ] && echo 'FRESH (From Scratch)' || echo 'RESUME (From Checkpoint)')"
-echo "NPC Traffic: $NUM_VEHICLES Vehicles | $NUM_WALKERS Walkers"
-echo "Python Executable: $PYTHON_BIN"
+echo "Parallel Environments: $NUM_ENVS Instances (Ports: $PORTS_CSV)"
+echo "Policy Architecture:   ${POLICY_ARCH^^} (~100M Params)"
+echo "Vision Backbone:       $BACKBONE"
+echo "Target Steps:          $TOTAL_STEPS"
+echo "CARLA Map:             $TOWN"
+echo "Mode:                  $([ "$START_FRESH" = true ] && echo 'FRESH (From Scratch)' || echo 'RESUME (From Checkpoint)')"
+echo "Python Executable:     $PYTHON_BIN"
 echo "=============================================================="
 
-# ==========================================================================
-#  📊 Start Persistent MLflow UI Server (survives training crash/restarts)
-#  This keeps the MLflow port alive so the Vast.ai tunnel URL never changes.
-#  MLflow MUST run in its own tmux session — NOT as a subprocess of
-#  train_rl_agent.py — so it is completely isolated from CARLA crashes.
-#  The port is auto-detected from Vast.ai's Open Ports configuration.
-# ==========================================================================
-
-# Auto-detect an available port from Vast.ai's Open Ports (externally mapped)
-# This ensures MLflow uses a port with a stable Cloudflare tunnel.
+# Auto-detect an available port for MLflow UI
 find_mlflow_port() {
-    # Well-known service ports to SKIP (already used by other services)
-    SKIP_PORTS="22 1111 2000 2001 2002 6006 8080 8384"
-
-    # Method 1: Parse iptables DNAT rules to find externally-mapped internal ports
+    SKIP_PORTS="22 1111 2000 2001 2002 2004 2005 2006 2008 2009 2010 6006 8080 8384"
     MAPPED_PORTS=$(iptables -t nat -L -n 2>/dev/null | grep DNAT | grep -oP 'to:[^:]+:\K\d+' | sort -un)
 
     if [ -n "$MAPPED_PORTS" ]; then
         for port in $MAPPED_PORTS; do
-            # Skip well-known service ports
-            if echo "$SKIP_PORTS" | grep -qw "$port"; then
-                continue
-            fi
-            # Check if port is NOT already in use
+            if echo "$SKIP_PORTS" | grep -qw "$port"; then continue; fi
             if ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
                 echo "$port"
                 return 0
             fi
         done
     fi
-
-    # Method 2: Fallback — try common Vast.ai secondary ports
     for port in 10100 10200 9090 7070 4040; do
         if ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
             echo "$port"
             return 0
         fi
     done
-
-    # Last resort
     echo "10100"
     return 0
 }
 
-# Check if MLflow is already running inside our dedicated tmux session
+# Start or recover MLflow server in isolated tmux session
 if tmux has-session -t mlflow_server 2>/dev/null; then
-    # Recover the port from the running MLflow process
     MLFLOW_PORT=$(ss -tlnp 2>/dev/null | grep "mlflow\|gunicorn" | grep -oP ':(\d+)' | head -1 | tr -d ':')
     MLFLOW_PORT=${MLFLOW_PORT:-$(find_mlflow_port)}
     echo "✓ MLflow UI server running in protected tmux session 'mlflow_server' (port ${MLFLOW_PORT})."
 else
     MLFLOW_PORT=$(find_mlflow_port)
-
-    # Kill any orphaned/unmanaged MLflow processes on this port
     fuser -k ${MLFLOW_PORT}/tcp 2>/dev/null || true
     sleep 1
-
-    echo "--> 📊 Launching persistent MLflow UI server on port ${MLFLOW_PORT} (tmux: mlflow_server)..."
+    echo "--> 📊 Launching persistent MLflow UI server on port ${MLFLOW_PORT}..."
     tmux new-session -d -s mlflow_server \
         "$PYTHON_BIN -m mlflow ui --host 0.0.0.0 --port ${MLFLOW_PORT} --backend-store-uri /workspace/MThesis/mlruns > /workspace/mlflow_server.log 2>&1"
     
@@ -201,14 +191,13 @@ else
     echo "✓ MLflow UI server active on port ${MLFLOW_PORT}"
 fi
 
-# Ensure cloudflared is installed for 1-click public HTTPS dashboard access
+# Ensure cloudflared is installed for public HTTPS dashboard access
 if ! command -v cloudflared &>/dev/null; then
     echo "--> Installing cloudflared for direct public HTTPS dashboard access..."
     (wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -O /tmp/cloudflared.deb 2>/dev/null && \
      dpkg -i /tmp/cloudflared.deb >/dev/null 2>&1 && rm -f /tmp/cloudflared.deb) || true
 fi
 
-# Launch or recover Cloudflare public tunnel for MLflow
 CLOUDFLARE_URL=""
 if command -v cloudflared &>/dev/null; then
     if tmux has-session -t mlflow_tunnel 2>/dev/null; then
@@ -253,19 +242,22 @@ attempt=1
 while true; do
     echo ""
     echo "--------------------------------------------------------------"
-    echo " 🚀 Launching Training Session (Run #$attempt)..."
+    echo " 🚀 Launching Multi-CARLA Training Session (Run #$attempt)..."
     echo "--------------------------------------------------------------"
 
-    # 1. Kill ALL stale CARLA and training processes, release GPU memory
-    echo "--> Cleaning up stale processes and GPU memory..."
+    # 1. Clean up stale processes and release GPU memory
+    echo "--> Cleaning up stale training and CARLA processes..."
     pkill -9 -f train_rl_agent 2>/dev/null || true
     pkill -u carlauser -9 2>/dev/null || true
     pkill -9 -f CarlaUE4 2>/dev/null || true
     pkill -9 -f CarlaUE4-Linux-Shipping 2>/dev/null || true
     killall -9 CarlaUE4-Linux-Shipping CarlaUE4 CarlaUE4.sh 2>/dev/null || true
-    tmux kill-session -t carla_server 2>/dev/null || true
-    fuser -k -9 2000/tcp 2001/tcp 2002/tcp 8000/tcp 2>/dev/null || true
-    sleep 2
+    for ((i=0; i<NUM_ENVS; i++)); do
+        tmux kill-session -t "carla_server_${i}" 2>/dev/null || true
+        P=${PORTS[$i]}
+        fuser -k -9 ${P}/tcp $((P+1))/tcp $((P+2))/tcp 2>/dev/null || true
+    done
+    sleep 2  # Allow OS & GPU driver to release sockets and Vulkan contexts
 
     # Fix GPU, workspace, and tmux socket permissions
     chmod 1777 /tmp 2>/dev/null || true
@@ -279,25 +271,37 @@ while true; do
         chown -R carlauser:carlauser /workspace/carla 2>/dev/null || true
     fi
 
-    # 2. Start clean CARLA Server instance
-    if [ -f "/workspace/carla/CarlaUE4.sh" ]; then
-        LOG_FILE="/workspace/carla_server.log"
+    # 2. Launch CARLA servers (staggered by 2s to prevent GPU driver race conditions)
+    for ((i=0; i<NUM_ENVS; i++)); do
+        PORT=${PORTS[$i]}
+        SESSION_NAME="carla_server_${i}"
+        LOG_FILE="/workspace/carla_server_${PORT}.log"
+        echo "--> Launching CARLA Server #$((i+1))/$NUM_ENVS on port $PORT (tmux: $SESSION_NAME)..."
+
         > "$LOG_FILE" 2>/dev/null || true
-        echo "--> Launching CARLA server on port 2000 (tmux: carla_server)..."
-
-        tmux new-session -d -s carla_server \
-            "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1"
+        tmux new-session -d -s "$SESSION_NAME" \
+            "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -quality-level=Low' > ${LOG_FILE} 2>&1"
         sleep 2
+    done
+    sleep 2
 
-        # 3. Verify CARLA is actually responding on port 2000 before launching training
-        echo -n "--> Waiting for CARLA RPC server to accept connections on port 2000"
-        carla_ready=false
-        for i in $(seq 1 45); do
+    # 3. Health check all CARLA server instances
+    echo "--> Probing all $NUM_ENVS CARLA server instances..."
+    all_ready=true
+    for ((i=0; i<NUM_ENVS; i++)); do
+        PORT=${PORTS[$i]}
+        SESSION_NAME="carla_server_${i}"
+        LOG_FILE="/workspace/carla_server_${PORT}.log"
+        echo -n "   [CARLA #$((i+1))/$NUM_ENVS | Port $PORT] Waiting for server initialization"
+        ready=false
+        for attempt_check in $(seq 1 45); do
             echo -n "."
-            if [ "$i" -ge 4 ]; then
-                if ! tmux has-session -t carla_server 2>/dev/null; then
+            
+            # Check if CARLA tmux session closed (command exited/crashed)
+            if [ "$attempt_check" -ge 4 ]; then
+                if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
                     echo ""
-                    echo "⚠️  CARLA process terminated unexpectedly!"
+                    echo "⚠️  CARLA process on port $PORT terminated unexpectedly!"
                     if [ -f "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
                         echo "--- Last 20 lines of $LOG_FILE ---"
                         tail -n 20 "$LOG_FILE"
@@ -315,41 +319,41 @@ while true; do
 import sys, glob, socket
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.settimeout(0.4)
-res = s.connect_ex(('127.0.0.1', 2000))
+res = s.connect_ex(('127.0.0.1', $PORT))
 s.close()
 if res != 0:
     sys.exit(1)
 for e in glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg'):
     if e not in sys.path: sys.path.insert(0, e)
 import carla
-c = carla.Client('127.0.0.1', 2000)
+c = carla.Client('127.0.0.1', $PORT)
 c.set_timeout(2.0)
 v = c.get_server_version()
 " 2>/dev/null; then
-                carla_ready=true
+                ready=true
                 echo ""
-                echo "✓ CARLA server verified and responding on port 2000!"
+                echo "✓ CARLA Server on port $PORT is online and verified!"
                 break
             fi
             sleep 1.5
         done
 
         # If carlauser failed on first attempt, retry once cleanly
-        if [ "$carla_ready" = false ]; then
+        if [ "$ready" = false ]; then
             echo ""
-            echo "⚠️  CARLA on port 2000 not responding. Retrying clean launch..."
-            tmux kill-session -t carla_server 2>/dev/null || true
-            fuser -k -9 2000/tcp 2001/tcp 2002/tcp 2>/dev/null || true
+            echo "⚠️  CARLA on port $PORT not responding. Retrying clean launch..."
+            tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
+            fuser -k -9 ${PORT}/tcp $((PORT+1))/tcp $((PORT+2))/tcp 2>/dev/null || true
             sleep 2
-            tmux new-session -d -s carla_server \
-                "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1"
-            echo -n "--> Waiting for CARLA server on port 2000 (Retry)"
-            for i in $(seq 1 40); do
+            tmux new-session -d -s "$SESSION_NAME" \
+                "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -quality-level=Low' > ${LOG_FILE} 2>&1"
+            echo -n "   [CARLA #$((i+1))/$NUM_ENVS | Port $PORT (Retry)] Waiting for initialization"
+            for attempt_check in $(seq 1 40); do
                 echo -n "."
-                if [ "$i" -ge 4 ]; then
-                    if ! tmux has-session -t carla_server 2>/dev/null; then
+                if [ "$attempt_check" -ge 4 ]; then
+                    if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
                         echo ""
-                        echo "⚠️  Retry CARLA process died!"
+                        echo "⚠️  Retry CARLA process on port $PORT died!"
                         if [ -f "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
                             echo "--- Last 20 lines of $LOG_FILE ---"
                             tail -n 20 "$LOG_FILE"
@@ -366,29 +370,29 @@ v = c.get_server_version()
 import sys, glob, socket
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.settimeout(0.4)
-res = s.connect_ex(('127.0.0.1', 2000))
+res = s.connect_ex(('127.0.0.1', $PORT))
 s.close()
 if res != 0:
     sys.exit(1)
 for e in glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg'):
     if e not in sys.path: sys.path.insert(0, e)
 import carla
-c = carla.Client('127.0.0.1', 2000)
+c = carla.Client('127.0.0.1', $PORT)
 c.set_timeout(2.0)
 v = c.get_server_version()
 " 2>/dev/null; then
-                    carla_ready=true
+                    ready=true
                     echo ""
-                    echo "✓ CARLA server (Retry) verified and responding on port 2000!"
+                    echo "✓ CARLA Server on port $PORT (Retry) is online and verified!"
                     break
                 fi
                 sleep 1.5
             done
         fi
 
-        if [ "$carla_ready" = false ]; then
+        if [ "$ready" = false ]; then
             echo ""
-            echo "⚠️  CARLA server failed to respond after retry. Retrying full restart in 10s..."
+            echo "⚠️  CARLA Server on port $PORT failed to start."
             if [ -f "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
                 echo "--- Last 25 lines of $LOG_FILE ---"
                 tail -n 25 "$LOG_FILE"
@@ -398,11 +402,18 @@ v = c.get_server_version()
                 tail -n 25 "/workspace/carla/CarlaUE4/Saved/Logs/CarlaUE4.log"
                 echo "-------------------------------------"
             fi
-            sleep 10
-            continue
+            all_ready=false
+            break
         fi
+    done
+
+    if [ "$all_ready" = false ]; then
+        echo "⚠️  One or more CARLA servers failed startup. Retrying full restart in 10s..."
+        sleep 10
+        continue
     fi
 
+    # 4. Configure weights and resume/fresh flags
     WEIGHTS_ARG=""
     if [ -f "./papers_and_code/LAV/lav_pretrained.pth" ]; then
         WEIGHTS_ARG="--weights-path ./papers_and_code/LAV/lav_pretrained.pth"
@@ -410,16 +421,15 @@ v = c.get_server_version()
         WEIGHTS_ARG="--weights-path /workspace/pretrained_carla/model_0030_0.pth"
     fi
 
-    # Configure resume vs fresh start
     RESUME_ARG="--resume"
     if [ "$START_FRESH" = true ] && [ "$attempt" -eq 1 ]; then
         RESUME_ARG="--fresh"
-        echo "🌱 Launching FRESH training run from step 0 (Qwen-500M Decision Policy + LAV Vision Backbone)..."
+        echo "🌱 Launching FRESH multi-server training from step 0..."
     else
         echo "🔄 Resuming training from latest saved checkpoint..."
     fi
 
-    # 3. Launch / Resume Training with capped thread allocations and silenced warnings
+    # 5. Launch Training Pipeline with capped thread allocations and silenced warnings
     export PYTHONWARNINGS="ignore"
     export OMP_NUM_THREADS=1
     export OPENBLAS_NUM_THREADS=1
@@ -430,17 +440,19 @@ v = c.get_server_version()
 
     "$PYTHON_BIN" train_rl_agent.py \
         --env-type camera_easycarla \
+        --num-envs "$NUM_ENVS" \
+        --carla-ports "$PORTS_CSV" \
         --backbone "$BACKBONE" \
         --policy-arch "$POLICY_ARCH" \
         --town "$TOWN" \
         --num-vehicles "$NUM_VEHICLES" \
         --num-walkers "$NUM_WALKERS" \
         --frame-skip 2 \
-        --rollout-steps 500 \
-        --minibatch-size 256 \
+        --rollout-steps 250 \
+        --minibatch-size 128 \
         --ent-coef 0.05 \
         --use-mlflow \
-        --mlflow-port $MLFLOW_PORT \
+        --mlflow-port "$MLFLOW_PORT" \
         --log-dir /workspace/runs \
         --checkpoint-dir /workspace/checkpoints \
         $WEIGHTS_ARG \
@@ -449,24 +461,17 @@ v = c.get_server_version()
 
     exit_code=$?
 
-    # 4. Check Exit Status
     if [ $exit_code -eq 0 ]; then
         echo ""
         echo "=============================================================="
-        echo "   🎉 Training Completed Successfully to $TOTAL_STEPS Steps!  "
+        echo "   🎉 Multi-CARLA Training Completed to $TOTAL_STEPS Steps!   "
         echo "=============================================================="
         break
     else
         echo ""
-        if [ $exit_code -eq 134 ]; then
-            echo "⚠️  Training process terminated with exit code 134 (CARLA C++ abort / UE4 deadlock)."
-        elif [ $exit_code -eq 1 ]; then
-            echo "⚠️  Training process terminated with exit code 1 (CARLA watchdog triggered clean exit)."
-        else
-            echo "⚠️  Training process terminated with exit code $exit_code."
-        fi
-        echo "🔄  Auto-restarting with full CARLA server restart in 10 seconds..."
-        echo "    (Checkpoint saved — no training progress lost)"
+        echo "⚠️  Training process terminated with exit code $exit_code."
+        echo "🔄  Auto-restarting multi-CARLA servers and training in 10 seconds..."
+        echo "    (Latest model checkpoint preserved — zero loss of progress)"
         sleep 10
         attempt=$((attempt + 1))
     fi

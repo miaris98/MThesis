@@ -167,24 +167,49 @@ bash /workspace/MThesis/start_dashboard.sh
 
 ---
 
-## 7. Train with Pretrained LAV Backbone + 500M Qwen Decision Transformer
+## 7. Train with 100M Qwen Decision Transformer + Multi-CARLA Parallel Servers
 
-The policy network combines the **pretrained LAV multi-camera panoramic feature extractor** with a **~472 Million Parameter Qwen-Style Decision Transformer** featuring **Trainable Attention Skip Connections** ($\boldsymbol{\alpha}_{\text{attn}} \odot \text{Attn}$ and $\boldsymbol{\alpha}_{\text{ffn}} \odot \text{SwiGLU}$), **SwiGLU FFN** (Dim 4096), **RMSNorm**, and **Frame-Skipping** ($k=2$ for $2\times$ simulation throughput).
+The policy network combines the **pretrained LAV multi-camera panoramic feature extractor** with a **~106 Million Parameter Qwen Decision Transformer** (`qwen100m`) featuring **Trainable Attention Skip Connections** ($\boldsymbol{\alpha}_{\text{attn}} \odot \text{Attn}$ and $\boldsymbol{\alpha}_{\text{ffn}} \odot \text{SwiGLU}$), **SwiGLU FFN** (Dim 2816), **RMSNorm**, and parallel rollout execution across **Multiple CARLA Simulators**.
 
-### A. Autonomous Auto-Restart Supervisor (Recommended)
+### GPU VRAM Sizing Recommendations for Multi-CARLA
+* **1 CARLA Server + 100M Qwen**: 8 GB – 12 GB VRAM (RTX 3060 12GB, RTX 3080, RTX 4070)
+* **2 CARLA Servers + 100M Qwen**: 12 GB – 16 GB VRAM (RTX 3090, RTX 4080, RTX A4000, RTX A4500)
+* **4 CARLA Servers + 100M Qwen**: 24 GB – 48 GB VRAM (RTX 3090 24GB, RTX 4090 24GB, A5000, A6000, L40S)
 
-To start a **fresh run from Step 0** (clearing previous checkpoints):
+---
+
+### A. Parallel Multi-CARLA Training Supervisor (`run_multi_carla_training.sh`)
+
+To launch **2 Parallel CARLA Servers** (Ports `2000` and `2004`) with **100M Qwen Decision Policy** from scratch:
+```bash
+cd /workspace/MThesis
+git fetch origin && git checkout feature/multi-carla-qwen100m && git pull
+
+bash run_multi_carla_training.sh 2 50000 qwen100m lav Town10HD_Opt --fresh
+```
+
+To launch **4 Parallel CARLA Servers** (Ports `2000`, `2004`, `2008`, `2012`) on a 24GB+ GPU:
+```bash
+bash run_multi_carla_training.sh 4 100000 qwen100m lav Town10HD_Opt --fresh
+```
+
+To **resume training** from the latest checkpoint without restarting progress:
+```bash
+bash run_multi_carla_training.sh 2 50000 qwen100m lav Town10HD_Opt
+```
+
+---
+
+### B. Single CARLA Server Training (`run_training_loop.sh`)
+
 ```bash
 cd /workspace/MThesis && git pull
-bash run_training_loop.sh 50000 lav Town10HD_Opt 3 10 --fresh
+bash run_training_loop.sh 50000 lav qwen100m Town10HD_Opt 3 10 --fresh
 ```
 
-To **resume training from the latest checkpoint**:
-```bash
-bash run_training_loop.sh 50000 lav Town10HD_Opt 3 10
-```
+---
 
-### B. Direct Python Execution
+### C. Direct Python CLI Execution
 
 ```bash
 source /opt/conda/bin/activate carla_py38
@@ -192,14 +217,16 @@ cd /workspace/MThesis
 
 python train_rl_agent.py \
     --env-type camera_easycarla \
+    --num-envs 2 \
+    --carla-ports 2000,2004 \
     --backbone lav \
-    --policy-arch qwen500m \
+    --policy-arch qwen100m \
     --town Town10HD_Opt \
     --weights-path ./papers_and_code/LAV/lav_pretrained.pth \
     --freeze-backbone \
     --frame-skip 2 \
-    --rollout-steps 500 \
-    --minibatch-size 256 \
+    --rollout-steps 250 \
+    --minibatch-size 128 \
     --use-mlflow \
     --mlflow-port 10100 \
     --log-dir /workspace/runs \

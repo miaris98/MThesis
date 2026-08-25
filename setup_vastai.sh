@@ -61,6 +61,13 @@ fi
 # Try installing nvtop if available in repository
 apt-get install -y nvtop 2>/dev/null || true
 
+# Install cloudflared for direct public HTTPS dashboard access
+if ! command -v cloudflared &>/dev/null; then
+    echo -e "${YELLOW}--> Installing cloudflared for direct public HTTPS dashboard access...${NC}"
+    (wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -O /tmp/cloudflared.deb 2>/dev/null && \
+     dpkg -i /tmp/cloudflared.deb >/dev/null 2>&1 && rm -f /tmp/cloudflared.deb) || true
+fi
+
 # Enable mouse support in tmux globally (allows clicking to switch panes and scrolling)
 echo "set -g mouse on" >> ~/.tmux.conf
 
