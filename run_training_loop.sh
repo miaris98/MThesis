@@ -281,16 +281,12 @@ while true; do
 
     # 2. Start clean CARLA Server instance
     if [ -f "/workspace/carla/CarlaUE4.sh" ]; then
-        CARLA_USER_ENV="export HOME=/home/carlauser; export USER=carlauser; export XDG_CONFIG_HOME=/home/carlauser/.config; export XDG_DATA_HOME=/home/carlauser/.local/share; export XDG_RUNTIME_DIR=/tmp/runtime-carlauser; export SDL_VIDEODRIVER=offscreen; export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json"
-
         LOG_FILE="/workspace/carla_server.log"
-        touch "$LOG_FILE" && chmod 666 "$LOG_FILE" 2>/dev/null || true
         > "$LOG_FILE" 2>/dev/null || true
         echo "--> Launching CARLA server on port 2000 (tmux: carla_server)..."
-        LAUNCH_CMD="/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low -benchmark -fps=20"
 
         tmux new-session -d -s carla_server \
-            "su carlauser -c '$CARLA_USER_ENV; $LAUNCH_CMD' > $LOG_FILE 2>&1"
+            "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1"
         sleep 2
 
         # 3. Verify CARLA is actually responding on port 2000 before launching training
@@ -345,10 +341,8 @@ v = c.get_server_version()
             tmux kill-session -t carla_server 2>/dev/null || true
             fuser -k -9 2000/tcp 2001/tcp 2002/tcp 2>/dev/null || true
             sleep 2
-            touch "$LOG_FILE" && chmod 666 "$LOG_FILE" 2>/dev/null || true
-            > "$LOG_FILE" 2>/dev/null || true
             tmux new-session -d -s carla_server \
-                "su carlauser -c '$CARLA_USER_ENV; $LAUNCH_CMD' > $LOG_FILE 2>&1"
+                "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1"
             echo -n "--> Waiting for CARLA server on port 2000 (Retry)"
             for i in $(seq 1 40); do
                 echo -n "."

@@ -271,21 +271,16 @@ while true; do
         chown -R carlauser:carlauser /workspace/carla 2>/dev/null || true
     fi
 
-    # 2. Launch CARLA servers (staggered by 2s to prevent Vulkan driver race conditions)
-    CARLA_USER_ENV="export HOME=/home/carlauser; export USER=carlauser; export XDG_CONFIG_HOME=/home/carlauser/.config; export XDG_DATA_HOME=/home/carlauser/.local/share; export XDG_RUNTIME_DIR=/tmp/runtime-carlauser; export SDL_VIDEODRIVER=offscreen; export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json"
-
+    # 2. Launch CARLA servers (staggered by 2s to prevent GPU driver race conditions)
     for ((i=0; i<NUM_ENVS; i++)); do
         PORT=${PORTS[$i]}
         SESSION_NAME="carla_server_${i}"
         LOG_FILE="/workspace/carla_server_${PORT}.log"
         echo "--> Launching CARLA Server #$((i+1))/$NUM_ENVS on port $PORT (tmux: $SESSION_NAME)..."
-        
-        touch "$LOG_FILE" && chmod 666 "$LOG_FILE" 2>/dev/null || true
-        > "$LOG_FILE" 2>/dev/null || true
-        LAUNCH_CMD="/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -quality-level=Low -benchmark -fps=20"
 
+        > "$LOG_FILE" 2>/dev/null || true
         tmux new-session -d -s "$SESSION_NAME" \
-            "su carlauser -c '$CARLA_USER_ENV; $LAUNCH_CMD' > $LOG_FILE 2>&1"
+            "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -quality-level=Low' > ${LOG_FILE} 2>&1"
         sleep 2
     done
     sleep 2
@@ -350,10 +345,8 @@ v = c.get_server_version()
             tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
             fuser -k -9 ${PORT}/tcp $((PORT+1))/tcp $((PORT+2))/tcp 2>/dev/null || true
             sleep 2
-            touch "$LOG_FILE" && chmod 666 "$LOG_FILE" 2>/dev/null || true
-            > "$LOG_FILE" 2>/dev/null || true
             tmux new-session -d -s "$SESSION_NAME" \
-                "su carlauser -c '$CARLA_USER_ENV; $LAUNCH_CMD' > $LOG_FILE 2>&1"
+                "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -quality-level=Low' > ${LOG_FILE} 2>&1"
             echo -n "   [CARLA #$((i+1))/$NUM_ENVS | Port $PORT (Retry)] Waiting for initialization"
             for attempt_check in $(seq 1 40); do
                 echo -n "."
