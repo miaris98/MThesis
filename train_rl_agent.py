@@ -1,8 +1,17 @@
-"""Command-line entry point for Vision-Based Deep RL in CARLA."""
 import os
 import sys
 import warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# Completely silence runtime, deprecation, and future warnings
+warnings.filterwarnings("ignore")
+os.environ["PYTHONWARNINGS"] = "ignore"
+
+# Prevent OpenBLAS/MKL/OMP thread explosion on high-core CPUs (AMD EPYC)
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 # Ensure project root is in Python module path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

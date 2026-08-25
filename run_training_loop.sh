@@ -303,8 +303,15 @@ print(f'CARLA {v} ready, map: {w.get_map().name}')
         echo "🔄 Resuming training from latest saved checkpoint..."
     fi
 
-    # 3. Launch / Resume Training
+    # 3. Launch / Resume Training with capped thread allocations and silenced warnings
+    export PYTHONWARNINGS="ignore"
+    export OMP_NUM_THREADS=1
+    export OPENBLAS_NUM_THREADS=1
+    export MKL_NUM_THREADS=1
+    export VECLIB_MAXIMUM_THREADS=1
+    export NUMEXPR_NUM_THREADS=1
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
     "$PYTHON_BIN" train_rl_agent.py \
         --env-type camera_easycarla \
         --backbone "$BACKBONE" \

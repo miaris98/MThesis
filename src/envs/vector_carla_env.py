@@ -25,6 +25,15 @@ from src.config.training_config import TrainingConfig
 
 def _carla_worker(remote: Any, parent_remote: Any, env_factory: Any) -> None:
     """Worker process loop communicating with a single dedicated CARLA server instance."""
+    import os
+    import warnings
+    warnings.filterwarnings("ignore")
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    
     parent_remote.close()
     env = env_factory()
     try:

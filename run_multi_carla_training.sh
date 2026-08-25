@@ -295,7 +295,15 @@ print(f'CARLA on port $PORT ready: {v}')
         echo "🔄 Resuming training from latest saved checkpoint..."
     fi
 
-    # 5. Launch Training Pipeline
+    # 5. Launch Training Pipeline with capped thread allocations and silenced warnings
+    export PYTHONWARNINGS="ignore"
+    export OMP_NUM_THREADS=1
+    export OPENBLAS_NUM_THREADS=1
+    export MKL_NUM_THREADS=1
+    export VECLIB_MAXIMUM_THREADS=1
+    export NUMEXPR_NUM_THREADS=1
+    export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
     "$PYTHON_BIN" train_rl_agent.py \
         --env-type camera_easycarla \
         --num-envs "$NUM_ENVS" \
