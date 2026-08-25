@@ -21,6 +21,31 @@ easycarla_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os
 if os.path.exists(easycarla_path) and easycarla_path not in sys.path:
     sys.path.insert(0, easycarla_path)
 
+# Universal Gym 2022 deprecation notice suppression
+try:
+    _old_stderr = sys.stderr
+    sys.stderr = open(os.devnull, 'w')
+    import gym
+    if hasattr(gym, 'logger'):
+        gym.logger.set_level(40)
+except Exception:
+    pass
+finally:
+    sys.stderr = _old_stderr
+
+# Universal EasyCarla sensor callback patch to prevent unformatted stdout prints
+try:
+    import easycarla.envs.carla_env as _ece
+    def _silent_collision(self, event):
+        self._is_collision = True
+        if hasattr(self, 'collision_hist') and self.collision_hist is not None:
+            self.collision_hist.append(event)
+    _ece.CarlaEnv._on_collision = _silent_collision
+    _ece.CarlaEnv._on_lane_invasion = lambda self, event: setattr(self, '_is_off_road', True)
+    _ece.CarlaEnv._on_invasion = lambda self, event: setattr(self, '_is_off_road', True)
+except Exception:
+    pass
+
 try:
     import carla
 except ImportError:

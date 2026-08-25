@@ -6,6 +6,17 @@ import warnings
 warnings.filterwarnings("ignore")
 os.environ["PYTHONWARNINGS"] = "ignore"
 
+try:
+    _old_stderr = sys.stderr
+    sys.stderr = open(os.devnull, 'w')
+    import gym
+    if hasattr(gym, 'logger'):
+        gym.logger.set_level(40)
+except Exception:
+    pass
+finally:
+    sys.stderr = _old_stderr
+
 # Prevent OpenBLAS/MKL/OMP thread explosion on high-core CPUs (AMD EPYC)
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
