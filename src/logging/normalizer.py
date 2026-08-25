@@ -9,14 +9,15 @@ class RunningMeanStd:
         self.var = 1.0
         self.count = epsilon
 
-    def update(self, x: float) -> None:
-        """Update online running mean and variance with a new scalar observation."""
-        x = float(x)
-        delta = x - self.mean
-        self.count += 1
-        self.mean += delta / self.count
-        delta2 = x - self.mean
-        self.var += (delta * delta2 - self.var) / self.count
+    def update(self, x) -> None:
+        """Update online running mean and variance with a scalar or batched array of observations."""
+        arr = np.asarray(x, dtype=np.float64).ravel()
+        for val in arr:
+            delta = float(val) - self.mean
+            self.count += 1
+            self.mean += delta / self.count
+            delta2 = float(val) - self.mean
+            self.var += (delta * delta2 - self.var) / self.count
 
     @property
     def std(self) -> float:

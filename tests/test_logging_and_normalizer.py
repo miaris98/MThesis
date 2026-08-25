@@ -36,6 +36,12 @@ class TestLoggingAndNormalizer(unittest.TestCase):
         self.assertAlmostEqual(normalizer.mean, float(np.mean(values)), delta=1.0)
         self.assertGreater(normalizer.std, 0.0)
 
+        # Test array updates
+        batch_normalizer = RunningMeanStd()
+        batch_normalizer.update(np.array([10.0, 20.0, 30.0, 40.0, 50.0]))
+        self.assertAlmostEqual(batch_normalizer.mean, float(np.mean(values)), delta=1.0)
+        self.assertGreater(batch_normalizer.std, 0.0)
+
     def test_hardware_monitor(self):
         from src.logging.hardware_monitor import HardwareMonitor
 
