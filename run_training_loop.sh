@@ -41,6 +41,30 @@ chmod 1777 /tmp 2>/dev/null || true
 chmod 700 /tmp/tmux-* 2>/dev/null || true
 chown root:root /tmp/tmux-0 2>/dev/null || true
 
+# Ensure dedicated non-root carlauser exists with home folder and groups
+if ! id "carlauser" &>/dev/null; then
+    useradd -m -s /bin/bash carlauser 2>/dev/null || true
+fi
+usermod -aG video,render,sudo carlauser 2>/dev/null || true
+mkdir -p /home/carlauser/.config /home/carlauser/.local/share /home/carlauser/Documents /home/carlauser/Desktop /workspace/carla/CarlaUE4/Saved /tmp/runtime-carlauser
+chmod 700 /tmp/runtime-carlauser 2>/dev/null || true
+chown -R carlauser:carlauser /home/carlauser /workspace/carla /tmp/runtime-carlauser 2>/dev/null || true
+chmod -R 777 /workspace/carla 2>/dev/null || true
+
+# Ensure xdg-user-dir binary is available for Unreal Engine
+if ! command -v xdg-user-dir &>/dev/null; then
+    cat << 'EOF' > /usr/local/bin/xdg-user-dir
+#!/bin/sh
+case "$1" in
+    DESKTOP) echo "$HOME/Desktop" ;;
+    DOCUMENTS) echo "$HOME/Documents" ;;
+    DOWNLOAD) echo "$HOME/Downloads" ;;
+    *) echo "$HOME" ;;
+esac
+EOF
+    chmod +x /usr/local/bin/xdg-user-dir 2>/dev/null || true
+fi
+
 if [ "$START_FRESH" = true ]; then
     echo "=============================================================="
     echo "🧹 [START FRESH] Requested fresh training run from scratch."
@@ -257,20 +281,15 @@ while true; do
 
     # 2. Start clean CARLA Server instance
     if [ -f "/workspace/carla/CarlaUE4.sh" ]; then
+        CARLA_USER_ENV="export HOME=/home/carlauser; export USER=carlauser; export XDG_CONFIG_HOME=/home/carlauser/.config; export XDG_DATA_HOME=/home/carlauser/.local/share; export XDG_RUNTIME_DIR=/tmp/runtime-carlauser; export SDL_VIDEODRIVER=offscreen; export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json"
+
         LOG_FILE="/workspace/carla_server.log"
         > "$LOG_FILE" 2>/dev/null || true
         echo "--> Launching CARLA server on port 2000 (tmux: carla_server)..."
         LAUNCH_CMD="/workspace/carla/CarlaUE4.sh -carla-rpc-port=2000 -port=2000 -RenderOffScreen -nosound -quality-level=Low -benchmark -fps=20"
-        export SDL_VIDEODRIVER=offscreen
-        export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json
 
-        if id "carlauser" &>/dev/null; then
-            tmux new-session -d -s carla_server \
-                "su carlauser -c 'export SDL_VIDEODRIVER=offscreen; export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json; $LAUNCH_CMD' > $LOG_FILE 2>&1"
-        else
-            tmux new-session -d -s carla_server \
-                "export SDL_VIDEODRIVER=offscreen; export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json; $LAUNCH_CMD > $LOG_FILE 2>&1"
-        fi
+        tmux new-session -d -s carla_server \
+            "su -s /bin/bash carlauser -c '$CARLA_USER_ENV; $LAUNCH_CMD' > $LOG_FILE 2>&1"
         sleep 2
 
         # 3. Verify CARLA is actually responding on port 2000 before launching training
@@ -314,23 +333,23 @@ v = c.get_server_version()
             sleep 1.5
         done
 
-        # If carlauser failed, fallback to direct root execution
-        if [ "$carla_ready" = false ] && id "carlauser" &>/dev/null; then
+        # If carlauser failed on first attempt, retry once cleanly
+        if [ "$carla_ready" = false ]; then
             echo ""
-            echo "⚠️  CARLA not responding under 'carlauser'. Retrying direct root execution..."
+            echo "⚠️  CARLA on port 2000 not responding. Retrying clean launch..."
             tmux kill-session -t carla_server 2>/dev/null || true
             fuser -k -9 2000/tcp 2001/tcp 2002/tcp 2>/dev/null || true
             sleep 2
             > "$LOG_FILE" 2>/dev/null || true
             tmux new-session -d -s carla_server \
-                "export SDL_VIDEODRIVER=offscreen; export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json; /workspace/carla/CarlaUE4.sh -carla-rpc-port=2000 -port=2000 -RenderOffScreen -nosound -quality-level=Low -benchmark -fps=20 > $LOG_FILE 2>&1"
-            echo -n "--> Waiting for direct CARLA server on port 2000"
+                "su -s /bin/bash carlauser -c '$CARLA_USER_ENV; $LAUNCH_CMD' > $LOG_FILE 2>&1"
+            echo -n "--> Waiting for CARLA server on port 2000 (Retry)"
             for i in $(seq 1 30); do
                 echo -n "."
                 if [ "$i" -ge 4 ]; then
                     if ! tmux has-session -t carla_server 2>/dev/null || ! pgrep -f "CarlaUE4.*port=2000" >/dev/null 2>&1; then
                         echo ""
-                        echo "⚠️  Direct CARLA process died!"
+                        echo "⚠️  Retry CARLA process died!"
                         if [ -f "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
                             echo "--- Last 20 lines of $LOG_FILE ---"
                             tail -n 20 "$LOG_FILE"
@@ -356,7 +375,7 @@ v = c.get_server_version()
 " 2>/dev/null; then
                     carla_ready=true
                     echo ""
-                    echo "✓ CARLA server (Direct) verified and responding on port 2000!"
+                    echo "✓ CARLA server (Retry) verified and responding on port 2000!"
                     break
                 fi
                 sleep 1.5

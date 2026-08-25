@@ -45,6 +45,30 @@ chmod 1777 /tmp 2>/dev/null || true
 chmod 700 /tmp/tmux-* 2>/dev/null || true
 chown root:root /tmp/tmux-0 2>/dev/null || true
 
+# Ensure dedicated non-root carlauser exists with home folder and groups
+if ! id "carlauser" &>/dev/null; then
+    useradd -m -s /bin/bash carlauser 2>/dev/null || true
+fi
+usermod -aG video,render,sudo carlauser 2>/dev/null || true
+mkdir -p /home/carlauser/.config /home/carlauser/.local/share /home/carlauser/Documents /home/carlauser/Desktop /workspace/carla/CarlaUE4/Saved /tmp/runtime-carlauser
+chmod 700 /tmp/runtime-carlauser 2>/dev/null || true
+chown -R carlauser:carlauser /home/carlauser /workspace/carla /tmp/runtime-carlauser 2>/dev/null || true
+chmod -R 777 /workspace/carla 2>/dev/null || true
+
+# Ensure xdg-user-dir binary is available for Unreal Engine
+if ! command -v xdg-user-dir &>/dev/null; then
+    cat << 'EOF' > /usr/local/bin/xdg-user-dir
+#!/bin/sh
+case "$1" in
+    DESKTOP) echo "$HOME/Desktop" ;;
+    DOCUMENTS) echo "$HOME/Documents" ;;
+    DOWNLOAD) echo "$HOME/Downloads" ;;
+    *) echo "$HOME" ;;
+esac
+EOF
+    chmod +x /usr/local/bin/xdg-user-dir 2>/dev/null || true
+fi
+
 # Compute non-overlapping CARLA port list (stride of 4 per instance)
 PORTS=()
 PORTS_CSV=""
@@ -248,8 +272,8 @@ while true; do
     fi
 
     # 2. Launch CARLA servers (staggered by 2s to prevent Vulkan driver race conditions)
-    export SDL_VIDEODRIVER=offscreen
-    export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json
+    CARLA_USER_ENV="export HOME=/home/carlauser; export USER=carlauser; export XDG_CONFIG_HOME=/home/carlauser/.config; export XDG_DATA_HOME=/home/carlauser/.local/share; export XDG_RUNTIME_DIR=/tmp/runtime-carlauser; export SDL_VIDEODRIVER=offscreen; export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json"
+
     for ((i=0; i<NUM_ENVS; i++)); do
         PORT=${PORTS[$i]}
         SESSION_NAME="carla_server_${i}"
@@ -259,13 +283,8 @@ while true; do
         > "$LOG_FILE" 2>/dev/null || true
         LAUNCH_CMD="/workspace/carla/CarlaUE4.sh -carla-rpc-port=${PORT} -port=${PORT} -RenderOffScreen -nosound -quality-level=Low -benchmark -fps=20"
 
-        if id "carlauser" &>/dev/null; then
-            tmux new-session -d -s "$SESSION_NAME" \
-                "su carlauser -c 'export SDL_VIDEODRIVER=offscreen; export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json; $LAUNCH_CMD' > $LOG_FILE 2>&1"
-        else
-            tmux new-session -d -s "$SESSION_NAME" \
-                "export SDL_VIDEODRIVER=offscreen; export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json; $LAUNCH_CMD > $LOG_FILE 2>&1"
-        fi
+        tmux new-session -d -s "$SESSION_NAME" \
+            "su -s /bin/bash carlauser -c '$CARLA_USER_ENV; $LAUNCH_CMD' > $LOG_FILE 2>&1"
         sleep 2
     done
     sleep 2
@@ -319,23 +338,23 @@ v = c.get_server_version()
             sleep 1.5
         done
 
-        # If carlauser failed, attempt direct launch fallback as current user (root)
-        if [ "$ready" = false ] && id "carlauser" &>/dev/null; then
+        # If carlauser failed on first attempt, retry once cleanly
+        if [ "$ready" = false ]; then
             echo ""
-            echo "⚠️  CARLA on port $PORT not responding under 'carlauser'. Retrying direct root execution..."
+            echo "⚠️  CARLA on port $PORT not responding. Retrying clean launch..."
             tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
             fuser -k -9 ${PORT}/tcp $((PORT+1))/tcp $((PORT+2))/tcp 2>/dev/null || true
             sleep 2
             > "$LOG_FILE" 2>/dev/null || true
             tmux new-session -d -s "$SESSION_NAME" \
-                "export SDL_VIDEODRIVER=offscreen; export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json; /workspace/carla/CarlaUE4.sh -carla-rpc-port=${PORT} -port=${PORT} -RenderOffScreen -nosound -quality-level=Low -benchmark -fps=20 > $LOG_FILE 2>&1"
-            echo -n "   [CARLA #$((i+1))/$NUM_ENVS | Port $PORT (Direct)] Waiting for initialization"
+                "su -s /bin/bash carlauser -c '$CARLA_USER_ENV; $LAUNCH_CMD' > $LOG_FILE 2>&1"
+            echo -n "   [CARLA #$((i+1))/$NUM_ENVS | Port $PORT (Retry)] Waiting for initialization"
             for attempt_check in $(seq 1 30); do
                 echo -n "."
                 if [ "$attempt_check" -ge 4 ]; then
                     if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null || ! pgrep -f "CarlaUE4.*port=${PORT}" >/dev/null 2>&1; then
                         echo ""
-                        echo "⚠️  Direct CARLA process on port $PORT died!"
+                        echo "⚠️  Retry CARLA process on port $PORT died!"
                         if [ -f "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
                             echo "--- Last 20 lines of $LOG_FILE ---"
                             tail -n 20 "$LOG_FILE"
@@ -361,7 +380,7 @@ v = c.get_server_version()
 " 2>/dev/null; then
                     ready=true
                     echo ""
-                    echo "✓ CARLA Server on port $PORT (Direct) is online and verified!"
+                    echo "✓ CARLA Server on port $PORT (Retry) is online and verified!"
                     break
                 fi
                 sleep 1.5
