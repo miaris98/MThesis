@@ -246,44 +246,48 @@ while true; do
         PORT=${PORTS[$i]}
         SESSION_NAME="carla_server_${i}"
         LOG_FILE="/workspace/carla_server_${PORT}.log"
+        echo -n "   [CARLA #$((i+1))/$NUM_ENVS | Port $PORT] Waiting for server initialization"
         ready=false
-        for attempt_check in $(seq 1 25); do
+        for attempt_check in $(seq 1 30); do
+            echo -n "."
             if "$PYTHON_BIN" -c "
 import sys, glob
 for e in glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg'): sys.path.insert(0, e)
 import carla
 c = carla.Client('127.0.0.1', $PORT)
-c.set_timeout(3.0)
+c.set_timeout(2.0)
 v = c.get_server_version()
-print(f'CARLA on port $PORT ready: {v}')
 " 2>/dev/null; then
                 ready=true
+                echo ""
                 echo "✓ CARLA Server on port $PORT is online and verified!"
                 break
             fi
             sleep 2
         done
 
-        # If Vulkan didn't respond in 50s, fallback to OpenGL for this instance
+        # If Vulkan didn't respond in 60s, fallback to OpenGL for this instance
         if [ "$ready" = false ]; then
+            echo ""
             echo "⚠️  CARLA on port $PORT not responding with Vulkan. Retrying with OpenGL mode..."
             tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
             fuser -k ${PORT}/tcp $((PORT+1))/tcp $((PORT+2))/tcp 2>/dev/null || true
             sleep 2
             tmux new-session -d -s "$SESSION_NAME" \
                 "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -opengl -quality-level=Low -benchmark -fps=20' > $LOG_FILE 2>&1"
-            sleep 8
-            for attempt_check in $(seq 1 20); do
+            echo -n "   [CARLA #$((i+1))/$NUM_ENVS | Port $PORT (OpenGL)] Waiting for initialization"
+            for attempt_check in $(seq 1 25); do
+                echo -n "."
                 if "$PYTHON_BIN" -c "
 import sys, glob
 for e in glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg'): sys.path.insert(0, e)
 import carla
 c = carla.Client('127.0.0.1', $PORT)
-c.set_timeout(3.0)
+c.set_timeout(2.0)
 v = c.get_server_version()
-print(f'CARLA on port $PORT ready: {v}')
 " 2>/dev/null; then
                     ready=true
+                    echo ""
                     echo "✓ CARLA Server on port $PORT (OpenGL) is online and verified!"
                     break
                 fi
@@ -292,7 +296,8 @@ print(f'CARLA on port $PORT ready: {v}')
         fi
 
         if [ "$ready" = false ]; then
-            echo "⚠️  CARLA Server on port $PORT failed to respond after retry."
+            echo ""
+            echo "⚠️  CARLA Server on port $PORT failed to respond. Check log: tail -n 20 $LOG_FILE"
             all_ready=false
             break
         fi
