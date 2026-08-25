@@ -136,6 +136,7 @@ class CameraEasyCarlaEnv(gym.Env):
             except Exception:
                 pass
 
+        self.easy_env.view_mode = 'none'
         self.easy_env._get_obs = lambda: {
             'ego_state': np.zeros(9, dtype=np.float32),
             'lane_info': np.zeros(2, dtype=np.float32),
@@ -199,25 +200,21 @@ class CameraEasyCarlaEnv(gym.Env):
                         self.easy_env.world.tick()
                     except Exception:
                         pass
-                time.sleep(0.02)
                 return self._get_obs(), {}
             except Exception:
                 pass
 
         # Full reset fallback
         self.sensor_mgr.cleanup_cameras()
-        _wd_reset = threading.Timer(90.0, lambda: os._exit(1))
-        _wd_reset.daemon = True
-        _wd_reset.start()
         try:
             for _ in range(3):
                 try:
                     self.easy_env.reset()
                     break
                 except Exception:
-                    time.sleep(1.0)
-        finally:
-            _wd_reset.cancel()
+                    time.sleep(0.5)
+        except Exception:
+            pass
 
         self.sensor_mgr.setup_cameras(self.easy_env.world, self.easy_env.ego)
         try:
@@ -225,28 +222,22 @@ class CameraEasyCarlaEnv(gym.Env):
                 self.easy_env.world.tick()
         except Exception:
             pass
-        time.sleep(0.05)
         return self._get_obs(), {}
 
     def _sub_step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
-        """Execute single physics simulation tick with watchdog protection."""
+        """Execute single physics simulation tick with direct exception safety."""
         throttle = float(np.clip((action[0] + 1.0) / 2.0, 0.0, 1.0))
         steer = float(np.clip(action[1], -1.0, 1.0))
         brake = float(np.clip((action[2] - 0.2) / 0.8, 0.0, 1.0)) if action[2] > 0.2 else 0.0
         scaled_action = [throttle, steer, brake]
 
         cost, done = 0.0, False
-        _watchdog = threading.Timer(90.0, lambda: os._exit(1))
-        _watchdog.daemon = True
-        _watchdog.start()
         try:
             _, _, cost, done, _ = self.easy_env.step(scaled_action)
         except Exception:
             cost = 1.0
             done = True
             self.easy_env._is_collision = True
-        finally:
-            _watchdog.cancel()
 
         obs = self._get_obs()
         speed_kmh = float(obs["speed"][0])

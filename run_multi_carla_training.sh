@@ -146,8 +146,15 @@ else
     echo "--> 📊 Launching persistent MLflow UI server on port ${MLFLOW_PORT}..."
     tmux new-session -d -s mlflow_server \
         "$PYTHON_BIN -m mlflow ui --host 0.0.0.0 --port ${MLFLOW_PORT} --backend-store-uri /workspace/MThesis/mlruns > /workspace/mlflow_server.log 2>&1"
-    sleep 3
-    echo "✓ MLflow UI server started in tmux session 'mlflow_server' (port ${MLFLOW_PORT})"
+    
+    # Wait until MLflow server is responding
+    for i in $(seq 1 15); do
+        if curl -s -I "http://127.0.0.1:${MLFLOW_PORT}" 2>/dev/null | grep -q -E "HTTP/|200|302|mlflow"; then
+            break
+        fi
+        sleep 1
+    done
+    echo "✓ MLflow UI server active on port ${MLFLOW_PORT}"
 fi
 
 # Ensure cloudflared is installed for public HTTPS dashboard access
@@ -170,7 +177,7 @@ if command -v cloudflared &>/dev/null; then
         rm -f /tmp/mlflow_tunnel.log
         echo "--> 🌐 Launching public Cloudflare HTTPS tunnel for MLflow (port ${MLFLOW_PORT})..."
         tmux new-session -d -s mlflow_tunnel \
-            "cloudflared tunnel --url http://127.0.0.1:${MLFLOW_PORT} 2>&1 | tee /tmp/mlflow_tunnel.log"
+            "cloudflared tunnel --url http://127.0.0.1:${MLFLOW_PORT} --http-host-header 127.0.0.1:${MLFLOW_PORT} 2>&1 | tee /tmp/mlflow_tunnel.log"
     fi
 
     echo "--> Waiting for Cloudflare public tunnel URL to initialize..."
@@ -223,7 +230,7 @@ while true; do
         echo "--> Launching CARLA Server #$((i+1))/$NUM_ENVS on port $PORT (tmux: $SESSION_NAME)..."
         
         tmux new-session -d -s "$SESSION_NAME" \
-            "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -quality-level=Low' > $LOG_FILE 2>&1"
+            "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -quality-level=Low -benchmark -fps=20' > $LOG_FILE 2>&1"
         sleep 4
 
         # Fallback to OpenGL if Vulkan fails
@@ -232,7 +239,7 @@ while true; do
             tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
             sleep 1
             tmux new-session -d -s "$SESSION_NAME" \
-                "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -opengl -quality-level=Low' > $LOG_FILE 2>&1"
+                "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -opengl -quality-level=Low -benchmark -fps=20' > $LOG_FILE 2>&1"
             sleep 6
         fi
     done

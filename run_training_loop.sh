@@ -161,8 +161,15 @@ else
     echo "--> 📊 Launching persistent MLflow UI server on port ${MLFLOW_PORT} (tmux: mlflow_server)..."
     tmux new-session -d -s mlflow_server \
         "$PYTHON_BIN -m mlflow ui --host 0.0.0.0 --port ${MLFLOW_PORT} --backend-store-uri /workspace/MThesis/mlruns > /workspace/mlflow_server.log 2>&1"
-    sleep 3
-    echo "✓ MLflow UI server started in tmux session 'mlflow_server' (port ${MLFLOW_PORT})"
+    
+    # Wait until MLflow server is responding
+    for i in $(seq 1 15); do
+        if curl -s -I "http://127.0.0.1:${MLFLOW_PORT}" 2>/dev/null | grep -q -E "HTTP/|200|302|mlflow"; then
+            break
+        fi
+        sleep 1
+    done
+    echo "✓ MLflow UI server active on port ${MLFLOW_PORT}"
 fi
 
 # Ensure cloudflared is installed for 1-click public HTTPS dashboard access
@@ -186,7 +193,7 @@ if command -v cloudflared &>/dev/null; then
         rm -f /tmp/mlflow_tunnel.log
         echo "--> 🌐 Launching public Cloudflare HTTPS tunnel for MLflow (port ${MLFLOW_PORT})..."
         tmux new-session -d -s mlflow_tunnel \
-            "cloudflared tunnel --url http://127.0.0.1:${MLFLOW_PORT} 2>&1 | tee /tmp/mlflow_tunnel.log"
+            "cloudflared tunnel --url http://127.0.0.1:${MLFLOW_PORT} --http-host-header 127.0.0.1:${MLFLOW_PORT} 2>&1 | tee /tmp/mlflow_tunnel.log"
     fi
 
     echo "--> Waiting for Cloudflare public tunnel URL to initialize..."
@@ -233,7 +240,7 @@ while true; do
     # 2. Start clean CARLA Server instance (Vulkan primary -> OpenGL fallback)
     if [ -f "/workspace/carla/CarlaUE4.sh" ]; then
         echo "--> Attempting CARLA server launch with Vulkan graphics (-vulkan)..."
-        tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1"
+        tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low -benchmark -fps=20' > /workspace/carla_server.log 2>&1"
         sleep 6
 
         # Check if Vulkan launch failed (Illegal instruction or early crash)
@@ -245,7 +252,7 @@ while true; do
             pkill -9 -f CarlaUE4 2>/dev/null || true
             tmux kill-session -t carla_server 2>/dev/null || true
             sleep 2
-            tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -opengl -quality-level=Low' > /workspace/carla_server.log 2>&1"
+            tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -opengl -quality-level=Low -benchmark -fps=20' > /workspace/carla_server.log 2>&1"
             sleep 10
         else
             echo "✓ CARLA Vulkan server running smoothly!"
