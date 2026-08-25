@@ -284,6 +284,7 @@ while true; do
         CARLA_USER_ENV="export HOME=/home/carlauser; export USER=carlauser; export XDG_CONFIG_HOME=/home/carlauser/.config; export XDG_DATA_HOME=/home/carlauser/.local/share; export XDG_RUNTIME_DIR=/tmp/runtime-carlauser; export SDL_VIDEODRIVER=offscreen; export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json"
 
         LOG_FILE="/workspace/carla_server.log"
+        touch "$LOG_FILE" && chmod 666 "$LOG_FILE" 2>/dev/null || true
         > "$LOG_FILE" 2>/dev/null || true
         echo "--> Launching CARLA server on port 2000 (tmux: carla_server)..."
         LAUNCH_CMD="/workspace/carla/CarlaUE4.sh -carla-rpc-port=2000 -port=2000 -RenderOffScreen -nosound -quality-level=Low -benchmark -fps=20"
@@ -295,16 +296,20 @@ while true; do
         # 3. Verify CARLA is actually responding on port 2000 before launching training
         echo -n "--> Waiting for CARLA RPC server to accept connections on port 2000"
         carla_ready=false
-        for i in $(seq 1 40); do
+        for i in $(seq 1 45); do
             echo -n "."
             if [ "$i" -ge 4 ]; then
-                if ! tmux has-session -t carla_server 2>/dev/null || ! pgrep -f "CarlaUE4.*port=2000" >/dev/null 2>&1; then
+                if ! tmux has-session -t carla_server 2>/dev/null; then
                     echo ""
-                    echo "⚠️  CARLA process died unexpectedly!"
+                    echo "⚠️  CARLA process terminated unexpectedly!"
                     if [ -f "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
                         echo "--- Last 20 lines of $LOG_FILE ---"
                         tail -n 20 "$LOG_FILE"
                         echo "-----------------------------------"
+                    elif [ -f "/workspace/carla/CarlaUE4/Saved/Logs/CarlaUE4.log" ]; then
+                        echo "--- Last 20 lines of CarlaUE4.log ---"
+                        tail -n 20 "/workspace/carla/CarlaUE4/Saved/Logs/CarlaUE4.log"
+                        echo "-------------------------------------"
                     fi
                     break
                 fi
@@ -340,20 +345,25 @@ v = c.get_server_version()
             tmux kill-session -t carla_server 2>/dev/null || true
             fuser -k -9 2000/tcp 2001/tcp 2002/tcp 2>/dev/null || true
             sleep 2
+            touch "$LOG_FILE" && chmod 666 "$LOG_FILE" 2>/dev/null || true
             > "$LOG_FILE" 2>/dev/null || true
             tmux new-session -d -s carla_server \
                 "su -s /bin/bash carlauser -c '$CARLA_USER_ENV; $LAUNCH_CMD' > $LOG_FILE 2>&1"
             echo -n "--> Waiting for CARLA server on port 2000 (Retry)"
-            for i in $(seq 1 30); do
+            for i in $(seq 1 40); do
                 echo -n "."
                 if [ "$i" -ge 4 ]; then
-                    if ! tmux has-session -t carla_server 2>/dev/null || ! pgrep -f "CarlaUE4.*port=2000" >/dev/null 2>&1; then
+                    if ! tmux has-session -t carla_server 2>/dev/null; then
                         echo ""
                         echo "⚠️  Retry CARLA process died!"
                         if [ -f "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
                             echo "--- Last 20 lines of $LOG_FILE ---"
                             tail -n 20 "$LOG_FILE"
                             echo "-----------------------------------"
+                        elif [ -f "/workspace/carla/CarlaUE4/Saved/Logs/CarlaUE4.log" ]; then
+                            echo "--- Last 20 lines of CarlaUE4.log ---"
+                            tail -n 20 "/workspace/carla/CarlaUE4/Saved/Logs/CarlaUE4.log"
+                            echo "-------------------------------------"
                         fi
                         break
                     fi
@@ -389,6 +399,10 @@ v = c.get_server_version()
                 echo "--- Last 25 lines of $LOG_FILE ---"
                 tail -n 25 "$LOG_FILE"
                 echo "-----------------------------------"
+            elif [ -f "/workspace/carla/CarlaUE4/Saved/Logs/CarlaUE4.log" ]; then
+                echo "--- Last 25 lines of CarlaUE4.log ---"
+                tail -n 25 "/workspace/carla/CarlaUE4/Saved/Logs/CarlaUE4.log"
+                echo "-------------------------------------"
             fi
             sleep 10
             continue
