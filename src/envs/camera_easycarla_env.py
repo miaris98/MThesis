@@ -154,7 +154,6 @@ class CameraEasyCarlaEnv(gym.Env):
                     self.easy_env = CarlaEnv(params)
                     break
                 except Exception as e:
-                    print(f"⚠️ [_init_easy_env Port {params.get('port', 2000)} Attempt {attempt+1}/10 Error]: {e}", flush=True)
                     if attempt == 9:
                         raise
                     time.sleep(2.0)

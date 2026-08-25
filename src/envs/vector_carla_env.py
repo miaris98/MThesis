@@ -52,7 +52,6 @@ def _carla_worker(remote: Any, parent_remote: Any, env_factory: Any, worker_id: 
             env = env_factory()
             break
         except Exception as e:
-            print(f"⚠️ [Worker {worker_id} Port {getattr(env_factory, 'port', 'unknown')} Attempt {attempt+1}/10 Error]: {e}", flush=True)
             if attempt == 9:
                 import traceback
                 print(f"[Worker {worker_id} Fatal Init Error] {e}\n{traceback.format_exc()}", flush=True)

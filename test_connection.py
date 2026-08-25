@@ -18,7 +18,7 @@ def main():
         print(f"--> Restarting CARLA server session on map {args.town}...")
         os.system("pkill -9 -f CarlaUE4 2>/dev/null || true")
         os.system("chmod 1777 /tmp; chmod 700 /tmp/tmux-*; chown root:root /tmp/tmux-0; chmod -R 777 /workspace/carla /dev/dri; chmod -R 666 /dev/nvidia* 2>/dev/null || true")
-        os.system(f"tmux new-session -d -s carla_server \"su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port={args.port} -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
+        os.system(f"tmux new-session -d -s carla_server \"su carlauser -c 'export SDL_VIDEODRIVER=offscreen; /workspace/carla/CarlaUE4.sh /Game/Carla/Maps/{args.town} -carla-rpc-port={args.port} -port={args.port} -RenderOffScreen -nosound -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
         time.sleep(10)
 
     # Auto-add local CARLA 0.9.15 client package from PythonAPI dist
