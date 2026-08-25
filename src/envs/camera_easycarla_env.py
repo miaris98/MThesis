@@ -244,7 +244,7 @@ class CameraEasyCarlaEnv(gym.Env):
         ego_alive = self.sensor_mgr.are_all_alive(getattr(self.easy_env, 'ego', None))
 
         # Fast in-place reset (<0.01s) to prevent full CARLA actor teardown & recreation bottleneck
-        if ego_alive and (self.episode_count % 100 != 0):
+        if ego_alive:
             try:
                 self.easy_env.ego.set_simulate_physics(False)
                 if not self.spawn_points and self.world_map is not None:
