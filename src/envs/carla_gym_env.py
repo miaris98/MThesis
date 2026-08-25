@@ -1,7 +1,15 @@
 """Standalone CarlaGymEnv implementation for native CARLA clients."""
+import os
+import sys
 import time
 import math
 import random
+import warnings
+
+# Completely silence runtime, deprecation, and gymnasium warnings
+warnings.filterwarnings("ignore")
+os.environ["PYTHONWARNINGS"] = "ignore"
+
 from typing import Dict, Any, Tuple, Optional
 import numpy as np
 

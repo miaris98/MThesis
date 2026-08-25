@@ -1,9 +1,16 @@
 """CameraEasyCarlaEnv: Gymnasium wrapper for vision-based RL with zero-latency in-place reset."""
 import os
+import sys
 import time
 import math
 import random
 import threading
+import warnings
+
+# Completely silence runtime, deprecation, and gymnasium warnings
+warnings.filterwarnings("ignore")
+os.environ["PYTHONWARNINGS"] = "ignore"
+
 from typing import Dict, Any, Tuple, Optional
 import numpy as np
 
