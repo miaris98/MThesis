@@ -438,7 +438,7 @@ v = c.get_server_version()
     export NUMEXPR_NUM_THREADS=1
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-    "$PYTHON_BIN" train_rl_agent.py \
+    "$PYTHON_BIN" -W ignore train_rl_agent.py \
         --env-type camera_easycarla \
         --num-envs "$NUM_ENVS" \
         --carla-ports "$PORTS_CSV" \

@@ -38,9 +38,22 @@ except ImportError:
 
 try:
     from easycarla.envs.carla_env import CarlaEnv
+    # Class-level patches to completely eliminate raw unformatted stdout prints across all instances
+    def _silent_collision(self, event):
+        self._is_collision = True
+        if hasattr(self, 'collision_hist') and self.collision_hist is not None:
+            self.collision_hist.append(event)
+    CarlaEnv._on_collision = _silent_collision
+
+    def _silent_invasion(self, event):
+        self._is_off_road = True
+    CarlaEnv._on_lane_invasion = _silent_invasion
+    CarlaEnv._on_invasion = _silent_invasion
 except ImportError:
     try:
         from CarlaEnv import CarlaEnv
+        CarlaEnv._on_collision = lambda self, event: setattr(self, '_is_collision', True)
+        CarlaEnv._on_lane_invasion = lambda self, event: setattr(self, '_is_off_road', True)
     except ImportError:
         CarlaEnv = object
 
