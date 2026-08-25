@@ -96,7 +96,12 @@ export CUDA_MODULE_LOADING=LAZY
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
 # Ensure required tracking packages exist in target environment
-"$PYTHON_BIN" -c "import tensorboard, mlflow" 2>/dev/null || "$PYTHON_BIN" -m pip install tensorboard mlflow 2>/dev/null || true
+export PYTHONWARNINGS="ignore"
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
 
 echo "=============================================================="
 echo "   🔄 Starting Multi-CARLA Auto-Restart Training Supervisor   "
@@ -220,9 +225,9 @@ while true; do
         P=${PORTS[$i]}
         fuser -k ${P}/tcp $((P+1))/tcp $((P+2))/tcp 2>/dev/null || true
     done
-    sleep 4
+    sleep 3
 
-    # 2. Launch each CARLA server on its assigned port
+    # 2. Launch all CARLA servers in parallel
     for ((i=0; i<NUM_ENVS; i++)); do
         PORT=${PORTS[$i]}
         SESSION_NAME="carla_server_${i}"
@@ -231,32 +236,24 @@ while true; do
         
         tmux new-session -d -s "$SESSION_NAME" \
             "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -quality-level=Low -benchmark -fps=20' > $LOG_FILE 2>&1"
-        sleep 4
-
-        # Fallback to OpenGL if Vulkan fails
-        if grep -i -E "Illegal instruction|Fatal error|Signal 11" "$LOG_FILE" >/dev/null 2>&1 || ! pgrep -f "CarlaUE4.*-carla-port=${PORT}" >/dev/null 2>&1; then
-            echo "⚠️  Vulkan failed for server on port ${PORT}. Falling back to OpenGL mode..."
-            tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
-            sleep 1
-            tmux new-session -d -s "$SESSION_NAME" \
-                "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -opengl -quality-level=Low -benchmark -fps=20' > $LOG_FILE 2>&1"
-            sleep 6
-        fi
     done
+    sleep 5
 
     # 3. Health check all CARLA server instances
     echo "--> Probing all $NUM_ENVS CARLA server instances..."
     all_ready=true
     for ((i=0; i<NUM_ENVS; i++)); do
         PORT=${PORTS[$i]}
+        SESSION_NAME="carla_server_${i}"
+        LOG_FILE="/workspace/carla_server_${PORT}.log"
         ready=false
-        for attempt_check in $(seq 1 30); do
+        for attempt_check in $(seq 1 25); do
             if "$PYTHON_BIN" -c "
 import sys, glob
 for e in glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg'): sys.path.insert(0, e)
 import carla
 c = carla.Client('127.0.0.1', $PORT)
-c.set_timeout(5.0)
+c.set_timeout(3.0)
 v = c.get_server_version()
 print(f'CARLA on port $PORT ready: {v}')
 " 2>/dev/null; then
@@ -266,8 +263,36 @@ print(f'CARLA on port $PORT ready: {v}')
             fi
             sleep 2
         done
+
+        # If Vulkan didn't respond in 50s, fallback to OpenGL for this instance
         if [ "$ready" = false ]; then
-            echo "⚠️  CARLA Server on port $PORT failed to respond after 60s."
+            echo "⚠️  CARLA on port $PORT not responding with Vulkan. Retrying with OpenGL mode..."
+            tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
+            fuser -k ${PORT}/tcp $((PORT+1))/tcp $((PORT+2))/tcp 2>/dev/null || true
+            sleep 2
+            tmux new-session -d -s "$SESSION_NAME" \
+                "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -opengl -quality-level=Low -benchmark -fps=20' > $LOG_FILE 2>&1"
+            sleep 8
+            for attempt_check in $(seq 1 20); do
+                if "$PYTHON_BIN" -c "
+import sys, glob
+for e in glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg'): sys.path.insert(0, e)
+import carla
+c = carla.Client('127.0.0.1', $PORT)
+c.set_timeout(3.0)
+v = c.get_server_version()
+print(f'CARLA on port $PORT ready: {v}')
+" 2>/dev/null; then
+                    ready=true
+                    echo "✓ CARLA Server on port $PORT (OpenGL) is online and verified!"
+                    break
+                fi
+                sleep 2
+            done
+        fi
+
+        if [ "$ready" = false ]; then
+            echo "⚠️  CARLA Server on port $PORT failed to respond after retry."
             all_ready=false
             break
         fi
