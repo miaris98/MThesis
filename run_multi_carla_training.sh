@@ -219,17 +219,18 @@ while true; do
     # 1. Clean up stale processes and release GPU memory
     echo "--> Cleaning up stale training and CARLA processes..."
     pkill -9 -f train_rl_agent 2>/dev/null || true
+    pkill -u carlauser -9 2>/dev/null || true
     pkill -9 -f CarlaUE4 2>/dev/null || true
     pkill -9 -f CarlaUE4-Linux-Shipping 2>/dev/null || true
+    killall -9 CarlaUE4-Linux-Shipping CarlaUE4 CarlaUE4.sh 2>/dev/null || true
     for ((i=0; i<NUM_ENVS; i++)); do
         tmux kill-session -t "carla_server_${i}" 2>/dev/null || true
         P=${PORTS[$i]}
-        fuser -k ${P}/tcp $((P+1))/tcp $((P+2))/tcp 2>/dev/null || true
+        fuser -k -9 ${P}/tcp $((P+1))/tcp $((P+2))/tcp 2>/dev/null || true
     done
-    nvidia-smi --gpu-reset 2>/dev/null || true
-    sleep 5  # Allow driver to fully release GPU Vulkan contexts
+    sleep 3  # Allow OS & GPU driver to release sockets and Vulkan contexts
 
-    # 2. Launch CARLA servers (staggered by 3s to prevent Vulkan driver race conditions)
+    # 2. Launch CARLA servers (staggered by 2s to prevent Vulkan driver race conditions)
     for ((i=0; i<NUM_ENVS; i++)); do
         PORT=${PORTS[$i]}
         SESSION_NAME="carla_server_${i}"
@@ -238,9 +239,9 @@ while true; do
         
         tmux new-session -d -s "$SESSION_NAME" \
             "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -quality-level=Low -benchmark -fps=20' > $LOG_FILE 2>&1"
-        sleep 3
+        sleep 2
     done
-    sleep 4
+    sleep 3
 
     # 3. Health check all CARLA server instances
     echo "--> Probing all $NUM_ENVS CARLA server instances..."
@@ -253,12 +254,12 @@ while true; do
         ready=false
         for attempt_check in $(seq 1 30); do
             echo -n "."
-            if "$PYTHON_BIN" -c "
+            if "$PYTHON_BIN" -W ignore -c "
 import sys, glob
 for e in glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg'): sys.path.insert(0, e)
 import carla
 c = carla.Client('127.0.0.1', $PORT)
-c.set_timeout(2.0)
+c.set_timeout(1.5)
 v = c.get_server_version()
 " 2>/dev/null; then
                 ready=true
@@ -266,27 +267,27 @@ v = c.get_server_version()
                 echo "✓ CARLA Server on port $PORT is online and verified!"
                 break
             fi
-            sleep 2
+            sleep 1
         done
 
-        # If Vulkan didn't respond in 60s, fallback to OpenGL for this instance
+        # If Vulkan didn't respond in 30s, fallback to OpenGL for this instance
         if [ "$ready" = false ]; then
             echo ""
             echo "⚠️  CARLA on port $PORT not responding with Vulkan. Retrying with OpenGL mode..."
             tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
-            fuser -k ${PORT}/tcp $((PORT+1))/tcp $((PORT+2))/tcp 2>/dev/null || true
+            fuser -k -9 ${PORT}/tcp $((PORT+1))/tcp $((PORT+2))/tcp 2>/dev/null || true
             sleep 2
             tmux new-session -d -s "$SESSION_NAME" \
                 "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -opengl -quality-level=Low -benchmark -fps=20' > $LOG_FILE 2>&1"
             echo -n "   [CARLA #$((i+1))/$NUM_ENVS | Port $PORT (OpenGL)] Waiting for initialization"
             for attempt_check in $(seq 1 25); do
                 echo -n "."
-                if "$PYTHON_BIN" -c "
+                if "$PYTHON_BIN" -W ignore -c "
 import sys, glob
 for e in glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg'): sys.path.insert(0, e)
 import carla
 c = carla.Client('127.0.0.1', $PORT)
-c.set_timeout(2.0)
+c.set_timeout(1.5)
 v = c.get_server_version()
 " 2>/dev/null; then
                     ready=true
@@ -294,7 +295,7 @@ v = c.get_server_version()
                     echo "✓ CARLA Server on port $PORT (OpenGL) is online and verified!"
                     break
                 fi
-                sleep 2
+                sleep 1
             done
         fi
 
