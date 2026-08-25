@@ -16,9 +16,9 @@ from src.utils.video_renderer import VideoRenderer
 
 def record_evaluation_video():
     parser = argparse.ArgumentParser(description="Record CARLA RL Evaluation Video with HUD Dashboard.")
-    parser.add_argument("--checkpoint-path", type=str, default="/workspace/checkpoints/ppo_carla_best.pth")
+    parser.add_argument("--checkpoint-path", type=str, default=None)
     parser.add_argument("--backbone", type=str, default="lav")
-    parser.add_argument("--policy-arch", type=str, default="qwen500m")
+    parser.add_argument("--policy-arch", type=str, default="qwen100m")
     parser.add_argument("--weights-path", type=str, default=None)
     parser.add_argument("--town", type=str, default="Town10HD_Opt")
     parser.add_argument("--num-vehicles", type=int, default=3)
@@ -30,6 +30,29 @@ def record_evaluation_video():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
+    # Auto-detect pretrained backbone weights
+    if not args.weights_path:
+        for wp in [
+            "/workspace/pretrained_carla/model_0030_0.pth",
+            "./papers_and_code/LAV/lav_pretrained.pth",
+            "/workspace/MThesis/papers_and_code/LAV/lav_pretrained.pth"
+        ]:
+            if os.path.exists(wp):
+                args.weights_path = wp
+                break
+
+    # Auto-detect checkpoint
+    if not args.checkpoint_path:
+        for cp in [
+            "/workspace/checkpoints/ppo_carla_best.pth",
+            "/workspace/checkpoints/ppo_carla_latest.pth",
+            "./checkpoints/ppo_carla_best.pth",
+            "./checkpoints/ppo_carla_latest.pth"
+        ]:
+            if os.path.exists(cp):
+                args.checkpoint_path = cp
+                break
+
     # 1. Initialize Environment
     params = {
         'number_of_vehicles': args.num_vehicles,
@@ -55,9 +78,11 @@ def record_evaluation_video():
         weights_path=args.weights_path
     ).to(device)
 
-    if os.path.exists(args.checkpoint_path):
+    if args.checkpoint_path and os.path.exists(args.checkpoint_path):
         print(f"--> Loading trained checkpoint: {args.checkpoint_path}")
         agent.load_state_dict(torch.load(args.checkpoint_path, map_location=device), strict=False)
+    else:
+        print("⚠️  No checkpoint file found; recording with baseline model.")
     agent.eval()
 
     # 3. Setup Video Writer
