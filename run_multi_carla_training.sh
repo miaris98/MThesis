@@ -216,18 +216,20 @@ while true; do
     echo " 🚀 Launching Multi-CARLA Training Session (Run #$attempt)..."
     echo "--------------------------------------------------------------"
 
-    # 1. Clean up stale processes
+    # 1. Clean up stale processes and release GPU memory
     echo "--> Cleaning up stale training and CARLA processes..."
     pkill -9 -f train_rl_agent 2>/dev/null || true
     pkill -9 -f CarlaUE4 2>/dev/null || true
+    pkill -9 -f CarlaUE4-Linux-Shipping 2>/dev/null || true
     for ((i=0; i<NUM_ENVS; i++)); do
         tmux kill-session -t "carla_server_${i}" 2>/dev/null || true
         P=${PORTS[$i]}
         fuser -k ${P}/tcp $((P+1))/tcp $((P+2))/tcp 2>/dev/null || true
     done
-    sleep 3
+    nvidia-smi --gpu-reset 2>/dev/null || true
+    sleep 5  # Allow driver to fully release GPU Vulkan contexts
 
-    # 2. Launch all CARLA servers in parallel
+    # 2. Launch CARLA servers (staggered by 3s to prevent Vulkan driver race conditions)
     for ((i=0; i<NUM_ENVS; i++)); do
         PORT=${PORTS[$i]}
         SESSION_NAME="carla_server_${i}"
@@ -236,8 +238,9 @@ while true; do
         
         tmux new-session -d -s "$SESSION_NAME" \
             "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -quality-level=Low -benchmark -fps=20' > $LOG_FILE 2>&1"
+        sleep 3
     done
-    sleep 5
+    sleep 4
 
     # 3. Health check all CARLA server instances
     echo "--> Probing all $NUM_ENVS CARLA server instances..."
