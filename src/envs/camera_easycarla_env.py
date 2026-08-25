@@ -94,9 +94,18 @@ class CameraEasyCarlaEnv(gym.Env):
         port = self.params.get('port', 2000)
         wait_for_carla_server(port, max_wait=60)
 
-        self.carla_client = carla.Client('127.0.0.1', port) if carla is not None else None
-        if self.carla_client:
-            self.carla_client.set_timeout(120.0)
+        self.carla_client = None
+        if carla is not None:
+            for attempt in range(10):
+                try:
+                    self.carla_client = carla.Client('127.0.0.1', port)
+                    self.carla_client.set_timeout(120.0)
+                    _ = self.carla_client.get_server_version()
+                    break
+                except Exception:
+                    if attempt == 9:
+                        raise
+                    time.sleep(1.0)
 
         self._init_easy_env(self.params)
         self._optimize_easy_env()
@@ -112,7 +121,7 @@ class CameraEasyCarlaEnv(gym.Env):
         })
 
     def _init_easy_env(self, params: Dict[str, Any]) -> None:
-        """Initialize EasyCarla environment with safe 120s timeout and map preservation."""
+        """Initialize EasyCarla environment with safe 120s timeout, retries, and map preservation."""
         if carla is None:
             self.easy_env = None
             return
@@ -120,7 +129,14 @@ class CameraEasyCarlaEnv(gym.Env):
         orig_set_timeout = carla.Client.set_timeout
         carla.Client.set_timeout = lambda s, t: orig_set_timeout(s, max(t, 120.0))
         try:
-            self.easy_env = CarlaEnv(params)
+            for attempt in range(10):
+                try:
+                    self.easy_env = CarlaEnv(params)
+                    break
+                except Exception as e:
+                    if attempt == 9:
+                        raise
+                    time.sleep(1.5)
         finally:
             carla.Client.set_timeout = orig_set_timeout
 

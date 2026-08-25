@@ -23,9 +23,10 @@ from src.envs.carla_gym_env import CarlaGymEnv
 from src.config.training_config import TrainingConfig
 
 
-def _carla_worker(remote: Any, parent_remote: Any, env_factory: Any) -> None:
+def _carla_worker(remote: Any, parent_remote: Any, env_factory: Any, worker_id: int = 0) -> None:
     """Worker process loop communicating with a single dedicated CARLA server instance."""
     import os
+    import time
     import warnings
     warnings.filterwarnings("ignore")
     os.environ["OMP_NUM_THREADS"] = "1"
@@ -35,7 +36,22 @@ def _carla_worker(remote: Any, parent_remote: Any, env_factory: Any) -> None:
     os.environ["NUMEXPR_NUM_THREADS"] = "1"
     
     parent_remote.close()
-    env = env_factory()
+
+    # Stagger connection to avoid port hammering
+    time.sleep(worker_id * 1.5)
+
+    env = None
+    for attempt in range(10):
+        try:
+            env = env_factory()
+            break
+        except Exception as e:
+            if attempt == 9:
+                import traceback
+                print(f"[Worker {worker_id} Fatal Init Error] {e}\n{traceback.format_exc()}", flush=True)
+                raise
+            time.sleep(2.0)
+
     try:
         while True:
             cmd, data = remote.recv()
@@ -67,10 +83,11 @@ def _carla_worker(remote: Any, parent_remote: Any, env_factory: Any) -> None:
                 raise NotImplementedError(f"Unknown command received by worker: {cmd}")
     except Exception as e:
         import traceback
-        print(f"[Worker Error] {e}\n{traceback.format_exc()}", flush=True)
+        print(f"[Worker {worker_id} Error] {e}\n{traceback.format_exc()}", flush=True)
     finally:
         try:
-            env.close()
+            if env is not None:
+                env.close()
         except Exception:
             pass
 
@@ -88,8 +105,8 @@ class SubprocCarlaVectorEnv:
         ctx = mp.get_context("spawn")
         self.remotes, self.work_remotes = zip(*[ctx.Pipe() for _ in range(self.num_envs)])
         self.ps = [
-            ctx.Process(target=_carla_worker, args=(work_remote, remote, factory), daemon=True)
-            for (work_remote, remote, factory) in zip(self.work_remotes, self.remotes, env_factories)
+            ctx.Process(target=_carla_worker, args=(work_remote, remote, factory, i), daemon=True)
+            for i, (work_remote, remote, factory) in enumerate(zip(self.work_remotes, self.remotes, env_factories))
         ]
         
         for p in self.ps:

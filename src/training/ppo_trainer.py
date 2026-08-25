@@ -106,9 +106,33 @@ class PPOTrainer:
                 self.best_reward = st.get("best_episode_reward", -float("inf"))
                 print(f"[Resume] Resuming from step {self.global_step}/{self.cfg.total_steps}")
 
+    def _recover_env(self) -> Dict[str, np.ndarray]:
+        """Seamlessly reconnect and recover parallel CARLA environments without reloading neural models."""
+        print("🔄 [In-Process Recovery] Reconnecting parallel CARLA environment workers...")
+        try:
+            self.env.close()
+        except Exception:
+            pass
+        time.sleep(2.0)
+        for attempt in range(5):
+            try:
+                self.env = create_vector_carla_env(self.cfg)
+                obs, _ = self.env.reset()
+                print("✓ [In-Process Recovery] CARLA environment workers successfully re-established!")
+                return obs
+            except Exception as e:
+                print(f"--> [Recovery Attempt {attempt+1}/5 Failed: {e}] Retrying in 3s...")
+                time.sleep(3.0)
+        raise RuntimeError("Failed to recover CARLA environment after 5 attempts.")
+
     def train(self) -> None:
         """Main PPO training loop with vectorized trajectory rollouts and policy updates."""
-        obs, _ = self.env.reset()
+        try:
+            obs, _ = self.env.reset()
+        except Exception as e:
+            print(f"⚠️ [Initial Environment Reset Failed: {e}] Attempting in-process recovery...")
+            obs = self._recover_env()
+
         buffer = RolloutBuffer(
             buffer_size=self.cfg.rollout_steps,
             gamma=self.cfg.gamma,
@@ -148,7 +172,13 @@ class PPOTrainer:
                     )
 
                 action_np = action.cpu().numpy()
-                next_obs, rewards, term, trunc, infos = self.env.step(action_np)
+                try:
+                    next_obs, rewards, term, trunc, infos = self.env.step(action_np)
+                except Exception as e:
+                    print(f"⚠️ [Environment Step Exception: {e}] Triggering in-process environment recovery...")
+                    obs = self._recover_env()
+                    continue
+
                 dones = term | trunc
 
                 raw_r = np.array(rewards, dtype=np.float32)
