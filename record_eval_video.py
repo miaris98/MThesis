@@ -146,7 +146,24 @@ def record_evaluation_video():
 
     video_writer.release()
     env.close()
-    print(f"✓ Evaluation Video successfully recorded & saved to {args.output_video}!")
+
+    # Transcode to H.264 for seamless HTML5 in-browser and JupyterLab playback
+    try:
+        import subprocess
+        h264_tmp = args.output_video.replace(".mp4", "_h264_tmp.mp4")
+        cmd = [
+            "ffmpeg", "-y", "-i", args.output_video,
+            "-vcodec", "libx264", "-pix_fmt", "yuv420p",
+            "-movflags", "faststart", h264_tmp
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if res.returncode == 0 and os.path.exists(h264_tmp):
+            os.replace(h264_tmp, args.output_video)
+            print("✓ Video successfully transcoded to browser/Jupyter-compatible H.264 format!")
+    except Exception:
+        pass
+
+    print(f"✓ Evaluation Video ready for playback: {args.output_video}")
 
 
 if __name__ == "__main__":
