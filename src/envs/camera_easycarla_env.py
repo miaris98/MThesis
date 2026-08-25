@@ -182,6 +182,9 @@ class CameraEasyCarlaEnv(gym.Env):
             'waypoints': np.zeros(36, dtype=np.float32)
         }
 
+        self.world_map = self.easy_env.world.get_map() if hasattr(self.easy_env, 'world') and self.easy_env.world is not None else None
+        self.spawn_points = list(self.world_map.get_spawn_points()) if self.world_map is not None else []
+
         # Override collision and lane invasion callbacks to eliminate raw unformatted prints
         def clean_on_collision(event):
             self.easy_env._is_collision = True
@@ -227,13 +230,15 @@ class CameraEasyCarlaEnv(gym.Env):
 
         ego_alive = self.sensor_mgr.are_all_alive(getattr(self.easy_env, 'ego', None))
 
-        # Fast in-place reset (99% of episodes) to prevent RPC socket teardown bottleneck
+        # Fast in-place reset (<0.01s) to prevent full CARLA actor teardown & recreation bottleneck
         if ego_alive and (self.episode_count % 100 != 0):
             try:
                 self.easy_env.ego.set_simulate_physics(False)
-                spawn_points = self.easy_env.map.get_spawn_points()
-                if spawn_points:
-                    sp = random.choice(spawn_points)
+                if not self.spawn_points and self.world_map is not None:
+                    self.spawn_points = list(self.world_map.get_spawn_points())
+
+                if self.spawn_points:
+                    sp = random.choice(self.spawn_points)
                     sp.location.z += 0.5
                     self.easy_env.ego.set_transform(sp)
 
@@ -266,6 +271,7 @@ class CameraEasyCarlaEnv(gym.Env):
         except Exception:
             pass
 
+        self._optimize_easy_env()
         self.sensor_mgr.setup_cameras(self.easy_env.world, self.easy_env.ego)
         try:
             if hasattr(self.easy_env, 'world') and self.easy_env.world is not None:
@@ -301,10 +307,10 @@ class CameraEasyCarlaEnv(gym.Env):
             "is_off_road": self.easy_env._is_off_road, "time_step": self.easy_env.time_step
         }
 
-        if hasattr(self.easy_env, 'ego') and self.easy_env.ego is not None:
+        if hasattr(self.easy_env, 'ego') and self.easy_env.ego is not None and self.world_map is not None:
             try:
                 tf = self.easy_env.ego.get_transform()
-                wp = self.easy_env.map.get_waypoint(tf.location)
+                wp = self.world_map.get_waypoint(tf.location)
                 if wp:
                     fwd = tf.get_forward_vector()
                     wp_fwd = wp.transform.get_forward_vector()
