@@ -266,14 +266,14 @@ if [ -z "$CLOUDFLARED_BIN" ]; then
     fi
 fi
 
-# --- Tunnel launch with reuse + retry on 429 rate-limit ---
+# --- Tunnel launch with tmux persistence, reuse + retry on 429 rate-limit ---
 CLOUDFLARE_URL=""
 
-# 1) Reuse: check if a tunnel is already running with a valid URL
-if pgrep -f "cloudflared tunnel" >/dev/null 2>&1 && [ -f /tmp/mlflow_tunnel.log ]; then
+# 1) Reuse: check if tmux 'mlflow_tunnel' session is already running with a valid URL
+if tmux has-session -t mlflow_tunnel 2>/dev/null && [ -f /tmp/mlflow_tunnel.log ]; then
     CLOUDFLARE_URL=$(extract_cf_url /tmp/mlflow_tunnel.log) || true
     if [ -n "$CLOUDFLARE_URL" ]; then
-        echo "✓ Reusing existing Cloudflare tunnel: $CLOUDFLARE_URL"
+        echo "✓ Reusing active Cloudflare HTTPS tunnel from tmux session 'mlflow_tunnel': $CLOUDFLARE_URL"
     fi
 fi
 
@@ -281,14 +281,15 @@ fi
 if [ -z "$CLOUDFLARE_URL" ] && [ -f /tmp/mlflow_cf_url ]; then
     CACHED_URL=$(cat /tmp/mlflow_cf_url 2>/dev/null)
     # Verify the cached tunnel is still responding
-    if [ -n "$CACHED_URL" ] && curl -s --max-time 3 "$CACHED_URL" >/dev/null 2>&1; then
+    if [ -n "$CACHED_URL" ] && curl -s -k --max-time 3 -I "$CACHED_URL" >/dev/null 2>&1; then
         CLOUDFLARE_URL="$CACHED_URL"
         echo "✓ Reusing cached Cloudflare tunnel: $CLOUDFLARE_URL"
     fi
 fi
 
-# 2) Launch new tunnel only if no valid URL was found
+# 2) Launch new tunnel in protected tmux session if none exists
 if [ -z "$CLOUDFLARE_URL" ] && [ -n "$CLOUDFLARED_BIN" ]; then
+    tmux kill-session -t mlflow_tunnel 2>/dev/null || true
     pkill -9 -f "cloudflared tunnel" 2>/dev/null || true
     sleep 1
 
@@ -297,18 +298,17 @@ if [ -z "$CLOUDFLARE_URL" ] && [ -n "$CLOUDFLARED_BIN" ]; then
     
     for attempt_num in $(seq 1 $MAX_RETRIES); do
         rm -f /tmp/mlflow_tunnel.log
-        echo "--> 🌐 Launching Cloudflare HTTPS tunnel for MLflow (port ${MLFLOW_PORT}) [attempt ${attempt_num}/${MAX_RETRIES}]..."
-        nohup "$CLOUDFLARED_BIN" tunnel --url "http://127.0.0.1:${MLFLOW_PORT}" --no-autoupdate > /tmp/mlflow_tunnel.log 2>&1 &
-        CLOUDFLARED_PID=$!
+        echo "--> 🌐 Launching Cloudflare HTTPS tunnel in protected tmux 'mlflow_tunnel' (port ${MLFLOW_PORT}) [attempt ${attempt_num}/${MAX_RETRIES}]..."
+        tmux new-session -d -s mlflow_tunnel \
+            "$CLOUDFLARED_BIN tunnel --url http://127.0.0.1:${MLFLOW_PORT} --no-autoupdate > /tmp/mlflow_tunnel.log 2>&1"
 
-        # Wait up to 15 seconds for URL to appear
+        # Wait up to 15 seconds for URL to appear in log
         for i in $(seq 1 15); do
             if [ -f /tmp/mlflow_tunnel.log ]; then
                 CLOUDFLARE_URL=$(extract_cf_url /tmp/mlflow_tunnel.log) || true
                 [ -n "$CLOUDFLARE_URL" ] && break 2  # break both loops
             fi
-            # Check if process died
-            if ! kill -0 $CLOUDFLARED_PID 2>/dev/null; then
+            if ! tmux has-session -t mlflow_tunnel 2>/dev/null; then
                 break
             fi
             sleep 1
@@ -318,11 +318,13 @@ if [ -z "$CLOUDFLARE_URL" ] && [ -n "$CLOUDFLARED_BIN" ]; then
         if [ -f /tmp/mlflow_tunnel.log ] && grep -q "429\|Too Many Requests\|rate" /tmp/mlflow_tunnel.log 2>/dev/null; then
             DELAY=${RETRY_DELAYS[$((attempt_num - 1))]}
             echo "--> ⚠️  Cloudflare rate-limited (429). Waiting ${DELAY}s before retry..."
+            tmux kill-session -t mlflow_tunnel 2>/dev/null || true
             pkill -9 -f "cloudflared tunnel" 2>/dev/null || true
             sleep "$DELAY"
-        elif [ -f /tmp/mlflow_tunnel.log ] && ! kill -0 $CLOUDFLARED_PID 2>/dev/null; then
+        elif [ -f /tmp/mlflow_tunnel.log ] && ! tmux has-session -t mlflow_tunnel 2>/dev/null; then
             echo "--> [Note] cloudflared exited unexpectedly:"
             head -n 3 /tmp/mlflow_tunnel.log 2>/dev/null | sed 's/^/    /' || true
+            tmux kill-session -t mlflow_tunnel 2>/dev/null || true
             pkill -9 -f "cloudflared tunnel" 2>/dev/null || true
             if [ "$attempt_num" -lt "$MAX_RETRIES" ]; then
                 DELAY=${RETRY_DELAYS[$((attempt_num - 1))]}
@@ -330,7 +332,7 @@ if [ -z "$CLOUDFLARE_URL" ] && [ -n "$CLOUDFLARED_BIN" ]; then
                 sleep "$DELAY"
             fi
         else
-            # Timed out waiting, kill and retry
+            tmux kill-session -t mlflow_tunnel 2>/dev/null || true
             pkill -9 -f "cloudflared tunnel" 2>/dev/null || true
             if [ "$attempt_num" -lt "$MAX_RETRIES" ]; then
                 echo "--> Timed out. Retrying..."
@@ -340,9 +342,16 @@ if [ -z "$CLOUDFLARE_URL" ] && [ -n "$CLOUDFLARED_BIN" ]; then
     done
 fi
 
-# Cache the URL for future restarts
+# 3) Wait for public DNS propagation & verify reachability
 if [ -n "$CLOUDFLARE_URL" ]; then
     echo "$CLOUDFLARE_URL" > /tmp/mlflow_cf_url
+    echo "--> Verifying Cloudflare public DNS propagation..."
+    for i in $(seq 1 10); do
+        if curl -s -k -m 3 -I "$CLOUDFLARE_URL" 2>/dev/null | grep -q -E "HTTP/|200|302|301|404|403|502|503"; then
+            break
+        fi
+        sleep 1
+    done
 fi
 
 echo "=============================================================="

@@ -114,8 +114,6 @@ class ExperimentLogger:
                 if self.cf_url:
                     print(f"✓ MLflow Tracking Active | Experiment: '{experiment_name}' | Run ID: {self.run_id}")
                     print(f"  👉 \033[1;32mlink to mlflow :     {self.cf_url}\033[0m")
-                    print(f"  👉 \033[1;32mLive Run Link:        {self.cf_url}/#/experiments/{self.exp_id}/runs/{self.run_id}\033[0m")
-                    print(f"  👉 \033[1;32mLive Metrics Chart:   {self.cf_url}/#/metric?runs=[%22{self.run_id}%22]&metric=%22Reward_Moving_Avg_10%22&experiments=[%22{self.exp_id}%22]\033[0m")
                 else:
                     print(f"✓ MLflow Tracking Active | Experiment: '{experiment_name}' | Run ID: {self.run_id} (Port {mlflow_port})")
             except Exception as e:
