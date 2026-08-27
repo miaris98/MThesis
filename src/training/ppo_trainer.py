@@ -51,6 +51,11 @@ class PPOTrainer:
         self.global_step, self.best_reward, self.best_moving_avg, self.patience_counter = 0, -float("inf"), -float("inf"), 0
         self.recent_rewards, self.early_stop_triggered, self.early_stop_reason = [], False, ""
         self.episode_count, self.train_start_time, self.last_progress_step, self.last_progress_time = 1, None, 0, None
+        self.last_p_loss, self.last_v_loss, self.last_entropy = None, None, None
+        self.last_kl, self.last_clip_frac, self.last_expl_var = None, None, None
+        self.last_sps, self.last_fps = 0.0, 0.0
+        self.last_artifact_sync_step = 0
+        self.artifact_sync_interval = 5000
         self._handle_checkpoints()
 
     def _init_cuda(self) -> None:
@@ -171,6 +176,26 @@ class PPOTrainer:
                         "raw_reward": round(float(raw_r[e]), 4),
                         "normalized_reward": round(float(norm_r[e]), 4),
                         "curriculum_alpha": round(float(curriculum_factor), 2),
+                        "r_speed": round(float(info_e.get("r_speed", 0.0)), 3),
+                        "r_heading": round(float(info_e.get("r_heading", 0.0)), 3),
+                        "r_lateral": round(float(info_e.get("r_lateral", 0.0)), 3),
+                        "r_boundary": round(float(info_e.get("r_boundary", 0.0)), 3),
+                        "r_steer": round(float(info_e.get("r_steer", 0.0)), 3),
+                        "r_comfort": round(float(info_e.get("r_comfort", 0.0)), 3),
+                        "r_wrong_way": round(float(info_e.get("r_wrong_way", 0.0)), 3),
+                        "r_light": round(float(info_e.get("r_light", 0.0)), 3),
+                        "r_obstacle": round(float(info_e.get("r_obstacle", 0.0)), 3),
+                        "r_ttc": round(float(info_e.get("r_ttc", 0.0)), 3),
+                        "r_idle": round(float(info_e.get("r_idle", 0.0)), 3),
+                        "r_stall": round(float(info_e.get("r_terminal", 0.0)), 3),
+                        "loss_policy": round(self.last_p_loss, 4) if self.last_p_loss is not None else "",
+                        "loss_value": round(self.last_v_loss, 4) if self.last_v_loss is not None else "",
+                        "loss_entropy": round(self.last_entropy, 4) if self.last_entropy is not None else "",
+                        "loss_approx_kl": round(self.last_kl, 4) if self.last_kl is not None else "",
+                        "loss_clip_fraction": round(self.last_clip_frac, 4) if self.last_clip_frac is not None else "",
+                        "loss_explained_variance": round(self.last_expl_var, 4) if self.last_expl_var is not None else "",
+                        "sps": round(self.last_sps, 1) if self.last_sps else "",
+                        "fps": round(self.last_fps, 1) if self.last_fps else "",
                         **hw, "is_collision": info_e.get("is_collision", False),
                         "is_off_road": info_e.get("is_off_road", False),
                         "termination_reason": info_e.get("termination_reason", "") if dones[e] else ""
@@ -323,18 +348,34 @@ class PPOTrainer:
 
         print(f"[{now_str} | PPO Policy Update] Step: {self.global_step:05d}/{self.cfg.total_steps} | Rollout: {sps:4.1f} Steps/s ({fps:4.1f} FPS) | PPO Opt: {ppo_elapsed*1000.0:5.1f}ms | Policy Loss: {mean_p_loss:+.4f} | Value Loss: {mean_v_loss:.4f} | KL: {mean_kl:.4f} | ExplVar: {expl_var:.2f}", flush=True)
 
+        self.last_p_loss = mean_p_loss
+        self.last_v_loss = mean_v_loss
+        self.last_entropy = mean_entropy
+        self.last_kl = mean_kl
+        self.last_clip_frac = mean_clip_frac
+        self.last_expl_var = expl_var
+        self.last_sps = sps
+        self.last_fps = fps
+
         latest_path = os.path.join(self.cfg.checkpoint_dir, "ppo_carla_latest.pth")
         torch.save(self.agent.state_dict(), latest_path)
         with open(os.path.join(self.cfg.checkpoint_dir, "train_state.json"), "w") as f:
             json.dump({"global_step": self.global_step, "best_episode_reward": float(self.best_reward)}, f, indent=2)
 
-    def _shutdown(self) -> None:
-        self.env.close()
-        self.csv_logger.close()
+        # Periodic MLflow artifact update (every 5000 steps)
+        self._sync_artifacts(force=False)
 
-        # Sync telemetry CSV and checkpoints as MLflow artifacts
-        if hasattr(self, 'csv_logger') and os.path.exists(self.csv_logger.filepath):
-            self.logger.log_artifact(self.csv_logger.filepath)
+    def _sync_artifacts(self, force: bool = False) -> None:
+        """Sync telemetry CSV and checkpoints to MLflow artifacts every 5000 steps or at shutdown."""
+        if not force and (self.global_step - self.last_artifact_sync_step) < self.artifact_sync_interval:
+            return
+
+        self.last_artifact_sync_step = self.global_step
+        if hasattr(self, 'csv_logger'):
+            self.csv_logger.flush()
+            if os.path.exists(self.csv_logger.filepath):
+                self.logger.log_artifact(self.csv_logger.filepath)
+
         best_path = os.path.join(self.cfg.checkpoint_dir, "ppo_carla_best.pth")
         if os.path.exists(best_path):
             self.logger.log_artifact(best_path)
@@ -345,5 +386,12 @@ class PPOTrainer:
         if os.path.exists(state_path):
             self.logger.log_artifact(state_path)
 
+        now_str = time.strftime("%H:%M:%S")
+        print(f"[{now_str}] 📦 [MLflow Artifact Sync] Synced training_telemetry.csv & checkpoints at step {self.global_step:05d}", flush=True)
+
+    def _shutdown(self) -> None:
+        self.env.close()
+        self.csv_logger.close()
+        self._sync_artifacts(force=True)
         self.logger.close()
         print("✓ Training Completed Successfully!")

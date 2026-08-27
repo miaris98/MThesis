@@ -17,6 +17,8 @@ class CSVTelemetryLogger:
             "raw_reward", "normalized_reward", "curriculum_alpha",
             "r_speed", "r_heading", "r_lateral", "r_boundary", "r_steer",
             "r_comfort", "r_wrong_way", "r_light", "r_obstacle", "r_ttc", "r_idle", "r_stall",
+            "loss_policy", "loss_value", "loss_entropy", "loss_approx_kl", "loss_clip_fraction", "loss_explained_variance",
+            "sps", "fps",
             "gpu_mem_used_mb", "gpu_mem_pct", "sys_cpu_pct", "sys_ram_used_gb",
             "is_collision", "is_off_road", "termination_reason"
         ]
