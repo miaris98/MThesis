@@ -103,9 +103,9 @@ class ExperimentLogger:
                     try:
                         with open("/tmp/mlflow_tunnel.log", "r") as f:
                             log_txt = f.read()
-                        m = re.findall(r'https://[-a-zA-Z0-9@:%._\+~#=]*\.trycloudflare\.com', log_txt)
+                        m = re.findall(r'https://[a-zA-Z0-9.-]+\.trycloudflare\.com', log_txt)
                         if m:
-                            self.cf_url = m[-1]
+                            self.cf_url = m[0]
                     except Exception:
                         pass
 

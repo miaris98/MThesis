@@ -212,34 +212,31 @@ fi
 
 CLOUDFLARE_URL=""
 if command -v cloudflared &>/dev/null; then
-    # Always refresh tunnel to ensure a fresh, active connection
-    tmux kill-session -t mlflow_tunnel 2>/dev/null || true
+    pkill -9 -f cloudflared 2>/dev/null || true
     rm -f /tmp/mlflow_tunnel.log
     echo "--> 🌐 Launching public Cloudflare HTTPS tunnel for MLflow (port ${MLFLOW_PORT})..."
-    tmux new-session -d -s mlflow_tunnel \
-        "cloudflared tunnel --url http://127.0.0.1:${MLFLOW_PORT} 2>&1 | tee /tmp/mlflow_tunnel.log"
-
-    echo "--> Waiting for Cloudflare public tunnel URL..."
-    for i in $(seq 1 15); do
+    nohup cloudflared tunnel --url "http://127.0.0.1:${MLFLOW_PORT}" --no-autoupdate > /tmp/mlflow_tunnel.log 2>&1 &
+    
+    echo "--> Waiting for Cloudflare public tunnel URL to generate..."
+    for i in $(seq 1 20); do
         if [ -f /tmp/mlflow_tunnel.log ]; then
-            CLOUDFLARE_URL=$(grep -o 'https://[-a-zA-Z0-9@:%._\+~#=]*\.trycloudflare\.com' /tmp/mlflow_tunnel.log | tail -n 1)
+            CLOUDFLARE_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/mlflow_tunnel.log | head -n 1)
             if [ -n "$CLOUDFLARE_URL" ]; then
                 break
             fi
         fi
-        sleep 1
+        sleep 0.5
     done
 fi
 
 echo "=============================================================="
 echo "   📊 MLFLOW DASHBOARD ONLINE (PORT ${MLFLOW_PORT})           "
 if [ -n "$CLOUDFLARE_URL" ]; then
-    echo "   👉 Public HTTPS URL:  $CLOUDFLARE_URL"
+    echo -e "   👉 \033[1;32mPublic HTTPS URL:  $CLOUDFLARE_URL\033[0m"
+    echo -e "   👉 \033[1;32mLive Metric Chart: ${CLOUDFLARE_URL}/#/metric?runs=[%22latest%22]&metric=%22Reward_Moving_Avg_10%22\033[0m"
 else
-    echo "   👉 Public HTTPS URL:  Check /tmp/mlflow_tunnel.log or open port ${MLFLOW_PORT} in Vast.ai Tunnels"
+    echo "   👉 Vast.ai Tunnel:    Open Port ${MLFLOW_PORT} in Vast.ai Tunnels UI"
 fi
-echo "   👉 Vast.ai Tunnel:    Open Port ${MLFLOW_PORT} in Vast.ai Tunnels UI"
-echo "   👉 Localhost URL:     http://127.0.0.1:${MLFLOW_PORT}"
 echo "=============================================================="
 
 attempt=1
