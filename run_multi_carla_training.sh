@@ -7,13 +7,16 @@
 # Default configuration
 NUM_ENVS=2
 START_PORT=2000
-TOTAL_STEPS=50000
+TOTAL_STEPS=70000
 POLICY_ARCH=qwen100m
 BACKBONE=lav
 TOWN=Town10HD_Opt
 NUM_VEHICLES=3
 NUM_WALKERS=10
 START_FRESH=false
+EARLY_STOPPING=true
+PATIENCE=20
+MIN_DELTA=1.0
 
 # Argument parsing
 POS_ARGS=()
@@ -27,6 +30,15 @@ for arg in "$@"; do
             ;;
         --policy=*)
             POLICY_ARCH="${arg#*=}"
+            ;;
+        --no-early-stopping)
+            EARLY_STOPPING=false
+            ;;
+        --patience=*)
+            PATIENCE="${arg#*=}"
+            ;;
+        --min-delta=*)
+            MIN_DELTA="${arg#*=}"
             ;;
         *)
             POS_ARGS+=("$arg")
@@ -457,6 +469,7 @@ v = c.get_server_version()
         --checkpoint-dir /workspace/checkpoints \
         $WEIGHTS_ARG \
         $RESUME_ARG \
+        $([ "$EARLY_STOPPING" = true ] && echo "--early-stopping --early-stopping-patience $PATIENCE --early-stopping-min-delta $MIN_DELTA" || echo "--no-early-stopping") \
         --total-steps "$TOTAL_STEPS"
 
     exit_code=$?

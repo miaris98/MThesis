@@ -55,6 +55,11 @@ class PPOTrainer:
 
         self.global_step = 0
         self.best_reward = -float("inf")
+        self.best_moving_avg = -float("inf")
+        self.patience_counter = 0
+        self.recent_rewards: List[float] = []
+        self.early_stop_triggered = False
+        self.early_stop_reason = ""
         self.episode_count = 1
         self.train_start_time = None
         self.last_progress_step = 0
@@ -72,20 +77,14 @@ class PPOTrainer:
                 pass
 
     def _create_agent(self) -> ActorCriticPPO:
-        agent = ActorCriticPPO(
-            action_dim=3,
-            features_dim=512,
-            backbone_name=self.cfg.backbone,
-            policy_arch=self.cfg.policy_arch,
-            freeze_backbone=self.cfg.freeze_backbone,
-            use_pretrained=self.cfg.use_pretrained,
-            weights_path=self.cfg.weights_path
+        return ActorCriticPPO(
+            action_dim=3, features_dim=512, backbone_name=self.cfg.backbone,
+            policy_arch=self.cfg.policy_arch, freeze_backbone=self.cfg.freeze_backbone,
+            use_pretrained=self.cfg.use_pretrained, weights_path=self.cfg.weights_path
         ).to(self.device)
-        return agent
 
     def _handle_checkpoints(self) -> None:
         if self.cfg.fresh:
-            print("🧹 [START FRESH] Cleaning previous checkpoints...")
             for fname in os.listdir(self.cfg.checkpoint_dir):
                 fpath = os.path.join(self.cfg.checkpoint_dir, fname)
                 if os.path.isfile(fpath):
@@ -94,24 +93,20 @@ class PPOTrainer:
                     except Exception:
                         pass
         elif self.cfg.resume:
-            latest_ckpt = os.path.join(self.cfg.checkpoint_dir, "ppo_carla_latest.pth")
-            if not os.path.exists(latest_ckpt):
-                latest_ckpt = os.path.join(self.cfg.checkpoint_dir, "ppo_carla_best.pth")
-            if os.path.exists(latest_ckpt):
-                self.agent.load_state_dict(torch.load(latest_ckpt, map_location=self.device), strict=False)
-                print(f"[Resume] Loaded policy checkpoint: {latest_ckpt}")
-
+            latest = os.path.join(self.cfg.checkpoint_dir, "ppo_carla_latest.pth")
+            if not os.path.exists(latest):
+                latest = os.path.join(self.cfg.checkpoint_dir, "ppo_carla_best.pth")
+            if os.path.exists(latest):
+                self.agent.load_state_dict(torch.load(latest, map_location=self.device), strict=False)
             state_file = os.path.join(self.cfg.checkpoint_dir, "train_state.json")
             if os.path.exists(state_file):
                 with open(state_file) as f:
                     st = json.load(f)
                 self.global_step = st.get("global_step", 0)
                 self.best_reward = st.get("best_episode_reward", -float("inf"))
-                print(f"[Resume] Resuming from step {self.global_step}/{self.cfg.total_steps}")
 
     def _recover_env(self) -> Dict[str, np.ndarray]:
-        """Seamlessly reconnect and recover parallel CARLA environments without reloading neural models."""
-        print("🔄 [In-Process Recovery] Reconnecting parallel CARLA environment workers...")
+        """Reconnect parallel CARLA environments without reloading policy models."""
         try:
             self.env.close()
         except Exception:
@@ -121,19 +116,18 @@ class PPOTrainer:
             try:
                 self.env = create_vector_carla_env(self.cfg)
                 obs, _ = self.env.reset()
-                print("✓ [In-Process Recovery] CARLA environment workers successfully re-established!")
                 return obs
             except Exception as e:
-                print(f"--> [Recovery Attempt {attempt+1}/5 Failed: {e}] Retrying in 3s...")
+                print(f"--> [Env Recovery Attempt {attempt+1}/5: {e}] Retrying in 3s...")
                 time.sleep(3.0)
         raise RuntimeError("Failed to recover CARLA environment after 5 attempts.")
 
     def train(self) -> None:
-        """Main PPO training loop with vectorized trajectory rollouts and policy updates."""
+        """Main PPO training loop with vectorized rollouts, advantage estimation, and early stopping."""
         try:
             obs, _ = self.env.reset()
         except Exception as e:
-            print(f"⚠️ [Initial Environment Reset Failed: {e}] Attempting in-process recovery...")
+            print(f"⚠️ [Reset Failed: {e}] Recovering CARLA env...")
             obs = self._recover_env()
 
         self.train_start_time = time.time()
@@ -141,15 +135,10 @@ class PPOTrainer:
         self.last_progress_step = self.global_step
 
         buffer = RolloutBuffer(
-            buffer_size=self.cfg.rollout_steps,
-            gamma=self.cfg.gamma,
-            gae_lambda=self.cfg.gae_lambda,
-            device=self.device,
-            num_envs=self.num_envs
+            buffer_size=self.cfg.rollout_steps, gamma=self.cfg.gamma,
+            gae_lambda=self.cfg.gae_lambda, device=self.device, num_envs=self.num_envs
         )
         is_frozen = bool(getattr(self.agent.encoder, 'freeze_backbone', False))
-
-        # Per-environment independent accumulators to prevent cross-server data mixing
         ep_rewards = np.zeros(self.num_envs, dtype=np.float32)
         ep_lengths = np.zeros(self.num_envs, dtype=int)
         ep_speeds: List[List[float]] = [[] for _ in range(self.num_envs)]
@@ -158,13 +147,11 @@ class PPOTrainer:
         while self.global_step < self.cfg.total_steps:
             buffer.reset()
             rollout_start = time.time()
-
             warmup_steps = max(10000, int(0.20 * self.cfg.total_steps))
             curriculum_factor = min(1.0, max(0.2, self.global_step / float(warmup_steps)))
             if hasattr(self.env, 'set_curriculum_factor'):
                 self.env.set_curriculum_factor(curriculum_factor)
 
-            # 1. Rollout Collection Across Parallel CARLA Servers
             for _ in range(self.cfg.rollout_steps):
                 self.global_step += self.num_envs
                 img_t = torch.as_tensor(obs["image"], dtype=torch.uint8, device=self.device)
@@ -173,36 +160,29 @@ class PPOTrainer:
                 with torch.inference_mode():
                     vis_feat = self.agent.extract_visual_features(img_t) if is_frozen else None
                     action, log_prob, _, value = self.agent.get_action_and_value(
-                        image=img_t if not is_frozen else None,
-                        speed=spd_t,
-                        visual_features=vis_feat
+                        image=img_t if not is_frozen else None, speed=spd_t, visual_features=vis_feat
                     )
 
                 action_np = action.cpu().numpy()
                 try:
                     next_obs, rewards, term, trunc, infos = self.env.step(action_np)
                 except Exception as e:
-                    print(f"⚠️ [Environment Step Exception: {e}] Triggering in-process environment recovery...")
+                    print(f"⚠️ [Step Exception: {e}] Triggering env recovery...")
                     obs = self._recover_env()
                     continue
 
                 dones = term | trunc
-
                 raw_r = np.array(rewards, dtype=np.float32)
                 clipped_r = np.clip(raw_r, -self.cfg.reward_clip, self.cfg.reward_clip)
                 self.reward_normalizer.update(clipped_r)
                 norm_r = clipped_r / self.reward_normalizer.std
 
                 buffer.add(
-                    speed=spd_t, action=action, log_prob=log_prob,
-                    reward=norm_r, done=dones, value=value,
-                    obs_img=img_t if not is_frozen else None,
-                    obs_vis=vis_feat if is_frozen else None
+                    speed=spd_t, action=action, log_prob=log_prob, reward=norm_r, done=dones,
+                    value=value, obs_img=img_t if not is_frozen else None, obs_vis=vis_feat if is_frozen else None
                 )
 
                 hw = HardwareMonitor.get_metrics()
-
-                # Process telemetry and lifecycle independently per environment worker
                 for e in range(self.num_envs):
                     ep_rewards[e] += float(raw_r[e])
                     ep_lengths[e] += 1
@@ -211,19 +191,15 @@ class PPOTrainer:
                     ep_speeds[e].append(spd_val)
 
                     self.csv_logger.log_step({
-                        "global_step": self.global_step,
-                        "env_id": e,
-                        "episode": self.episode_count,
-                        "step_in_ep": ep_lengths[e],
-                        "speed_kmh": round(float(spd_val), 2),
+                        "global_step": self.global_step, "env_id": e, "episode": self.episode_count,
+                        "step_in_ep": ep_lengths[e], "speed_kmh": round(float(spd_val), 2),
                         "action_throttle": round(float(action_np[e, 0]), 3),
                         "action_steer": round(float(action_np[e, 1]), 3),
                         "action_brake": round(float(action_np[e, 2]), 3),
                         "raw_reward": round(float(raw_r[e]), 4),
                         "normalized_reward": round(float(norm_r[e]), 4),
                         "curriculum_alpha": round(float(curriculum_factor), 2),
-                        **hw,
-                        "is_collision": info_e.get("is_collision", False),
+                        **hw, "is_collision": info_e.get("is_collision", False),
                         "is_off_road": info_e.get("is_off_road", False),
                         "termination_reason": info_e.get("termination_reason", "") if dones[e] else ""
                     })
@@ -234,27 +210,45 @@ class PPOTrainer:
                         ep_lengths[e] = 0
                         ep_speeds[e] = []
 
-                # Periodic heartbeat logging every 20 steps
                 if (self.global_step - self.last_progress_step) >= max(20, self.num_envs * 10):
                     now_str = time.strftime("%H:%M:%S")
-                    step_delta = self.global_step - self.last_progress_step
-                    time_delta = max(1e-5, time.time() - (self.last_progress_time or time.time()))
-                    instant_sps = step_delta / time_delta
-                    instant_fps = instant_sps * self.cfg.frame_skip
+                    s_delta = self.global_step - self.last_progress_step
+                    t_delta = max(1e-5, time.time() - (self.last_progress_time or time.time()))
+                    sps = s_delta / t_delta
+                    fps = sps * self.cfg.frame_skip
                     pct = min(100.0, 100.0 * self.global_step / float(self.cfg.total_steps))
-                    print(f"[{now_str} | Step {self.global_step:05d}/{self.cfg.total_steps} ({pct:4.1f}%) | {instant_sps:4.1f} Steps/s ({instant_fps:4.1f} FPS) | Episodes: {self.episode_count}]", flush=True)
+                    print(f"[{now_str} | Step {self.global_step:05d}/{self.cfg.total_steps} ({pct:4.1f}%) | {sps:4.1f} Steps/s ({fps:4.1f} FPS) | Episodes: {self.episode_count}]", flush=True)
                     self.last_progress_step = self.global_step
                     self.last_progress_time = time.time()
 
                 obs = next_obs
 
-            # 2. Advantage Estimation & PPO Update
             self._update_ppo(buffer, obs, dones, is_frozen, rollout_start)
+
+            if self.cfg.early_stopping and len(self.recent_rewards) >= max(2, self.cfg.early_stopping_window // 2):
+                cur_ma = float(np.mean(self.recent_rewards[-self.cfg.early_stopping_window:]))
+                if cur_ma > self.best_moving_avg + self.cfg.early_stopping_min_delta:
+                    self.best_moving_avg = cur_ma
+                    self.patience_counter = 0
+                else:
+                    self.patience_counter += 1
+                    if self.patience_counter >= self.cfg.early_stopping_patience:
+                        self.early_stop_triggered = True
+                        self.early_stop_reason = f"Plateau: {self.patience_counter} rollouts without reward improvement (Best MA: {self.best_moving_avg:.2f}, Cur: {cur_ma:.2f})"
+
+            if self.early_stop_triggered:
+                print(f"\n🛑 [{time.strftime('%H:%M:%S')} | EARLY STOPPING] {self.early_stop_reason}", flush=True)
+                break
 
         self._shutdown()
 
     def _on_episode_done(self, env_id: int, ep_reward: float, ep_speeds: list, info: dict) -> None:
         self.episode_count += 1
+        self.recent_rewards.append(ep_reward)
+        if len(self.recent_rewards) > self.cfg.early_stopping_window * 2:
+            self.recent_rewards.pop(0)
+        ma_reward = float(np.mean(self.recent_rewards[-self.cfg.early_stopping_window:]))
+
         self.csv_logger.flush()
         avg_speed = np.mean(ep_speeds) if ep_speeds else 0.0
         reason = info.get("termination_reason", "Finished")
@@ -262,8 +256,9 @@ class PPOTrainer:
         elapsed = max(1e-5, time.time() - (self.train_start_time or time.time()))
         overall_sps = self.global_step / elapsed
         overall_fps = overall_sps * self.cfg.frame_skip
-        print(f"[{now_str} | Step {self.global_step:05d}/{self.cfg.total_steps} | Env #{env_id}] Episode #{self.episode_count:03d} Finished | Reward: {ep_reward:+.2f} | Avg Speed: {avg_speed:4.1f} km/h | Reason: {reason} | Speed: {overall_sps:4.1f} Steps/s ({overall_fps:4.1f} FPS)", flush=True)
+        print(f"[{now_str} | Step {self.global_step:05d}/{self.cfg.total_steps} | Env #{env_id}] Episode #{self.episode_count:03d} | R: {ep_reward:+.2f} (MA-{self.cfg.early_stopping_window}: {ma_reward:+.2f}) | Spd: {avg_speed:4.1f} km/h | {reason}", flush=True)
         self.logger.add_scalar("Reward/Episode_Total", ep_reward, self.global_step)
+        self.logger.add_scalar("Reward/Moving_Average", ma_reward, self.global_step)
         self.logger.add_scalar("Speed/Avg_kmh", avg_speed, self.global_step)
         self.logger.add_scalar(f"Reward/Env_{env_id}_Total", ep_reward, self.global_step)
         self.logger.add_scalar("Perf/Steps_Per_Second", overall_sps, self.global_step)
@@ -274,6 +269,10 @@ class PPOTrainer:
             best_path = os.path.join(self.cfg.checkpoint_dir, "ppo_carla_best.pth")
             torch.save(self.agent.state_dict(), best_path)
 
+        if self.cfg.target_reward is not None and ma_reward >= self.cfg.target_reward:
+            self.early_stop_triggered = True
+            self.early_stop_reason = f"Target reward achieved: MA {ma_reward:.2f} >= {self.cfg.target_reward:.2f}"
+
     def _update_ppo(self, buffer: RolloutBuffer, last_obs: dict, last_dones: np.ndarray, is_frozen: bool, rollout_start: float) -> None:
         with torch.inference_mode():
             last_img = torch.as_tensor(last_obs["image"], dtype=torch.uint8, device=self.device)
@@ -282,7 +281,6 @@ class PPOTrainer:
             next_val = self.agent.get_action_and_value(speed=last_spd, visual_features=last_vis)[3]
 
         b_vis, b_spd, b_act, b_logp, b_adv, b_ret, b_val = buffer.compute_returns_and_advantages(next_val, next_done=last_dones)
-
         total_samples = buffer.total_transitions
         b_inds = np.arange(total_samples)
         policy_losses, value_losses = [], []
@@ -312,7 +310,6 @@ class PPOTrainer:
                 nn.utils.clip_grad_norm_(self.agent.parameters(), max_norm=0.5)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
-
                 policy_losses.append(pg_loss.item())
                 value_losses.append(v_loss.item())
 

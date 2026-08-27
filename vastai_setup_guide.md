@@ -122,12 +122,15 @@ useradd -m -s /bin/bash carlauser
 chown -R carlauser:carlauser /workspace/carla
 ```
 
-### Step 4.2: Start CARLA in a Background `tmux` Session
-```bash
-tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1"
-```
+### Step 4.2: Automated Server Management
+> **Note**: You do not need to manually start CARLA servers when using `run_multi_carla_training.sh`. The training supervisor automatically launches, monitors, and isolates parallel CARLA server instances across ports `2000, 2004, ...`.
+>
+> *(Optional manual connection test for single instance)*:
+> ```bash
+> tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1"
+> ```
 
-### Step 4.3: Verify Connection
+### Step 4.3: Verify Connection (Optional)
 ```bash
 source /opt/conda/bin/activate carla_py38
 cd /workspace/MThesis
@@ -169,7 +172,7 @@ bash /workspace/MThesis/start_dashboard.sh
 
 ## 7. Train with 100M Qwen Decision Transformer + Multi-CARLA Parallel Servers
 
-The policy network combines the **pretrained LAV multi-camera panoramic feature extractor** with a **~106 Million Parameter Qwen Decision Transformer** (`qwen100m`) featuring **Trainable Attention Skip Connections** ($\boldsymbol{\alpha}_{\text{attn}} \odot \text{Attn}$ and $\boldsymbol{\alpha}_{\text{ffn}} \odot \text{SwiGLU}$), **SwiGLU FFN** (Dim 2816), **RMSNorm**, and parallel rollout execution across **Multiple CARLA Simulators**.
+The policy network combines the **pretrained LAV multi-camera panoramic feature extractor** with a **~106 Million Parameter Qwen Decision Transformer** (`qwen100m`) featuring **Trainable Attention Skip Connections** ($\boldsymbol{\alpha}_{\text{attn}} \odot \text{Attn}$ and $\boldsymbol{\alpha}_{\text{ffn}} \odot \text{SwiGLU}$), **SwiGLU FFN** (Dim 2816), **RMSNorm**, adaptive **Early Stopping**, and parallel rollout execution across **Multiple CARLA Simulators**.
 
 ### GPU VRAM Sizing Recommendations for Multi-CARLA
 * **1 CARLA Server + 100M Qwen**: 8 GB – 12 GB VRAM (RTX 3060 12GB, RTX 3080, RTX 4070)
@@ -180,36 +183,27 @@ The policy network combines the **pretrained LAV multi-camera panoramic feature 
 
 ### A. Parallel Multi-CARLA Training Supervisor (`run_multi_carla_training.sh`)
 
-To launch **2 Parallel CARLA Servers** (Ports `2000` and `2004`) with **100M Qwen Decision Policy** from scratch:
+To launch **2 Parallel CARLA Servers** (Ports `2000` and `2004`) with **100M Qwen Decision Policy** (70,000 steps baseline from CARLA benchmark literature) from scratch:
 ```bash
 cd /workspace/MThesis
-git fetch origin && git checkout feature/multi-carla-qwen100m && git pull
+git pull
 
-bash run_multi_carla_training.sh 2 50000 qwen100m lav Town10HD_Opt --fresh
+bash run_multi_carla_training.sh 2 70000 qwen100m lav Town10HD_Opt --fresh
 ```
 
 To launch **4 Parallel CARLA Servers** (Ports `2000`, `2004`, `2008`, `2012`) on a 24GB+ GPU:
 ```bash
-bash run_multi_carla_training.sh 4 100000 qwen100m lav Town10HD_Opt --fresh
+bash run_multi_carla_training.sh 4 70000 qwen100m lav Town10HD_Opt --fresh
 ```
 
 To **resume training** from the latest checkpoint without restarting progress:
 ```bash
-bash run_multi_carla_training.sh 2 50000 qwen100m lav Town10HD_Opt
+bash run_multi_carla_training.sh 2 70000 qwen100m lav Town10HD_Opt
 ```
 
 ---
 
-### B. Single CARLA Server Training (`run_training_loop.sh`)
-
-```bash
-cd /workspace/MThesis && git pull
-bash run_training_loop.sh 50000 lav qwen100m Town10HD_Opt 3 10 --fresh
-```
-
----
-
-### C. Direct Python CLI Execution
+### B. Direct Python CLI Execution
 
 ```bash
 source /opt/conda/bin/activate carla_py38

@@ -10,7 +10,7 @@ class TrainingConfig:
     """Hyperparameters and runtime settings for PPO training in CARLA simulator."""
     host: str = "127.0.0.1"
     port: int = 2000
-    num_envs: int = 1
+    num_envs: int = 2
     carla_ports: Optional[List[int]] = None
     env_type: str = "camera_easycarla"
     backbone: str = "resnet18"
@@ -20,7 +20,7 @@ class TrainingConfig:
     freeze_backbone: bool = True
     use_pretrained: bool = True
     
-    total_steps: int = 50000
+    total_steps: int = 70000
     rollout_steps: int = 500
     frame_skip: int = 2
     ppo_epochs: int = 4
@@ -31,6 +31,13 @@ class TrainingConfig:
     ent_coef: float = 0.05
     minibatch_size: int = 128
     reward_clip: float = 50.0
+
+    # Early stopping based on evaluation / moving average episode performance
+    early_stopping: bool = True
+    early_stopping_patience: int = 20
+    early_stopping_min_delta: float = 1.0
+    early_stopping_window: int = 10
+    target_reward: Optional[float] = None
 
     log_dir: str = "/workspace/runs"
     checkpoint_dir: str = "/workspace/checkpoints"
@@ -58,7 +65,7 @@ class TrainingConfig:
         parser = argparse.ArgumentParser(description="Train PPO Deep RL Agent in CARLA Simulator.")
         parser.add_argument("--host", type=str, default="127.0.0.1", help="CARLA host IP")
         parser.add_argument("--port", type=int, default=2000, help="CARLA primary port")
-        parser.add_argument("--num-envs", type=int, default=1, help="Number of parallel CARLA server environments")
+        parser.add_argument("--num-envs", type=int, default=2, help="Number of parallel CARLA server environments")
         parser.add_argument("--carla-ports", type=str, default=None, help="Comma-separated list of CARLA server ports (e.g. 2000,2004)")
         parser.add_argument("--env-type", type=str, default="camera_easycarla", choices=["camera_easycarla", "carla_gym"])
         parser.add_argument("--backbone", type=str, default="resnet18", choices=["resnet18", "resnet34", "lav", "erfnet", "qwen100m", "qwen500m", "qwen900m", "qwen", "transformer"])
@@ -70,7 +77,7 @@ class TrainingConfig:
         parser.add_argument("--use-pretrained", action="store_true", default=True, help="Use pretrained vision backbone")
         parser.add_argument("--no-pretrained", action="store_false", dest="use_pretrained")
 
-        parser.add_argument("--total-steps", type=int, default=50000)
+        parser.add_argument("--total-steps", type=int, default=70000)
         parser.add_argument("--rollout-steps", type=int, default=500)
         parser.add_argument("--frame-skip", type=int, default=2)
         parser.add_argument("--ppo-epochs", type=int, default=4)
@@ -81,6 +88,14 @@ class TrainingConfig:
         parser.add_argument("--ent-coef", type=float, default=0.05)
         parser.add_argument("--minibatch-size", type=int, default=128)
         parser.add_argument("--reward-clip", type=float, default=50.0)
+
+        # Early stopping flags
+        parser.add_argument("--early-stopping", action="store_true", default=True, help="Enable performance-based early stopping")
+        parser.add_argument("--no-early-stopping", action="store_false", dest="early_stopping", help="Disable early stopping")
+        parser.add_argument("--early-stopping-patience", "--patience", type=int, default=20, help="Patience rollouts without improvement")
+        parser.add_argument("--early-stopping-min-delta", "--min-delta", type=float, default=1.0, help="Minimum delta to qualify as improvement")
+        parser.add_argument("--early-stopping-window", type=int, default=10, help="Window size for moving average reward")
+        parser.add_argument("--target-reward", type=float, default=None, help="Target reward threshold for immediate success stop")
 
         parser.add_argument("--log-dir", type=str, default="/workspace/runs")
         parser.add_argument("--checkpoint-dir", type=str, default="/workspace/checkpoints")
@@ -127,6 +142,11 @@ class TrainingConfig:
             ent_coef=parsed.ent_coef,
             minibatch_size=parsed.minibatch_size,
             reward_clip=parsed.reward_clip,
+            early_stopping=parsed.early_stopping,
+            early_stopping_patience=parsed.early_stopping_patience,
+            early_stopping_min_delta=parsed.early_stopping_min_delta,
+            early_stopping_window=parsed.early_stopping_window,
+            target_reward=parsed.target_reward,
             log_dir=parsed.log_dir,
             checkpoint_dir=parsed.checkpoint_dir,
             resume=parsed.resume,
