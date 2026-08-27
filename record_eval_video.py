@@ -97,6 +97,8 @@ def record_eval_video(
             chase_cam_holder[0] = None
 
     def setup_chase_camera():
+        if chase_cam_holder[0] is not None and hasattr(chase_cam_holder[0], 'is_alive') and chase_cam_holder[0].is_alive:
+            return
         cleanup_chase_camera()
         if not hasattr(env, 'easy_env') or not hasattr(env.easy_env, 'ego') or env.easy_env.ego is None:
             return
@@ -137,7 +139,7 @@ def record_eval_video(
                 act = action.cpu().numpy()[0]
                 t_val = float(np.clip((act[0] + 1.0) / 2.0, 0.0, 1.0))
                 s_val = float(np.clip(act[1], -1.0, 1.0))
-                b_val = float(np.clip((act[2] - 0.2) / 0.8, 0.0, 1.0)) if act[2] > 0.2 else 0.0
+                b_val = float(np.clip(act[2], 0.0, 1.0)) if act[2] > 0.4 and t_val < 0.3 else 0.0
 
                 next_obs, reward, term, trunc, info = env.step(act)
                 done = term or trunc
@@ -172,14 +174,13 @@ def record_eval_video(
                 ep_frames.append(canvas)
                 obs = next_obs
 
-            if step_in_ep >= 5:
+            if step_in_ep >= 15:
                 saved_episodes += 1
                 for f in ep_frames:
                     video_writer.write(f)
                 recorded_valid_steps += len(ep_frames)
-                print(f"✓ [VIDEO] Ep #{saved_episodes} | Steps: {len(ep_frames)} | Frames: {recorded_valid_steps}/{steps}")
+                print(f"✓ [VIDEO] Ep #{saved_episodes} | Steps: {len(ep_frames)} | Total Video Frames: {recorded_valid_steps}/{steps}")
 
-            cleanup_chase_camera()
             try:
                 obs, info = env.reset()
                 setup_chase_camera()
