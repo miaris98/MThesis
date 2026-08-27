@@ -8,6 +8,8 @@ This guide provides an **end-to-end, copy-pasteable workflow** for setting up a 
 
 When renting an instance on Vast.ai:
 * **Template**: Select **PyTorch** or **Jupyter Notebook** (Default Docker image: `pytorch/pytorch` or Vast PyTorch image).
+* **CPU Architecture (CRITICAL)**: Ensure the instance uses a modern CPU supporting **AVX2 / FMA** instructions (e.g. **AMD EPYC, AMD Ryzen, Intel Xeon Scalable Gold/Silver, Intel Core i7/i9**).
+  > ⚠️ **Avoid older Xeon E5 v1/v2/v3 machines**: CARLA's precompiled Unreal Engine 4 binary will crash with `Illegal instruction` if the CPU lacks AVX2 instruction passthrough.
 * **GPU Selection**: Choose an **RTX 3060 (12GB), RTX 3080, RTX 3090, or RTX 4090** (At least **10 GB VRAM**).
 * **Disk Space Allocation**: Set container disk allocation to **at least 40 GB** (CARLA 0.9.15 uncompressed is ~16 GB + PyTorch/dependencies).
 

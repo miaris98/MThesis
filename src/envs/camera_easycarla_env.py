@@ -138,7 +138,7 @@ class CameraEasyCarlaEnv(gym.Env):
             carla.Client.load_world = orig_load_world
 
     def _optimize_easy_env(self) -> None:
-        """Optimize EasyCarla: minimize unused LiDAR raycasting and bypass unused math."""
+        """Optimize EasyCarla: filter false-positive ground collisions and eliminate unformatted stdout spam."""
         if not hasattr(self, 'easy_env') or self.easy_env is None:
             return
         if hasattr(self.easy_env, 'lidar_bp') and self.easy_env.lidar_bp is not None:
@@ -156,9 +156,23 @@ class CameraEasyCarlaEnv(gym.Env):
         }
         self.world_map = self.easy_env.world.get_map() if hasattr(self.easy_env, 'world') and self.easy_env.world is not None else None
         self.spawn_points = list(self.world_map.get_spawn_points()) if self.world_map is not None else []
-        self.easy_env._on_collision = lambda event: (setattr(self.easy_env, '_is_collision', True), self.easy_env.collision_hist.append(event) if getattr(self.easy_env, 'collision_hist', None) is not None else None)
+
+        def _safe_on_collision(event):
+            impulse = getattr(event, 'normal_impulse', None)
+            intensity = math.sqrt(impulse.x**2 + impulse.y**2 + impulse.z**2) if impulse else 0.0
+            other = getattr(event, 'other_actor', None)
+            other_type = getattr(other, 'type_id', '').lower() if other else ''
+            if 'road' in other_type or 'ground' in other_type or 'static.road' in other_type:
+                return
+            if intensity > 250.0 or any(k in other_type for k in ['vehicle', 'walker', 'pedestrian', 'prop', 'building', 'pole', 'wall', 'fence']):
+                self.easy_env._is_collision = True
+                if hasattr(self.easy_env, 'collision_hist') and self.easy_env.collision_hist is not None:
+                    self.easy_env.collision_hist.append(event)
+
+        self.easy_env._on_collision = _safe_on_collision
         self.easy_env._on_lane_invasion = lambda event: setattr(self.easy_env, '_is_off_road', True)
         self.easy_env._on_invasion = lambda event: setattr(self.easy_env, '_is_off_road', True)
+        self.easy_env._terminal = lambda: bool(self.easy_env._is_collision or self.easy_env._is_off_road or (self.easy_env.time_step >= self.easy_env.max_time_episode))
         self.easy_env._clear_all_actors = lambda filters: safe_clear_carla_actors(self.easy_env.world, self.carla_client, filters)
 
     def set_curriculum_factor(self, factor: float) -> None:
@@ -194,6 +208,8 @@ class CameraEasyCarlaEnv(gym.Env):
                 self.easy_env.ego.set_target_angular_velocity(carla.Vector3D(0, 0, 0))
                 self.easy_env._is_collision = False
                 self.easy_env._is_off_road = False
+                if hasattr(self.easy_env, 'collision_hist'):
+                    self.easy_env.collision_hist = []
                 self.easy_env.time_step = 0
                 self.easy_env.total_reward = 0.0
                 self.easy_env.ego.set_simulate_physics(True)
