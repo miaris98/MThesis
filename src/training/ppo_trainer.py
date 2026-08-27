@@ -331,5 +331,19 @@ class PPOTrainer:
     def _shutdown(self) -> None:
         self.env.close()
         self.csv_logger.close()
+
+        # Sync telemetry CSV and checkpoints as MLflow artifacts
+        if hasattr(self, 'csv_logger') and os.path.exists(self.csv_logger.filepath):
+            self.logger.log_artifact(self.csv_logger.filepath)
+        best_path = os.path.join(self.cfg.checkpoint_dir, "ppo_carla_best.pth")
+        if os.path.exists(best_path):
+            self.logger.log_artifact(best_path)
+        latest_path = os.path.join(self.cfg.checkpoint_dir, "ppo_carla_latest.pth")
+        if os.path.exists(latest_path):
+            self.logger.log_artifact(latest_path)
+        state_path = os.path.join(self.cfg.checkpoint_dir, "train_state.json")
+        if os.path.exists(state_path):
+            self.logger.log_artifact(state_path)
+
         self.logger.close()
         print("✓ Training Completed Successfully!")
