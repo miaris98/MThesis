@@ -212,24 +212,17 @@ fi
 
 CLOUDFLARE_URL=""
 if command -v cloudflared &>/dev/null; then
-    if tmux has-session -t mlflow_tunnel 2>/dev/null; then
-        if ! grep -q "127.0.0.1:${MLFLOW_PORT}" /tmp/mlflow_tunnel.log 2>/dev/null; then
-            tmux kill-session -t mlflow_tunnel 2>/dev/null || true
-            rm -f /tmp/mlflow_tunnel.log
-        fi
-    fi
+    # Always refresh tunnel to ensure a fresh, active connection
+    tmux kill-session -t mlflow_tunnel 2>/dev/null || true
+    rm -f /tmp/mlflow_tunnel.log
+    echo "--> 🌐 Launching public Cloudflare HTTPS tunnel for MLflow (port ${MLFLOW_PORT})..."
+    tmux new-session -d -s mlflow_tunnel \
+        "cloudflared tunnel --url http://127.0.0.1:${MLFLOW_PORT} 2>&1 | tee /tmp/mlflow_tunnel.log"
 
-    if ! tmux has-session -t mlflow_tunnel 2>/dev/null; then
-        rm -f /tmp/mlflow_tunnel.log
-        echo "--> 🌐 Launching public Cloudflare HTTPS tunnel for MLflow (port ${MLFLOW_PORT})..."
-        tmux new-session -d -s mlflow_tunnel \
-            "cloudflared tunnel --url http://127.0.0.1:${MLFLOW_PORT} 2>&1 | tee /tmp/mlflow_tunnel.log"
-    fi
-
-    echo "--> Waiting for Cloudflare public tunnel URL to initialize..."
-    for i in $(seq 1 12); do
+    echo "--> Waiting for Cloudflare public tunnel URL..."
+    for i in $(seq 1 15); do
         if [ -f /tmp/mlflow_tunnel.log ]; then
-            CLOUDFLARE_URL=$(grep -o 'https://[-a-zA-Z0-9@:%._\+~#=]*\.trycloudflare\.com' /tmp/mlflow_tunnel.log | head -n 1)
+            CLOUDFLARE_URL=$(grep -o 'https://[-a-zA-Z0-9@:%._\+~#=]*\.trycloudflare\.com' /tmp/mlflow_tunnel.log | tail -n 1)
             if [ -n "$CLOUDFLARE_URL" ]; then
                 break
             fi
@@ -241,9 +234,9 @@ fi
 echo "=============================================================="
 echo "   📊 MLFLOW DASHBOARD ONLINE (PORT ${MLFLOW_PORT})           "
 if [ -n "$CLOUDFLARE_URL" ]; then
-    echo -e "   👉 \033[1;32mPublic HTTPS URL:  $CLOUDFLARE_URL\033[0m"
+    echo "   👉 Public HTTPS URL:  $CLOUDFLARE_URL"
 else
-    echo "   👉 Public HTTPS URL:  (Check: tail -n 20 /tmp/mlflow_tunnel.log)"
+    echo "   👉 Public HTTPS URL:  Check /tmp/mlflow_tunnel.log or open port ${MLFLOW_PORT} in Vast.ai Tunnels"
 fi
 echo "   👉 Vast.ai Tunnel:    Open Port ${MLFLOW_PORT} in Vast.ai Tunnels UI"
 echo "   👉 Localhost URL:     http://127.0.0.1:${MLFLOW_PORT}"
