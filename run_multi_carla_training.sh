@@ -228,7 +228,7 @@ if [ -n "$CLOUDFLARED_BIN" ] && [ -x "$CLOUDFLARED_BIN" ]; then
     echo "--> Waiting for Cloudflare public tunnel URL to generate..."
     for i in $(seq 1 15); do
         if [ -f /tmp/mlflow_tunnel.log ]; then
-            CLOUDFLARE_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/mlflow_tunnel.log | head -n 1)
+            CLOUDFLARE_URL=$("$PYTHON_BIN" -c "import re; txt=open('/tmp/mlflow_tunnel.log','r').read(); m=re.search(r'https://[a-zA-Z0-9.-]+\.trycloudflare\.com', txt); print(m.group(0) if m else '')" 2>/dev/null || true)
             if [ -n "$CLOUDFLARE_URL" ]; then
                 break
             fi
@@ -241,8 +241,9 @@ echo "=============================================================="
 echo "   📊 MLFLOW DASHBOARD ONLINE (PORT ${MLFLOW_PORT})           "
 if [ -n "$CLOUDFLARE_URL" ]; then
     echo -e "   👉 \033[1;32mlink to mlflow :     $CLOUDFLARE_URL\033[0m"
+else
+    echo "   👉 Vast.ai Tunnel:    Open Port ${MLFLOW_PORT} in Vast.ai Tunnels UI"
 fi
-echo "   👉 Vast.ai Tunnel:    Open Port ${MLFLOW_PORT} in Vast.ai Tunnels UI"
 echo "=============================================================="
 
 attempt=1
