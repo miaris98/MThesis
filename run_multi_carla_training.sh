@@ -209,85 +209,140 @@ is_valid_cloudflared() {
     [ -n "$bin" ] && [ -x "$bin" ] && "$bin" --version &>/dev/null
 }
 
-# Locate or install working cloudflared binary for direct public HTTPS dashboard access
-CLOUDFLARED_BIN=""
-if is_valid_cloudflared "$(command -v cloudflared 2>/dev/null)"; then
-    CLOUDFLARED_BIN="$(command -v cloudflared)"
-elif is_valid_cloudflared "/usr/local/bin/cloudflared"; then
-    CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
-elif is_valid_cloudflared "/usr/bin/cloudflared"; then
-    CLOUDFLARED_BIN="/usr/bin/cloudflared"
-fi
-
-if [ -z "$CLOUDFLARED_BIN" ]; then
-    echo "--> Installing cloudflared binary for direct public HTTPS dashboard access..."
-    rm -f /usr/local/bin/cloudflared /tmp/cloudflared*
-    
-    # Method 1: direct binary download
-    if curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" -o /usr/local/bin/cloudflared 2>/dev/null || \
-       wget -q "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" -O /usr/local/bin/cloudflared 2>/dev/null; then
-        chmod +x /usr/local/bin/cloudflared 2>/dev/null || true
-    fi
-
-    if is_valid_cloudflared "/usr/local/bin/cloudflared"; then
-        CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
-    else
-        # Method 2: debian package fallback
-        if wget -q "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -O /tmp/cloudflared.deb 2>/dev/null; then
-            dpkg -i /tmp/cloudflared.deb >/dev/null 2>&1 || true
-            rm -f /tmp/cloudflared.deb
-        fi
-        if is_valid_cloudflared "$(command -v cloudflared 2>/dev/null)"; then
-            CLOUDFLARED_BIN="$(command -v cloudflared)"
-        elif is_valid_cloudflared "/usr/local/bin/cloudflared"; then
-            CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
-        fi
-    fi
-fi
-
-CLOUDFLARE_URL=""
-if [ -n "$CLOUDFLARED_BIN" ]; then
-    pkill -9 -f cloudflared 2>/dev/null || true
-    rm -f /tmp/mlflow_tunnel.log
-    echo "--> 🌐 Launching public Cloudflare HTTPS tunnel for MLflow (port ${MLFLOW_PORT})..."
-    nohup "$CLOUDFLARED_BIN" tunnel --url "http://127.0.0.1:${MLFLOW_PORT}" --no-autoupdate > /tmp/mlflow_tunnel.log 2>&1 &
-    CLOUDFLARED_PID=$!
-    
-    echo "--> Waiting for Cloudflare public tunnel URL to generate..."
-    for i in $(seq 1 20); do
-        if [ -f /tmp/mlflow_tunnel.log ]; then
-            # Safe Python extraction with utf-8 decoding
-            CLOUDFLARE_URL=$("$PYTHON_BIN" -c "
+# Extract Cloudflare tunnel URL from log file
+extract_cf_url() {
+    local logfile="$1"
+    [ -f "$logfile" ] || return 1
+    local url=""
+    url=$("$PYTHON_BIN" -c "
 import re
 try:
-    with open('/tmp/mlflow_tunnel.log', 'r', encoding='utf-8', errors='ignore') as f:
+    with open('$logfile', 'r', encoding='utf-8', errors='ignore') as f:
         txt = f.read()
-    m = re.search(r'https://[-a-zA-Z0-9.]+\.trycloudflare\.com', txt)
+    m = re.search(r'https://[-a-zA-Z0-9]+\.trycloudflare\.com', txt)
     if m:
         print(m.group(0))
 except Exception:
     pass
 " 2>/dev/null || true)
+    # grep fallback
+    if [ -z "$url" ]; then
+        url=$(grep -oE 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "$logfile" 2>/dev/null | head -1 || true)
+    fi
+    [ -n "$url" ] && echo "$url" && return 0
+    return 1
+}
 
-            # Grep fallback if python did not match
-            if [ -z "$CLOUDFLARE_URL" ]; then
-                CLOUDFLARE_URL=$(grep -o 'https://[^ |]*trycloudflare\.com' /tmp/mlflow_tunnel.log 2>/dev/null | head -n 1 || true)
-            fi
+# Locate or install working cloudflared binary
+CLOUDFLARED_BIN=""
+for candidate in "$(command -v cloudflared 2>/dev/null)" "/usr/local/bin/cloudflared" "/usr/bin/cloudflared"; do
+    if is_valid_cloudflared "$candidate"; then
+        CLOUDFLARED_BIN="$candidate"
+        break
+    fi
+done
 
-            if [ -n "$CLOUDFLARE_URL" ]; then
+if [ -z "$CLOUDFLARED_BIN" ]; then
+    echo "--> Installing cloudflared binary for public HTTPS dashboard access..."
+    rm -f /usr/local/bin/cloudflared /tmp/cloudflared*
+    # Try direct binary download first, then .deb package
+    if curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" -o /usr/local/bin/cloudflared 2>/dev/null || \
+       wget -q "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" -O /usr/local/bin/cloudflared 2>/dev/null; then
+        chmod +x /usr/local/bin/cloudflared 2>/dev/null || true
+    fi
+    if is_valid_cloudflared "/usr/local/bin/cloudflared"; then
+        CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
+    else
+        if wget -q "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -O /tmp/cloudflared.deb 2>/dev/null; then
+            dpkg -i /tmp/cloudflared.deb >/dev/null 2>&1 || true
+            rm -f /tmp/cloudflared.deb
+        fi
+        for candidate in "$(command -v cloudflared 2>/dev/null)" "/usr/local/bin/cloudflared"; do
+            if is_valid_cloudflared "$candidate"; then
+                CLOUDFLARED_BIN="$candidate"
                 break
             fi
+        done
+    fi
+fi
+
+# --- Tunnel launch with reuse + retry on 429 rate-limit ---
+CLOUDFLARE_URL=""
+
+# 1) Reuse: check if a tunnel is already running with a valid URL
+if pgrep -f "cloudflared tunnel" >/dev/null 2>&1 && [ -f /tmp/mlflow_tunnel.log ]; then
+    CLOUDFLARE_URL=$(extract_cf_url /tmp/mlflow_tunnel.log) || true
+    if [ -n "$CLOUDFLARE_URL" ]; then
+        echo "✓ Reusing existing Cloudflare tunnel: $CLOUDFLARE_URL"
+    fi
+fi
+
+# Also check cached URL file from a previous successful tunnel
+if [ -z "$CLOUDFLARE_URL" ] && [ -f /tmp/mlflow_cf_url ]; then
+    CACHED_URL=$(cat /tmp/mlflow_cf_url 2>/dev/null)
+    # Verify the cached tunnel is still responding
+    if [ -n "$CACHED_URL" ] && curl -s --max-time 3 "$CACHED_URL" >/dev/null 2>&1; then
+        CLOUDFLARE_URL="$CACHED_URL"
+        echo "✓ Reusing cached Cloudflare tunnel: $CLOUDFLARE_URL"
+    fi
+fi
+
+# 2) Launch new tunnel only if no valid URL was found
+if [ -z "$CLOUDFLARE_URL" ] && [ -n "$CLOUDFLARED_BIN" ]; then
+    pkill -9 -f "cloudflared tunnel" 2>/dev/null || true
+    sleep 1
+
+    MAX_RETRIES=3
+    RETRY_DELAYS=(5 15 30)
+    
+    for attempt_num in $(seq 1 $MAX_RETRIES); do
+        rm -f /tmp/mlflow_tunnel.log
+        echo "--> 🌐 Launching Cloudflare HTTPS tunnel for MLflow (port ${MLFLOW_PORT}) [attempt ${attempt_num}/${MAX_RETRIES}]..."
+        nohup "$CLOUDFLARED_BIN" tunnel --url "http://127.0.0.1:${MLFLOW_PORT}" --no-autoupdate > /tmp/mlflow_tunnel.log 2>&1 &
+        CLOUDFLARED_PID=$!
+
+        # Wait up to 15 seconds for URL to appear
+        for i in $(seq 1 15); do
+            if [ -f /tmp/mlflow_tunnel.log ]; then
+                CLOUDFLARE_URL=$(extract_cf_url /tmp/mlflow_tunnel.log) || true
+                [ -n "$CLOUDFLARE_URL" ] && break 2  # break both loops
+            fi
+            # Check if process died
+            if ! kill -0 $CLOUDFLARED_PID 2>/dev/null; then
+                break
+            fi
+            sleep 1
+        done
+
+        # If we get here, this attempt failed — check why
+        if [ -f /tmp/mlflow_tunnel.log ] && grep -q "429\|Too Many Requests\|rate" /tmp/mlflow_tunnel.log 2>/dev/null; then
+            DELAY=${RETRY_DELAYS[$((attempt_num - 1))]}
+            echo "--> ⚠️  Cloudflare rate-limited (429). Waiting ${DELAY}s before retry..."
+            pkill -9 -f "cloudflared tunnel" 2>/dev/null || true
+            sleep "$DELAY"
+        elif [ -f /tmp/mlflow_tunnel.log ] && ! kill -0 $CLOUDFLARED_PID 2>/dev/null; then
+            echo "--> [Note] cloudflared exited unexpectedly:"
+            head -n 3 /tmp/mlflow_tunnel.log 2>/dev/null | sed 's/^/    /' || true
+            pkill -9 -f "cloudflared tunnel" 2>/dev/null || true
+            if [ "$attempt_num" -lt "$MAX_RETRIES" ]; then
+                DELAY=${RETRY_DELAYS[$((attempt_num - 1))]}
+                echo "--> Retrying in ${DELAY}s..."
+                sleep "$DELAY"
+            fi
+        else
+            # Timed out waiting, kill and retry
+            pkill -9 -f "cloudflared tunnel" 2>/dev/null || true
+            if [ "$attempt_num" -lt "$MAX_RETRIES" ]; then
+                echo "--> Timed out. Retrying..."
+                sleep 2
+            fi
         fi
-        
-        # Check if cloudflared crashed early
-        if ! kill -0 $CLOUDFLARED_PID 2>/dev/null; then
-            echo "--> [Note] cloudflared process terminated. Output log:"
-            head -n 5 /tmp/mlflow_tunnel.log 2>/dev/null || true
-            break
-        fi
-        
-        sleep 1
     done
+fi
+
+# Cache the URL for future restarts
+if [ -n "$CLOUDFLARE_URL" ]; then
+    echo "$CLOUDFLARE_URL" > /tmp/mlflow_cf_url
 fi
 
 echo "=============================================================="

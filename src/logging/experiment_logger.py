@@ -97,15 +97,19 @@ class ExperimentLogger:
                     self.exp_id = getattr(active_run.info, 'experiment_id', "0")
 
                 self.cf_url = None
-                if os.path.exists("/tmp/mlflow_tunnel.log"):
-                    try:
-                        with open("/tmp/mlflow_tunnel.log", "r", encoding="utf-8", errors="ignore") as f:
-                            log_txt = f.read()
-                        m = re.findall(r'https://[-a-zA-Z0-9.]+\.trycloudflare\.com', log_txt)
-                        if m:
-                            self.cf_url = m[0]
-                    except Exception:
-                        pass
+                # Try the live tunnel log first
+                for log_path in ["/tmp/mlflow_tunnel.log", "/tmp/mlflow_cf_url"]:
+                    if self.cf_url:
+                        break
+                    if os.path.exists(log_path):
+                        try:
+                            with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                                log_txt = f.read().strip()
+                            m = re.findall(r'https://[-a-zA-Z0-9]+\.trycloudflare\.com', log_txt)
+                            if m:
+                                self.cf_url = m[0]
+                        except Exception:
+                            pass
 
                 if self.cf_url:
                     print(f"✓ MLflow Tracking Active | Experiment: '{experiment_name}' | Run ID: {self.run_id}")
