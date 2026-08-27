@@ -266,7 +266,11 @@ class CameraEasyCarlaEnv(gym.Env):
         if hasattr(self.easy_env, 'ego') and self.easy_env.ego is not None and self.world_map is not None:
             try:
                 tf = self.easy_env.ego.get_transform()
-                wp = self.world_map.get_waypoint(tf.location)
+                wp_exact = self.world_map.get_waypoint(tf.location, project_to_road=False, lane_type=carla.LaneType.Driving)
+                if wp_exact is None:
+                    self.easy_env._is_off_road = True
+
+                wp = self.world_map.get_waypoint(tf.location, project_to_road=True)
                 if wp:
                     fwd, wp_fwd = tf.get_forward_vector(), wp.transform.get_forward_vector()
                     state["heading_cos"] = float(np.clip(fwd.x * wp_fwd.x + fwd.y * wp_fwd.y, -1.0, 1.0))
@@ -275,9 +279,15 @@ class CameraEasyCarlaEnv(gym.Env):
                     dy = tf.location.y - wp.transform.location.y
                     lat_cross = abs(dx * wp_right.x + dy * wp_right.y)
                     state["lateral_dist"] = float(min(3.0, lat_cross))
+                    if not wp.is_junction and lat_cross > ((wp.lane_width / 2.0) + 0.8):
+                        self.easy_env._is_off_road = True
+                    if not wp.is_junction and state["heading_cos"] < -0.2:
+                        self.easy_env._is_off_road = True
             except Exception:
                 pass
 
+        state["is_off_road"] = bool(self.easy_env._is_off_road)
+        state["is_collision"] = bool(self.easy_env._is_collision)
         reward, sub_info = self.reward_calc.compute_reward(state, self.curriculum_factor)
         terminated = bool(done or self.easy_env._is_collision or self.easy_env._is_off_road or sub_info["is_stalled"])
         truncated = bool(self.easy_env.time_step >= self.easy_env.max_time_episode)

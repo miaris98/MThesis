@@ -48,7 +48,8 @@ class CameraSensorManager:
                 def _callback(image):
                     array = np.frombuffer(image.raw_data, dtype=np.uint8)
                     array = np.reshape(array, (self.img_height, self.img_width, 4))
-                    self.panorama_buffer[:, start_c:end_c, :] = array[:, :, :3]
+                    # CARLA raw_data is BGRA. Convert to standard RGB [R, G, B]
+                    self.panorama_buffer[:, start_c:end_c, :] = array[:, :, [2, 1, 0]]
                 return _callback
 
             cam_sensor.listen(make_callback(col_start, col_end))
