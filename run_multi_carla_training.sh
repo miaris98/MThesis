@@ -293,9 +293,9 @@ while true; do
         > "$LOG_FILE" 2>/dev/null || true
         tmux new-session -d -s "$SESSION_NAME" \
             "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -quality-level=Low -benchmark -fps=20' > ${LOG_FILE} 2>&1"
-        sleep 2
+        sleep 3
     done
-    sleep 2
+    sleep 3
 
     # 3. Health check all CARLA server instances
     echo "--> Probing all $NUM_ENVS CARLA server instances..."
@@ -330,7 +330,7 @@ while true; do
             if "$PYTHON_BIN" -W ignore -c "
 import sys, glob, socket
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.settimeout(0.4)
+s.settimeout(0.5)
 res = s.connect_ex(('127.0.0.1', $PORT))
 s.close()
 if res != 0:
@@ -339,8 +339,11 @@ for e in glob.glob('/workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg'):
     if e not in sys.path: sys.path.insert(0, e)
 import carla
 c = carla.Client('127.0.0.1', $PORT)
-c.set_timeout(2.0)
-v = c.get_server_version()
+c.set_timeout(4.0)
+w = c.get_world()
+bp = w.get_blueprint_library()
+if bp is None:
+    sys.exit(1)
 " 2>/dev/null; then
                 ready=true
                 echo ""
