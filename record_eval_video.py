@@ -188,16 +188,21 @@ def record_eval_video(
                 break
     finally:
         video_writer.release()
-        cleanup_chase_camera()
-        env.close()
+        print("✓ Raw video frames written. Finalizing H.264 MP4 conversion...")
         if os.path.exists(raw_path):
             try:
                 cmd = ["ffmpeg", "-y", "-i", raw_path, "-vcodec", "libx264", "-pix_fmt", "yuv420p", "-movflags", "faststart", output_video]
                 subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 if os.path.exists(output_video):
                     os.remove(raw_path)
-            except Exception:
-                pass
+                    print(f"🎬 Successfully generated HD driving video: {output_video}")
+            except Exception as e:
+                print(f"ffmpeg notice: {e}")
+        cleanup_chase_camera()
+        try:
+            env.close()
+        except Exception:
+            pass
 
 
 def main():
