@@ -93,26 +93,30 @@ class ExperimentLogger:
 
                 self.use_mlflow = True
                 active_run = self.mlflow.active_run()
+                self.exp_id = "0"
                 if active_run:
                     self.run_id = active_run.info.run_id
+                    self.exp_id = getattr(active_run.info, 'experiment_id', "0")
 
-                cf_url = None
+                self.cf_url = None
                 if os.path.exists("/tmp/mlflow_tunnel.log"):
                     try:
                         with open("/tmp/mlflow_tunnel.log", "r") as f:
                             log_txt = f.read()
-                        m = re.search(r'https://[-a-zA-Z0-9@:%._\+~#=]*\.trycloudflare\.com', log_txt)
+                        m = re.findall(r'https://[-a-zA-Z0-9@:%._\+~#=]*\.trycloudflare\.com', log_txt)
                         if m:
-                            cf_url = m.group(0)
+                            self.cf_url = m[-1]
                     except Exception:
                         pass
 
                 print(f"======================================================================")
                 print(f"   📊 MLFLOW DASHBOARD ONLINE (PORT {mlflow_port})                      ")
-                if cf_url:
-                    print(f"   👉 Public HTTPS URL:      {cf_url}          ")
-                print(f"   👉 Vast.ai Tunnel:        Open Port {mlflow_port} in Vast.ai Tunnels UI")
-                print(f"   👉 Localhost URL:         http://127.0.0.1:{mlflow_port}             ")
+                if self.cf_url:
+                    print(f"   👉 \033[1;32mPublic HTTPS URL:  {self.cf_url}\033[0m")
+                    print(f"   👉 \033[1;32mLive Run Link:     {self.cf_url}/#/experiments/{self.exp_id}/runs/{self.run_id}\033[0m")
+                    print(f"   👉 \033[1;32mLive Metrics Chart:{self.cf_url}/#/metric?runs=[%22{self.run_id}%22]&metric=%22Reward_Moving_Avg_10%22&experiments=[%22{self.exp_id}%22]\033[0m")
+                else:
+                    print(f"   👉 Vast.ai Tunnel:    Open Port {mlflow_port} in Vast.ai Tunnels UI")
                 print(f"   ✓ Experiment: '{experiment_name}' | Run ID: {self.run_id}")
                 print(f"======================================================================")
             except Exception as e:
@@ -162,5 +166,7 @@ class ExperimentLogger:
         if self.use_mlflow:
             try:
                 self.mlflow.end_run()
+                if getattr(self, 'cf_url', None) and getattr(self, 'run_id', None):
+                    print(f"\n📊 [MLflow Run Completed] Live Run: \033[1;32m{self.cf_url}/#/experiments/{self.exp_id}/runs/{self.run_id}\033[0m")
             except Exception:
                 pass
