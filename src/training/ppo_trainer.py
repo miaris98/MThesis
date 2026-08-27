@@ -25,48 +25,35 @@ class PPOTrainer:
         self.cfg = config
         os.makedirs(self.cfg.log_dir, exist_ok=True)
         os.makedirs(self.cfg.checkpoint_dir, exist_ok=True)
-
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self._init_cuda_optimizations()
-
+        self._init_cuda()
         self.ports = self.cfg.get_ports()
         self.num_envs = len(self.ports)
         self.env = create_vector_carla_env(self.cfg)
-        self.agent = self._create_agent()
+        self.agent = ActorCriticPPO(
+            action_dim=3, features_dim=512, backbone_name=self.cfg.backbone,
+            policy_arch=self.cfg.policy_arch, freeze_backbone=self.cfg.freeze_backbone,
+            use_pretrained=self.cfg.use_pretrained, weights_path=self.cfg.weights_path
+        ).to(self.device)
         try:
             self.optimizer = optim.Adam(self.agent.parameters(), lr=self.cfg.lr, foreach=False)
         except TypeError:
             self.optimizer = optim.Adam(self.agent.parameters(), lr=self.cfg.lr)
         self.scaler = torch.amp.GradScaler('cuda', enabled=torch.cuda.is_available())
-
         self.reward_normalizer = RunningMeanStd()
         self.logger = ExperimentLogger(
-            self.cfg.log_dir,
-            checkpoint_dir=self.cfg.checkpoint_dir,
-            experiment_name=self.cfg.experiment_name,
-            use_mlflow=self.cfg.use_mlflow,
-            mlflow_port=self.cfg.mlflow_port,
-            resume=self.cfg.resume and not self.cfg.fresh
+            self.cfg.log_dir, checkpoint_dir=self.cfg.checkpoint_dir,
+            experiment_name=self.cfg.experiment_name, use_mlflow=self.cfg.use_mlflow,
+            mlflow_port=self.cfg.mlflow_port, resume=self.cfg.resume and not self.cfg.fresh
         )
         self.logger.log_params(self.cfg)
-
-        csv_path = os.path.join(self.cfg.log_dir, "training_telemetry.csv")
-        self.csv_logger = CSVTelemetryLogger(csv_path)
-
-        self.global_step = 0
-        self.best_reward = -float("inf")
-        self.best_moving_avg = -float("inf")
-        self.patience_counter = 0
-        self.recent_rewards: List[float] = []
-        self.early_stop_triggered = False
-        self.early_stop_reason = ""
-        self.episode_count = 1
-        self.train_start_time = None
-        self.last_progress_step = 0
-        self.last_progress_time = None
+        self.csv_logger = CSVTelemetryLogger(os.path.join(self.cfg.log_dir, "training_telemetry.csv"))
+        self.global_step, self.best_reward, self.best_moving_avg, self.patience_counter = 0, -float("inf"), -float("inf"), 0
+        self.recent_rewards, self.early_stop_triggered, self.early_stop_reason = [], False, ""
+        self.episode_count, self.train_start_time, self.last_progress_step, self.last_progress_time = 1, None, 0, None
         self._handle_checkpoints()
 
-    def _init_cuda_optimizations(self) -> None:
+    def _init_cuda(self) -> None:
         if torch.cuda.is_available():
             try:
                 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -76,41 +63,26 @@ class PPOTrainer:
             except Exception:
                 pass
 
-    def _create_agent(self) -> ActorCriticPPO:
-        return ActorCriticPPO(
-            action_dim=3, features_dim=512, backbone_name=self.cfg.backbone,
-            policy_arch=self.cfg.policy_arch, freeze_backbone=self.cfg.freeze_backbone,
-            use_pretrained=self.cfg.use_pretrained, weights_path=self.cfg.weights_path
-        ).to(self.device)
-
     def _handle_checkpoints(self) -> None:
         if self.cfg.fresh:
-            for fname in os.listdir(self.cfg.checkpoint_dir):
-                fpath = os.path.join(self.cfg.checkpoint_dir, fname)
-                if os.path.isfile(fpath):
-                    try:
-                        os.remove(fpath)
-                    except Exception:
-                        pass
+            for f in [os.path.join(self.cfg.checkpoint_dir, x) for x in os.listdir(self.cfg.checkpoint_dir)]:
+                if os.path.isfile(f):
+                    try: os.remove(f)
+                    except Exception: pass
         elif self.cfg.resume:
             latest = os.path.join(self.cfg.checkpoint_dir, "ppo_carla_latest.pth")
             if not os.path.exists(latest):
                 latest = os.path.join(self.cfg.checkpoint_dir, "ppo_carla_best.pth")
             if os.path.exists(latest):
                 self.agent.load_state_dict(torch.load(latest, map_location=self.device), strict=False)
-            state_file = os.path.join(self.cfg.checkpoint_dir, "train_state.json")
-            if os.path.exists(state_file):
-                with open(state_file) as f:
-                    st = json.load(f)
-                self.global_step = st.get("global_step", 0)
-                self.best_reward = st.get("best_episode_reward", -float("inf"))
+            sf = os.path.join(self.cfg.checkpoint_dir, "train_state.json")
+            if os.path.exists(sf):
+                with open(sf) as f: st = json.load(f)
+                self.global_step, self.best_reward = st.get("global_step", 0), st.get("best_episode_reward", -float("inf"))
 
     def _recover_env(self) -> Dict[str, np.ndarray]:
-        """Reconnect parallel CARLA environments without reloading policy models."""
-        try:
-            self.env.close()
-        except Exception:
-            pass
+        try: self.env.close()
+        except Exception: pass
         time.sleep(2.0)
         for attempt in range(5):
             try:
@@ -118,9 +90,9 @@ class PPOTrainer:
                 obs, _ = self.env.reset()
                 return obs
             except Exception as e:
-                print(f"--> [Env Recovery Attempt {attempt+1}/5: {e}] Retrying in 3s...")
+                print(f"--> [Recovery Attempt {attempt+1}/5: {e}] Retrying in 3s...")
                 time.sleep(3.0)
-        raise RuntimeError("Failed to recover CARLA environment after 5 attempts.")
+        raise RuntimeError("Failed to recover CARLA environment.")
 
     def train(self) -> None:
         """Main PPO training loop with vectorized rollouts, advantage estimation, and early stopping."""
@@ -283,7 +255,7 @@ class PPOTrainer:
         b_vis, b_spd, b_act, b_logp, b_adv, b_ret, b_val = buffer.compute_returns_and_advantages(next_val, next_done=last_dones)
         total_samples = buffer.total_transitions
         b_inds = np.arange(total_samples)
-        policy_losses, value_losses = [], []
+        policy_losses, value_losses, entropies, kls, clip_fracs = [], [], [], [], []
         ppo_start = time.time()
 
         if torch.cuda.is_available():
@@ -299,7 +271,12 @@ class PPOTrainer:
                     _, new_logp, entropy, new_val = self.agent.get_action_and_value(
                         speed=b_spd[mb], action=b_act[mb], visual_features=b_vis[mb] if is_frozen else None
                     )
-                    ratio = (new_logp - b_logp[mb]).exp()
+                    log_ratio = new_logp - b_logp[mb]
+                    ratio = log_ratio.exp()
+                    with torch.no_grad():
+                        approx_kl = ((ratio - 1) - log_ratio).mean().item()
+                        clip_frac = ((ratio - 1.0).abs() > self.cfg.clip_coef).float().mean().item()
+
                     pg_loss = torch.max(-b_adv[mb] * ratio, -b_adv[mb] * torch.clamp(ratio, 1.0 - self.cfg.clip_coef, 1.0 + self.cfg.clip_coef)).mean()
                     v_loss = 0.5 * ((new_val - b_ret[mb]) ** 2).mean()
                     total_loss = pg_loss + 0.5 * v_loss - self.cfg.ent_coef * entropy.mean()
@@ -310,8 +287,12 @@ class PPOTrainer:
                 nn.utils.clip_grad_norm_(self.agent.parameters(), max_norm=0.5)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
+
                 policy_losses.append(pg_loss.item())
                 value_losses.append(v_loss.item())
+                entropies.append(entropy.mean().item())
+                kls.append(approx_kl)
+                clip_fracs.append(clip_frac)
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -322,7 +303,25 @@ class PPOTrainer:
         ppo_elapsed = time.time() - ppo_start
         mean_p_loss = float(np.mean(policy_losses)) if policy_losses else 0.0
         mean_v_loss = float(np.mean(value_losses)) if value_losses else 0.0
-        print(f"[{now_str} | PPO Policy Update] Step: {self.global_step:05d}/{self.cfg.total_steps} | Rollout: {sps:4.1f} Steps/s ({fps:4.1f} FPS) | PPO Opt: {ppo_elapsed*1000.0:5.1f}ms | Policy Loss: {mean_p_loss:+.4f} | Value Loss: {mean_v_loss:.4f}", flush=True)
+        mean_entropy = float(np.mean(entropies)) if entropies else 0.0
+        mean_kl = float(np.mean(kls)) if kls else 0.0
+        mean_clip_frac = float(np.mean(clip_fracs)) if clip_fracs else 0.0
+
+        with torch.no_grad():
+            y_true = b_ret.cpu().numpy()
+            y_pred = b_val.cpu().numpy()
+            var_y = np.var(y_true)
+            expl_var = float(1.0 - np.var(y_true - y_pred) / (var_y + 1e-8)) if var_y > 0 else 0.0
+
+        self.logger.add_scalar("Loss/Policy_Loss", mean_p_loss, self.global_step)
+        self.logger.add_scalar("Loss/Value_Loss", mean_v_loss, self.global_step)
+        self.logger.add_scalar("Loss/Entropy", mean_entropy, self.global_step)
+        self.logger.add_scalar("Loss/Approx_KL", mean_kl, self.global_step)
+        self.logger.add_scalar("Loss/Clip_Fraction", mean_clip_frac, self.global_step)
+        self.logger.add_scalar("Loss/Explained_Variance", expl_var, self.global_step)
+        self.logger.add_scalar("Perf/PPO_Optimization_MS", ppo_elapsed * 1000.0, self.global_step)
+
+        print(f"[{now_str} | PPO Policy Update] Step: {self.global_step:05d}/{self.cfg.total_steps} | Rollout: {sps:4.1f} Steps/s ({fps:4.1f} FPS) | PPO Opt: {ppo_elapsed*1000.0:5.1f}ms | Policy Loss: {mean_p_loss:+.4f} | Value Loss: {mean_v_loss:.4f} | KL: {mean_kl:.4f} | ExplVar: {expl_var:.2f}", flush=True)
 
         latest_path = os.path.join(self.cfg.checkpoint_dir, "ppo_carla_latest.pth")
         torch.save(self.agent.state_dict(), latest_path)
