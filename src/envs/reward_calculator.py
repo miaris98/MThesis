@@ -42,59 +42,61 @@ class RewardCalculator:
         is_off_road = bool(state.get("is_off_road", False))
         time_step = int(state.get("time_step", 0))
 
-        # 1. Dual-Horizon Heading alignment
+        # 1. Dual-Horizon Heading alignment [-0.5, +0.5]
         r_heading = 0.35 * max(-1.0, min(1.0, heading_cos)) + 0.15 * max(-1.0, min(1.0, heading_cos_far))
         
-        # 2. Gaussian Lane Potential Well (+1.0 at center, -0.8 d^2)
-        r_lateral = 1.0 * math.exp(-(lateral_dist ** 2) / (2.0 * (0.45 ** 2))) - 0.8 * (lateral_dist ** 2)
-        r_boundary = -2.0 * (max(0.0, lateral_dist - 0.9) ** 2)
+        # 2. Gaussian Lane Potential Well [-2.0, +1.0]
+        lat_norm = min(3.0, max(0.0, lateral_dist))
+        r_lateral = 1.0 * math.exp(-(lat_norm ** 2) / (2.0 * (0.45 ** 2))) - 0.5 * min(4.0, lat_norm ** 2)
+        r_lateral = max(-2.0, min(1.0, r_lateral))
+        r_boundary = -1.5 * min(4.0, (max(0.0, lat_norm - 0.9) ** 2))
 
-        # 3. Speed & Velocity Progress along Lane Tangent
+        # 3. Speed & Velocity Progress along Lane Tangent [0.0, +1.5]
         adaptive_target_speed = self.desired_speed * curve_factor
         if is_junction:
             adaptive_target_speed = min(adaptive_target_speed, 15.0)
             
         v_proj = speed_kmh * max(0.0, heading_cos)
         speed_diff = abs(v_proj - adaptive_target_speed)
-        lane_centering_gate = max(0.0, 1.0 - (lateral_dist / 1.2)) * max(0.0, heading_cos)
+        lane_centering_gate = max(0.0, 1.0 - (lat_norm / 1.5)) * max(0.0, heading_cos)
         
         if not is_at_red_light:
             if speed_diff <= 3.0:
                 raw_speed_r = 1.5
             else:
-                raw_speed_r = 1.5 * max(0.0, 1.0 - (speed_diff - 3.0) / adaptive_target_speed)
+                raw_speed_r = 1.5 * max(0.0, 1.0 - (speed_diff - 3.0) / max(10.0, adaptive_target_speed))
             r_speed = raw_speed_r * lane_centering_gate
         else:
             r_speed = 0.0
 
-        # 4. Steering Smoothness, Rate & Envelope Regularization
+        # 4. Steering Smoothness, Rate & Envelope Regularization [-1.0, 0.0]
         steer_diff = abs(steer - self.prev_steer)
         self.prev_steer = steer
-        r_steer_rate = -0.3 * steer_diff
-        r_steer_mag = -0.35 * (steer ** 2)
+        r_steer_rate = -0.3 * min(1.0, steer_diff)
+        r_steer_mag = -0.35 * min(1.0, steer ** 2)
         steer_max_allowed = max(0.20, min(0.60, 15.0 / (speed_kmh + 10.0)))
-        r_steer_envelope = -2.0 * (max(0.0, abs(steer) - steer_max_allowed) ** 2)
-        r_steer = r_steer_rate + r_steer_mag + r_steer_envelope
+        r_steer_envelope = -1.5 * min(2.0, (max(0.0, abs(steer) - steer_max_allowed) ** 2))
+        r_steer = max(-1.0, r_steer_rate + r_steer_mag + r_steer_envelope)
 
-        # 5. Comfort & Throttle-Brake Jitter Penalty
+        # 5. Comfort & Throttle-Brake Jitter Penalty [-0.5, 0.0]
         throttle_diff = abs(throttle - self.prev_throttle)
         self.prev_throttle = throttle
-        r_comfort = -0.5 * (throttle * brake) - 0.2 * throttle_diff
+        r_comfort = -0.3 * (throttle * brake) - 0.2 * min(1.0, throttle_diff)
 
-        # 6. Wrong-Way / Reverse Driving Penalty
+        # 6. Wrong-Way / Reverse Driving Penalty [-3.0, 0.0]
         r_wrong_way = -3.0 * max(0.0, -heading_cos) * min(speed_kmh / 5.0, 1.0)
 
-        # 7. Traffic Light Compliance
+        # 7. Traffic Light Compliance [-3.0, +1.5]
         if is_at_red_light:
             if speed_kmh < 2.0 or brake > 0.2:
                 self.stalled_steps = 0
                 r_light = 1.5
             else:
-                r_light = -5.0
+                r_light = -3.0
         else:
             r_light = 0.0
 
-        # 8. Obstacle Proximity Barrier & TTC
+        # 8. Obstacle Proximity Barrier & TTC [-3.0, +1.5]
         r_obstacle = 0.0
         if min_obs_dist < 10.0:
             barrier_scale = 1.0 - (min_obs_dist / 10.0)
@@ -102,12 +104,12 @@ class RewardCalculator:
             if brake > 0.2 or speed_kmh < 2.0:
                 r_obstacle = 1.5 * barrier_scale * multiplier
             elif throttle > 0.2:
-                r_obstacle = -4.0 * (barrier_scale ** 2) * multiplier
+                r_obstacle = -3.0 * (barrier_scale ** 2) * multiplier
 
-        r_ttc = -3.0 * (max(0.0, (2.0 - ttc_seconds) / 2.0) ** 2) if ttc_seconds < 2.0 else 0.0
+        r_ttc = -2.0 * min(2.0, (max(0.0, (2.0 - ttc_seconds) / 2.0) ** 2)) if ttc_seconds < 2.0 else 0.0
 
-        # 9. Idle & Stall Penalties (with 30-step acceleration grace period)
-        if time_step > 30 and not is_at_red_light and min_obs_dist >= 10.0:
+        # 9. Idle & Stall Penalties (with 40-step acceleration grace period)
+        if time_step > 40 and not is_at_red_light and min_obs_dist >= 10.0:
             if speed_kmh < 2.0:
                 self.stalled_steps += 1
                 r_idle = -0.5
@@ -126,7 +128,7 @@ class RewardCalculator:
         elif is_off_road:
             r_terminal = -20.0
         elif is_stalled:
-            r_terminal = -20.0
+            r_terminal = -15.0
 
         alpha = curriculum_factor
         r_boundary_s = r_boundary * alpha

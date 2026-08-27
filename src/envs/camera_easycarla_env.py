@@ -244,7 +244,7 @@ class CameraEasyCarlaEnv(gym.Env):
     def _sub_step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
         throttle = float(np.clip((action[0] + 1.0) / 2.0, 0.0, 1.0))
         steer = float(np.clip(action[1], -1.0, 1.0))
-        brake = float(np.clip((action[2] - 0.2) / 0.8, 0.0, 1.0)) if action[2] > 0.2 else 0.0
+        brake = float(np.clip(action[2], 0.0, 1.0)) if action[2] > 0.4 and throttle < 0.3 else 0.0
 
         cost, done = 0.0, False
         try:
@@ -269,8 +269,12 @@ class CameraEasyCarlaEnv(gym.Env):
                 wp = self.world_map.get_waypoint(tf.location)
                 if wp:
                     fwd, wp_fwd = tf.get_forward_vector(), wp.transform.get_forward_vector()
-                    state["heading_cos"] = fwd.x * wp_fwd.x + fwd.y * wp_fwd.y
-                    state["lateral_dist"] = tf.location.distance(wp.transform.location)
+                    state["heading_cos"] = float(np.clip(fwd.x * wp_fwd.x + fwd.y * wp_fwd.y, -1.0, 1.0))
+                    wp_right = wp.transform.get_right_vector()
+                    dx = tf.location.x - wp.transform.location.x
+                    dy = tf.location.y - wp.transform.location.y
+                    lat_cross = abs(dx * wp_right.x + dy * wp_right.y)
+                    state["lateral_dist"] = float(min(3.0, lat_cross))
             except Exception:
                 pass
 
