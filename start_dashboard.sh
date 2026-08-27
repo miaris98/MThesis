@@ -52,6 +52,12 @@ fi
 echo "Diagnostics Dashboard setup complete!"
 echo "----------------------------------------------------------------"
 echo "  📊 MLFLOW WEB DASHBOARD URL:"
+if [ -f /tmp/mlflow_tunnel.log ]; then
+    CLOUDFLARE_URL=$(python -c "import re; txt=open('/tmp/mlflow_tunnel.log','r').read(); m=re.search(r'https://[a-zA-Z0-9.-]+\.trycloudflare\.com', txt); print(m.group(0) if m else '')" 2>/dev/null || true)
+    if [ -n "$CLOUDFLARE_URL" ]; then
+        echo -e "  👉 \033[1;32mlink to mlflow :     $CLOUDFLARE_URL\033[0m"
+    fi
+fi
 echo "  👉 http://$PUBLIC_IP:$MLFLOW_PORT"
 echo "  👉 http://127.0.0.1:$MLFLOW_PORT"
 echo "----------------------------------------------------------------"

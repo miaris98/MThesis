@@ -146,14 +146,24 @@ python test_connection.py --host 127.0.0.1 --port 2000
 
 The training supervisor automatically launches an isolated MLflow UI server on **port 10100** (or port 7070) in a dedicated tmux session `mlflow_server`.
 
-### Option A: Vast.ai Web Portal Tunnel (Easiest, No SSH Needed)
+### Option A: Automatic Cloudflare Public HTTPS Tunnel (Instant, No Config Needed)
+When you launch `run_multi_carla_training.sh`, a public Cloudflare tunnel is automatically started and the live HTTPS dashboard link is printed directly in **bright green** in the terminal:
+```text
+==============================================================
+   📊 MLFLOW DASHBOARD ONLINE (PORT 10100)           
+   👉 link to mlflow :     https://xxxx-yyyy-zzzz.trycloudflare.com
+==============================================================
+```
+Simply click the link to open your live MLflow Experiment Dashboard directly from any browser or mobile device!
+
+### Option B: Vast.ai Web Portal Tunnel
 1. On your Vast.ai web dashboard, navigate to **Tunnels (Open New Ports)** (`http://<VAST_IP>:<PORT>/#/tunnels`).
 2. Click the **"Create New Tunnel"** button.
 3. In the **Target Port** field, enter: `10100` (or the active MLflow port).
 4. Click **Create** $\to$ Vast.ai will generate a clickable public **Tunnel URL**.
 5. Click the link to open your live **MLflow Experiment Dashboard** directly in your browser!
 
-### Option B: Local SSH Tunnel
+### Option C: Local SSH Tunnel
 From your local Windows PowerShell / Terminal:
 ```bash
 ssh -p <SSH_PORT> -L 10100:localhost:10100 root@<VAST_IP>
