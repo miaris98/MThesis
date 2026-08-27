@@ -62,8 +62,6 @@ class ExperimentLogger:
                         start_new_session=True
                     )
                     time.sleep(2)
-                else:
-                    print(f"✓ MLflow UI server is already active on port {mlflow_port} (re-using persistent session).")
 
                 self.mlflow = mlflow
                 if port_in_use:
@@ -101,24 +99,21 @@ class ExperimentLogger:
                 self.cf_url = None
                 if os.path.exists("/tmp/mlflow_tunnel.log"):
                     try:
-                        with open("/tmp/mlflow_tunnel.log", "r") as f:
+                        with open("/tmp/mlflow_tunnel.log", "r", encoding="utf-8", errors="ignore") as f:
                             log_txt = f.read()
-                        m = re.findall(r'https://[a-zA-Z0-9.-]+\.trycloudflare\.com', log_txt)
+                        m = re.findall(r'https://[-a-zA-Z0-9.]+\.trycloudflare\.com', log_txt)
                         if m:
                             self.cf_url = m[0]
                     except Exception:
                         pass
 
-                print(f"======================================================================")
-                print(f"   📊 MLFLOW DASHBOARD ONLINE (PORT {mlflow_port})                      ")
                 if self.cf_url:
-                    print(f"   👉 \033[1;32mlink to mlflow :     {self.cf_url}\033[0m")
-                    print(f"   👉 \033[1;32mLive Run Link:        {self.cf_url}/#/experiments/{self.exp_id}/runs/{self.run_id}\033[0m")
-                    print(f"   👉 \033[1;32mLive Metrics Chart:   {self.cf_url}/#/metric?runs=[%22{self.run_id}%22]&metric=%22Reward_Moving_Avg_10%22&experiments=[%22{self.exp_id}%22]\033[0m")
+                    print(f"✓ MLflow Tracking Active | Experiment: '{experiment_name}' | Run ID: {self.run_id}")
+                    print(f"  👉 \033[1;32mlink to mlflow :     {self.cf_url}\033[0m")
+                    print(f"  👉 \033[1;32mLive Run Link:        {self.cf_url}/#/experiments/{self.exp_id}/runs/{self.run_id}\033[0m")
+                    print(f"  👉 \033[1;32mLive Metrics Chart:   {self.cf_url}/#/metric?runs=[%22{self.run_id}%22]&metric=%22Reward_Moving_Avg_10%22&experiments=[%22{self.exp_id}%22]\033[0m")
                 else:
-                    print(f"   👉 Vast.ai Tunnel:    Open Port {mlflow_port} in Vast.ai Tunnels UI")
-                print(f"   ✓ Experiment: '{experiment_name}' | Run ID: {self.run_id}")
-                print(f"======================================================================")
+                    print(f"✓ MLflow Tracking Active | Experiment: '{experiment_name}' | Run ID: {self.run_id} (Port {mlflow_port})")
             except Exception as e:
                 print(f"--> MLflow import/init note ({e}). Logging to TensorBoard at {log_dir}")
                 self.use_mlflow = False

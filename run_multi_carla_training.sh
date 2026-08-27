@@ -203,36 +203,89 @@ else
     echo "✓ MLflow UI server active on port ${MLFLOW_PORT}"
 fi
 
-# Ensure cloudflared is installed for public HTTPS dashboard access
-CLOUDFLARED_BIN=$(command -v cloudflared || echo "")
+# Function to test if a cloudflared executable is genuinely valid and working
+is_valid_cloudflared() {
+    local bin="$1"
+    [ -n "$bin" ] && [ -x "$bin" ] && "$bin" --version &>/dev/null
+}
+
+# Locate or install working cloudflared binary for direct public HTTPS dashboard access
+CLOUDFLARED_BIN=""
+if is_valid_cloudflared "$(command -v cloudflared 2>/dev/null)"; then
+    CLOUDFLARED_BIN="$(command -v cloudflared)"
+elif is_valid_cloudflared "/usr/local/bin/cloudflared"; then
+    CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
+elif is_valid_cloudflared "/usr/bin/cloudflared"; then
+    CLOUDFLARED_BIN="/usr/bin/cloudflared"
+fi
+
 if [ -z "$CLOUDFLARED_BIN" ]; then
-    if [ -f /usr/local/bin/cloudflared ]; then
+    echo "--> Installing cloudflared binary for direct public HTTPS dashboard access..."
+    rm -f /usr/local/bin/cloudflared /tmp/cloudflared*
+    
+    # Method 1: direct binary download
+    if curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" -o /usr/local/bin/cloudflared 2>/dev/null || \
+       wget -q "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" -O /usr/local/bin/cloudflared 2>/dev/null; then
+        chmod +x /usr/local/bin/cloudflared 2>/dev/null || true
+    fi
+
+    if is_valid_cloudflared "/usr/local/bin/cloudflared"; then
         CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
     else
-        echo "--> Installing cloudflared standalone binary for direct public HTTPS dashboard access..."
-        wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O /usr/local/bin/cloudflared 2>/dev/null || true
-        chmod +x /usr/local/bin/cloudflared 2>/dev/null || true
-        if [ -f /usr/local/bin/cloudflared ]; then
+        # Method 2: debian package fallback
+        if wget -q "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -O /tmp/cloudflared.deb 2>/dev/null; then
+            dpkg -i /tmp/cloudflared.deb >/dev/null 2>&1 || true
+            rm -f /tmp/cloudflared.deb
+        fi
+        if is_valid_cloudflared "$(command -v cloudflared 2>/dev/null)"; then
+            CLOUDFLARED_BIN="$(command -v cloudflared)"
+        elif is_valid_cloudflared "/usr/local/bin/cloudflared"; then
             CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
         fi
     fi
 fi
 
 CLOUDFLARE_URL=""
-if [ -n "$CLOUDFLARED_BIN" ] && [ -x "$CLOUDFLARED_BIN" ]; then
+if [ -n "$CLOUDFLARED_BIN" ]; then
     pkill -9 -f cloudflared 2>/dev/null || true
     rm -f /tmp/mlflow_tunnel.log
     echo "--> 🌐 Launching public Cloudflare HTTPS tunnel for MLflow (port ${MLFLOW_PORT})..."
-    nohup "$CLOUDFLARED_BIN" tunnel --url "http://127.0.0.1:${MLFLOW_PORT}" > /tmp/mlflow_tunnel.log 2>&1 &
+    nohup "$CLOUDFLARED_BIN" tunnel --url "http://127.0.0.1:${MLFLOW_PORT}" --no-autoupdate > /tmp/mlflow_tunnel.log 2>&1 &
+    CLOUDFLARED_PID=$!
     
     echo "--> Waiting for Cloudflare public tunnel URL to generate..."
-    for i in $(seq 1 15); do
+    for i in $(seq 1 20); do
         if [ -f /tmp/mlflow_tunnel.log ]; then
-            CLOUDFLARE_URL=$("$PYTHON_BIN" -c "import re; txt=open('/tmp/mlflow_tunnel.log','r').read(); m=re.search(r'https://[a-zA-Z0-9.-]+\.trycloudflare\.com', txt); print(m.group(0) if m else '')" 2>/dev/null || true)
+            # Safe Python extraction with utf-8 decoding
+            CLOUDFLARE_URL=$("$PYTHON_BIN" -c "
+import re
+try:
+    with open('/tmp/mlflow_tunnel.log', 'r', encoding='utf-8', errors='ignore') as f:
+        txt = f.read()
+    m = re.search(r'https://[-a-zA-Z0-9.]+\.trycloudflare\.com', txt)
+    if m:
+        print(m.group(0))
+except Exception:
+    pass
+" 2>/dev/null || true)
+
+            # Grep fallback if python did not match
+            if [ -z "$CLOUDFLARE_URL" ]; then
+                CLOUDFLARE_URL=$(grep -o 'https://[^ |]*trycloudflare\.com' /tmp/mlflow_tunnel.log 2>/dev/null | head -n 1 || true)
+            fi
+
             if [ -n "$CLOUDFLARE_URL" ]; then
                 break
             fi
         fi
+        
+        # Check if cloudflared crashed early
+        if ! kill -0 $CLOUDFLARED_PID 2>/dev/null; then
+            echo "--> [Note] cloudflared process terminated. Output log:"
+            head -n 5 /tmp/mlflow_tunnel.log 2>/dev/null || true
+            break
+        fi
+        
         sleep 1
     done
 fi
