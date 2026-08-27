@@ -204,22 +204,31 @@ else
 fi
 
 # Ensure cloudflared is installed for public HTTPS dashboard access
-if ! command -v cloudflared &>/dev/null; then
-    echo "--> Installing cloudflared for direct public HTTPS dashboard access..."
-    (wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -O /tmp/cloudflared.deb 2>/dev/null && \
-     dpkg -i /tmp/cloudflared.deb >/dev/null 2>&1 && rm -f /tmp/cloudflared.deb) || true
+CLOUDFLARED_BIN=$(command -v cloudflared || echo "")
+if [ -z "$CLOUDFLARED_BIN" ]; then
+    if [ -f /usr/local/bin/cloudflared ]; then
+        CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
+    else
+        echo "--> Installing cloudflared standalone binary for direct public HTTPS dashboard access..."
+        wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O /usr/local/bin/cloudflared 2>/dev/null || true
+        chmod +x /usr/local/bin/cloudflared 2>/dev/null || true
+        if [ -f /usr/local/bin/cloudflared ]; then
+            CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
+        fi
+    fi
 fi
 
 CLOUDFLARE_URL=""
-if command -v cloudflared &>/dev/null; then
-    if ! tmux has-session -t mlflow_tunnel 2>/dev/null; then
-        tmux new-session -d -s mlflow_tunnel \
-            "cloudflared tunnel --url http://127.0.0.1:${MLFLOW_PORT} 2>&1 | tee /tmp/mlflow_tunnel.log"
-        sleep 4
-    fi
-    for i in $(seq 1 10); do
+if [ -n "$CLOUDFLARED_BIN" ] && [ -x "$CLOUDFLARED_BIN" ]; then
+    pkill -9 -f cloudflared 2>/dev/null || true
+    rm -f /tmp/mlflow_tunnel.log
+    echo "--> 🌐 Launching public Cloudflare HTTPS tunnel for MLflow (port ${MLFLOW_PORT})..."
+    nohup "$CLOUDFLARED_BIN" tunnel --url "http://127.0.0.1:${MLFLOW_PORT}" > /tmp/mlflow_tunnel.log 2>&1 &
+    
+    echo "--> Waiting for Cloudflare public tunnel URL to generate..."
+    for i in $(seq 1 15); do
         if [ -f /tmp/mlflow_tunnel.log ]; then
-            CLOUDFLARE_URL=$(grep -o 'https://[-a-zA-Z0-9@:%._\+~#=]*\.trycloudflare\.com' /tmp/mlflow_tunnel.log | head -n 1)
+            CLOUDFLARE_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/mlflow_tunnel.log | head -n 1)
             if [ -n "$CLOUDFLARE_URL" ]; then
                 break
             fi
@@ -231,7 +240,7 @@ fi
 echo "=============================================================="
 echo "   📊 MLFLOW DASHBOARD ONLINE (PORT ${MLFLOW_PORT})           "
 if [ -n "$CLOUDFLARE_URL" ]; then
-    echo -e "   👉 \033[1;32mPublic HTTPS URL:  $CLOUDFLARE_URL\033[0m"
+    echo -e "   👉 \033[1;32mlink to mlflow :     $CLOUDFLARE_URL\033[0m"
 fi
 echo "   👉 Vast.ai Tunnel:    Open Port ${MLFLOW_PORT} in Vast.ai Tunnels UI"
 echo "=============================================================="
