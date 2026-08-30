@@ -156,6 +156,8 @@ When you launch `run_multi_carla_training.sh`, a public Cloudflare tunnel is aut
 ```
 Simply click the link to open your live MLflow Experiment Dashboard directly from any browser or mobile device!
 
+> 💡 **Troubleshooting Guide**: If you experience Error 1033, DNS propagation delays, or tunnel disconnects, refer to the [Cloudflare Tunnel & MLflow Troubleshooting Guide](file:///c:/Users/miari/Desktop/MThesis/cloudflare_tunnel_troubleshooting_guide.md) for 1-command diagnosis and fixes.
+
 ### Option B: Vast.ai Web Portal Tunnel
 1. On your Vast.ai web dashboard, navigate to **Tunnels (Open New Ports)** (`http://<VAST_IP>:<PORT>/#/tunnels`).
 2. Click the **"Create New Tunnel"** button.

@@ -136,6 +136,15 @@ done
 export CUDA_MODULE_LOADING=LAZY
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
+# Detect available GPUs so CARLA servers can be spread across adapters instead
+# of every instance defaulting to adapter 0 (Unreal Engine's default).
+NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
+[ -z "$NUM_GPUS" ] || [ "$NUM_GPUS" -lt 1 ] && NUM_GPUS=1
+# PyTorch training is pinned to the last GPU so it doesn't silently pile onto
+# whichever adapter CARLA server #0 already renders on.
+TRAIN_GPU=$((NUM_GPUS - 1))
+echo "Detected GPUs: $NUM_GPUS (CARLA servers round-robin across adapters, training pinned to GPU $TRAIN_GPU)"
+
 # Ensure required tracking packages exist in target environment
 export PYTHONWARNINGS="ignore"
 export OMP_NUM_THREADS=1
@@ -402,11 +411,12 @@ while true; do
         PORT=${PORTS[$i]}
         SESSION_NAME="carla_server_${i}"
         LOG_FILE="/workspace/carla_server_${PORT}.log"
-        echo "--> Launching CARLA Server #$((i+1))/$NUM_ENVS on port $PORT (tmux: $SESSION_NAME)..."
+        GPU_IDX=$((i % NUM_GPUS))
+        echo "--> Launching CARLA Server #$((i+1))/$NUM_ENVS on port $PORT (tmux: $SESSION_NAME, GPU $GPU_IDX)..."
 
         > "$LOG_FILE" 2>/dev/null || true
         tmux new-session -d -s "$SESSION_NAME" \
-            "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -quality-level=Low -benchmark -fps=20' > ${LOG_FILE} 2>&1"
+            "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -graphicsadapter=${GPU_IDX} -quality-level=Low -benchmark -fps=20' > ${LOG_FILE} 2>&1"
         sleep 3
     done
     sleep 3
@@ -475,7 +485,7 @@ if bp is None:
             fuser -k -9 ${PORT}/tcp $((PORT+1))/tcp $((PORT+2))/tcp 2>/dev/null || true
             sleep 2
             tmux new-session -d -s "$SESSION_NAME" \
-                "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -quality-level=Low -benchmark -fps=20' > ${LOG_FILE} 2>&1"
+                "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -graphicsadapter=${GPU_IDX} -quality-level=Low -benchmark -fps=20' > ${LOG_FILE} 2>&1"
             echo -n "   [CARLA #$((i+1))/$NUM_ENVS | Port $PORT (Retry)] Waiting for initialization"
             for attempt_check in $(seq 1 40); do
                 echo -n "."
@@ -566,6 +576,9 @@ v = c.get_server_version()
     export VECLIB_MAXIMUM_THREADS=1
     export NUMEXPR_NUM_THREADS=1
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    # Pin PyTorch to its own GPU so it doesn't default to cuda:0 and pile onto
+    # whichever adapter CARLA server #0 is already rendering on.
+    export CUDA_VISIBLE_DEVICES="$TRAIN_GPU"
 
     "$PYTHON_BIN" -W ignore train_rl_agent.py \
         --env-type camera_easycarla \
