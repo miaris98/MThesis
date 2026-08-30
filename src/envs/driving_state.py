@@ -22,6 +22,11 @@ class DrivingStateExtractor:
     FAR_WAYPOINT_DISTANCE = 10.0
     CURVE_LOOKAHEAD_DISTANCE = 15.0
     MIN_CURVE_FACTOR = 0.4
+    # Hard lateral limit: beyond this the ego has crossed the outer road boundary or is
+    # straddling oncoming lanes, so the episode is cut regardless of nominal lane width.
+    OFF_ROAD_LATERAL_LIMIT = 1.8
+    WRONG_WAY_HEADING_COS = -0.2
+    DEFAULT_LANE_WIDTH = 3.5
 
     def __init__(self, world: Any = None, world_map: Any = None):
         self.world = world
@@ -60,6 +65,7 @@ class DrivingStateExtractor:
             "heading_cos": 1.0,
             "heading_cos_far": 1.0,
             "lateral_dist": 0.0,
+            "lane_width": self.DEFAULT_LANE_WIDTH,
             "curve_factor": 1.0,
             "is_junction": False,
             "off_road": False,
@@ -86,13 +92,18 @@ class DrivingStateExtractor:
             dy = ego_tf.location.y - wp.transform.location.y
             lat_cross = abs(dx * wp_right.x + dy * wp_right.y)
 
+            lane_width = float(getattr(wp, "lane_width", self.DEFAULT_LANE_WIDTH) or self.DEFAULT_LANE_WIDTH)
             lane["heading_cos"] = heading_cos
             lane["lateral_dist"] = float(min(3.0, lat_cross))
+            lane["lane_width"] = lane_width
             lane["is_junction"] = bool(wp.is_junction)
 
-            if not wp.is_junction and lat_cross > ((wp.lane_width / 2.0) + 0.8):
+            # Solid line / road boundary: whichever of the hard limit or the lane's own
+            # half-width-plus-margin is stricter. Junctions have no meaningful lane edge.
+            boundary = min(self.OFF_ROAD_LATERAL_LIMIT, (lane_width / 2.0) + 0.8)
+            if not wp.is_junction and lat_cross > boundary:
                 lane["off_road"] = True
-            if not wp.is_junction and heading_cos < -0.2:
+            if not wp.is_junction and heading_cos < self.WRONG_WAY_HEADING_COS:
                 lane["off_road"] = True
 
             far_wps = wp.next(self.FAR_WAYPOINT_DISTANCE)
@@ -174,7 +185,8 @@ class DrivingStateExtractor:
         """Assemble the complete reward state for the current simulation step."""
         state = {
             "speed_kmh": speed_kmh, "heading_cos": 1.0, "heading_cos_far": 1.0,
-            "lateral_dist": 0.0, "curve_factor": 1.0, "is_junction": False,
+            "lateral_dist": 0.0, "lane_width": self.DEFAULT_LANE_WIDTH,
+            "curve_factor": 1.0, "is_junction": False,
             "steer": steer, "throttle": throttle, "brake": brake,
             "is_at_red_light": False, "min_obs_dist": 99.0, "is_pedestrian": False,
             "ttc_seconds": 99.0, "is_collision": bool(is_collision),
@@ -192,6 +204,7 @@ class DrivingStateExtractor:
         state["heading_cos"] = lane["heading_cos"]
         state["heading_cos_far"] = lane["heading_cos_far"]
         state["lateral_dist"] = lane["lateral_dist"]
+        state["lane_width"] = lane["lane_width"]
         state["curve_factor"] = lane["curve_factor"]
         state["is_junction"] = lane["is_junction"]
         state["is_off_road"] = bool(is_off_road or lane["off_road"])

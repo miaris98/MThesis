@@ -109,11 +109,17 @@ class TestDrivingStateExtractor(unittest.TestCase):
         from src.envs.driving_state import DrivingStateExtractor
 
         extractor = DrivingStateExtractor(world=None, world_map=self._straight_lane_map())
-        # Lane width 3.5 -> off-road beyond 1.75 + 0.8 = 2.55 m of lateral offset.
+        # Boundary is min(OFF_ROAD_LATERAL_LIMIT, lane_width/2 + 0.8) = min(1.8, 2.55) = 1.8 m.
         ego_inside = Ego(Transform(Vec(5.0, 1.0), yaw_deg=0.0))
         state_inside = extractor.extract(ego_inside, 25.0, 50, 0.6, 0.0, 0.0, False, False)
         self.assertAlmostEqual(state_inside["lateral_dist"], 1.0, places=5)
+        self.assertAlmostEqual(state_inside["lane_width"], 3.5, places=5)
         self.assertFalse(state_inside["is_off_road"])
+
+        # 2.0 m is inside the old lane-width rule but crosses the hard 1.8 m boundary.
+        ego_boundary = Ego(Transform(Vec(5.0, 2.0), yaw_deg=0.0))
+        state_boundary = extractor.extract(ego_boundary, 25.0, 50, 0.6, 0.0, 0.0, False, False)
+        self.assertTrue(state_boundary["is_off_road"])
 
         ego_outside = Ego(Transform(Vec(5.0, 3.0), yaw_deg=0.0))
         state_outside = extractor.extract(ego_outside, 25.0, 50, 0.6, 0.0, 0.0, False, False)

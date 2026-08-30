@@ -170,12 +170,15 @@ class CameraEasyCarlaEnv(gym.Env):
             intensity = math.sqrt(impulse.x**2 + impulse.y**2 + impulse.z**2) if impulse else 0.0
             other = getattr(event, 'other_actor', None)
             other_type = getattr(other, 'type_id', '').lower() if other else ''
-            if 'road' in other_type or 'ground' in other_type or 'static.road' in other_type:
+            # Only genuine road-surface contact is ignored, and only when gentle - a hard
+            # curb slam still counts. Every other actor (vehicle, walker, pole, building,
+            # fence, traffic light, unclassified static mesh) terminates on the first event,
+            # with no impulse threshold to delay it by a physics tick or two.
+            if any(k in other_type for k in ('road', 'ground', 'terrain', 'sidewalk')) and intensity < 400.0:
                 return
-            if intensity > 250.0 or any(k in other_type for k in ['vehicle', 'walker', 'pedestrian', 'prop', 'building', 'pole', 'wall', 'fence']):
-                self.easy_env._is_collision = True
-                if hasattr(self.easy_env, 'collision_hist') and self.easy_env.collision_hist is not None:
-                    self.easy_env.collision_hist.append(event)
+            self.easy_env._is_collision = True
+            if hasattr(self.easy_env, 'collision_hist') and self.easy_env.collision_hist is not None:
+                self.easy_env.collision_hist.append(event)
 
         self.easy_env._on_collision = _safe_on_collision
         self.easy_env._on_lane_invasion = lambda event: setattr(self.easy_env, '_is_off_road', True)
@@ -280,6 +283,7 @@ class CameraEasyCarlaEnv(gym.Env):
             "termination_reason": reason, "speed_kmh": speed_kmh,
             "is_at_red_light": state["is_at_red_light"], "min_obs_dist": state["min_obs_dist"],
             "ttc_seconds": state["ttc_seconds"], "lateral_dist": state["lateral_dist"],
+            "lane_width": state["lane_width"], "is_junction": state["is_junction"],
             "heading_cos": state["heading_cos"], **sub_info
         }
         return obs, reward, terminated, truncated, info

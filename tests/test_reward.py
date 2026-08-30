@@ -9,6 +9,9 @@ class TestRewardCalculator(unittest.TestCase):
         state = {
             "speed_kmh": 25.0,
             "heading_cos": 1.0,
+            "lateral_dist": 0.0,
+            "lane_width": 3.5,
+            "is_junction": False,
             "steer": 0.0,
             "throttle": 0.5,
             "brake": 0.0,
@@ -168,6 +171,48 @@ class TestRewardCalculator(unittest.TestCase):
             _, info = calculator.compute_reward(state, curriculum_factor=1.0)
 
         self.assertFalse(info["is_stalled"])
+
+    def test_centered_driving_has_no_lane_penalty(self):
+        from src.envs.reward_calculator import RewardCalculator
+
+        calculator = RewardCalculator()
+        state = self._base_state(lateral_dist=0.0)
+        _, info = calculator.compute_reward(state, curriculum_factor=1.0)
+
+        self.assertEqual(info["r_lane"], 0.0)
+
+    def test_lateral_deviation_is_penalized_quadratically(self):
+        from src.envs.reward_calculator import RewardCalculator
+
+        calculator = RewardCalculator()
+        _, near = calculator.compute_reward(self._base_state(lateral_dist=0.5), curriculum_factor=1.0)
+        _, far = calculator.compute_reward(self._base_state(lateral_dist=1.0), curriculum_factor=1.0)
+
+        self.assertLess(near["r_lane"], 0.0)
+        self.assertLess(far["r_lane"], near["r_lane"])
+        # Quadratic: doubling the offset roughly quadruples the penalty.
+        self.assertAlmostEqual(far["r_lane"] / near["r_lane"], 4.0, places=4)
+
+    def test_lane_edge_penalty_outweighs_progress(self):
+        from src.envs.reward_calculator import RewardCalculator
+
+        calculator = RewardCalculator()
+        # Hard steering lock walks the ego to the lane edge: net reward must go negative
+        # even at speed, so "full throttle + full lock" is never a profitable strategy.
+        state = self._base_state(speed_kmh=36.0, lateral_dist=1.75, lane_width=3.5)
+        reward, info = calculator.compute_reward(state, curriculum_factor=1.0, dt=0.05)
+
+        self.assertLess(info["r_lane"], -info["r_progress"])
+        self.assertLess(reward, 0.0)
+
+    def test_junction_is_exempt_from_lane_penalty(self):
+        from src.envs.reward_calculator import RewardCalculator
+
+        calculator = RewardCalculator()
+        state = self._base_state(lateral_dist=1.5, is_junction=True)
+        _, info = calculator.compute_reward(state, curriculum_factor=1.0)
+
+        self.assertEqual(info["r_lane"], 0.0)
 
     def test_reset_episode_tracking_clears_stall_counter(self):
         from src.envs.reward_calculator import RewardCalculator

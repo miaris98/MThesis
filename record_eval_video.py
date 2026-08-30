@@ -32,6 +32,39 @@ from src.models.actor_critic import ActorCriticPPO
 from src.utils.evaluation_studio import draw_hud
 
 
+def _upload_to_mlflow(video_path: str, experiment_name: str = "CARLA_PPO_RL") -> None:
+    """Attach the finished evaluation video to the most recent MLflow run's artifacts."""
+    try:
+        import mlflow
+    except ImportError:
+        return
+
+    # The training supervisor picks the MLflow port dynamically (iptables-mapped ports
+    # first, then a fixed fallback list), so probe the same candidates rather than
+    # assuming one. An explicit MLFLOW_TRACKING_URI always wins.
+    candidates = []
+    if os.environ.get("MLFLOW_TRACKING_URI"):
+        candidates.append(os.environ["MLFLOW_TRACKING_URI"])
+    candidates += [f"http://127.0.0.1:{p}" for p in (10100, 10200, 9090, 7070, 4040, 5000)]
+
+    for uri in candidates:
+        try:
+            mlflow.set_tracking_uri(uri)
+            exp = mlflow.get_experiment_by_name(experiment_name)
+            if not exp:
+                continue
+            runs = mlflow.search_runs(experiment_ids=[exp.experiment_id], order_by=["start_time DESC"], max_results=1)
+            if runs.empty:
+                continue
+            run_id = runs.iloc[0].run_id
+            mlflow.tracking.MlflowClient().log_artifact(run_id, video_path)
+            print(f"📦 [MLflow] Synced {os.path.basename(video_path)} to run {run_id} at {uri}")
+            return
+        except Exception:
+            continue
+    print("ℹ️  [MLflow] No reachable tracking server found; video saved locally only.")
+
+
 def record_eval_video(
     port: int = 2000, steps: int = 600, max_episode_steps: int = 500,
     min_speed: float = 0.0, output_video: str = "/workspace/eval_video.mp4",
@@ -196,20 +229,7 @@ def record_eval_video(
                 if os.path.exists(output_video):
                     os.remove(raw_path)
                     print(f"🎬 Successfully generated HD driving video: {output_video}")
-                    try:
-                        import mlflow
-                        mlflow_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://127.0.0.1:10100")
-                        mlflow.set_tracking_uri(mlflow_uri)
-                        exp = mlflow.get_experiment_by_name("CARLA_PPO_RL")
-                        if exp:
-                            runs = mlflow.search_runs(experiment_ids=[exp.experiment_id], order_by=["start_time DESC"], max_results=1)
-                            if not runs.empty:
-                                latest_run_id = runs.iloc[0].run_id
-                                client = mlflow.tracking.MlflowClient()
-                                client.log_artifact(latest_run_id, output_video)
-                                print(f"📦 [MLflow] Synced {os.path.basename(output_video)} to MLflow run {latest_run_id}")
-                    except Exception:
-                        pass
+                    _upload_to_mlflow(output_video)
             except Exception as e:
                 print(f"ffmpeg notice: {e}")
         cleanup_chase_camera()

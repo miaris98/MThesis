@@ -28,6 +28,35 @@ used by `_sub_step` in both `camera_easycarla_env.py` and `carla_gym_env.py`.
 
 ---
 
+### Phase 1b: Lane Discipline & Strict Termination (added after the first 10k-step eval)
+The first 10k-step run on `main` produced a degenerate **full-throttle hard-left lock**
+(throttle ~0.90, steer ~-0.97, sustained until a head-on crash). That policy was trained
+against the hardcoded dummy state (`heading_cos = 1.0`, `lateral_dist = 0.0`), so it earned
+full progress reward regardless of where or how it drove. With real state now plumbed
+through, the following were added to close the remaining gaps:
+- [x] **1b.1 Lane-centering penalty** — `r_lane = -0.15 * (|d_lat| / (lane_width/2))^2`,
+  exempt inside junctions. Penalty-only, so it cannot resurrect the idle exploit. Scaled so
+  that riding the lane edge roughly cancels the progress reward: a constant steering lock
+  goes net-negative well before it reaches anything to crash into.
+- [x] **1b.2 Progress reward rescaled** — `PROGRESS_PER_METER` 1.0 → 0.2 (~0.1/step at
+  36 km/h), so one collision (−25) outweighs ~250 steps of ideal driving.
+- [x] **1b.3 Boundary termination** — `DrivingStateExtractor.OFF_ROAD_LATERAL_LIMIT = 1.8 m`
+  (or `lane_width/2 + 0.8`, whichever is stricter) and wrong-way at `heading_cos < -0.2`.
+- [x] **1b.4 Zero-tolerance collision** — the 250 N·s impulse gate is gone. Any non-road
+  actor (vehicle, walker, pole, building, fence, traffic light, unclassified static mesh)
+  terminates on the first collision event; only gentle road/ground/terrain/sidewalk contact
+  below 400 N·s is still filtered as a false positive.
+- [x] **1b.5 Stall cutoff widened** — `STALL_TIMEOUT_STEPS` 30 → 80 after the 40-step grace.
+- [x] **1b.6 Telemetry** — `r_lane`, `lateral_dist`, `heading_cos` added to the CSV schema
+  and the trainer row; `eval_video.mp4` upload now probes the same dynamic MLflow port list
+  the training supervisor uses instead of assuming 10100.
+
+**Not yet addressed:** there is still no explicit destination or route-completion signal —
+episodes end on collision, off-road, stall, or step-count truncation. "Reaching the
+destination" is currently approximated by sustained violation-free forward progress.
+
+---
+
 ### Phase 2: Action Space & Exploration Dynamics (Priority: High)
 - [ ] **2.1 Increase Exploration Entropy (`--ent-coef 0.06 - 0.08`)** (`src/training/ppo_trainer.py`)
   - Raise initial entropy bonus to prevent the actor policy from collapsing to a single deterministic action.
