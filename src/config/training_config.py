@@ -32,6 +32,16 @@ class TrainingConfig:
     minibatch_size: int = 128
     reward_clip: float = 50.0
 
+    # Algorithm selection and off-policy (SAC) hyperparameters
+    algo: str = "ppo"
+    buffer_size: int = 100000
+    sac_batch_size: int = 256
+    tau: float = 0.005
+    learning_starts: int = 1000
+    updates_per_step: int = 1
+    init_alpha: float = 0.2
+    autotune_alpha: bool = True
+
     # Early stopping based on evaluation / moving average episode performance
     early_stopping: bool = True
     early_stopping_patience: int = 20
@@ -89,6 +99,16 @@ class TrainingConfig:
         parser.add_argument("--minibatch-size", type=int, default=128)
         parser.add_argument("--reward-clip", type=float, default=50.0)
 
+        # Algorithm selection and SAC-specific flags
+        parser.add_argument("--algo", type=str, default="ppo", choices=["ppo", "sac"], help="Training algorithm")
+        parser.add_argument("--buffer-size", type=int, default=100000, help="SAC replay buffer capacity")
+        parser.add_argument("--sac-batch-size", type=int, default=256, help="SAC gradient minibatch size")
+        parser.add_argument("--tau", type=float, default=0.005, help="SAC target network Polyak coefficient")
+        parser.add_argument("--learning-starts", type=int, default=1000, help="Random-action steps before SAC updates begin")
+        parser.add_argument("--updates-per-step", type=int, default=1, help="SAC gradient steps per environment step")
+        parser.add_argument("--init-alpha", type=float, default=0.2, help="Initial SAC entropy temperature")
+        parser.add_argument("--no-autotune-alpha", action="store_false", dest="autotune_alpha", help="Freeze the entropy temperature")
+
         # Early stopping flags
         parser.add_argument("--early-stopping", action="store_true", default=True, help="Enable performance-based early stopping")
         parser.add_argument("--no-early-stopping", action="store_false", dest="early_stopping", help="Disable early stopping")
@@ -142,6 +162,14 @@ class TrainingConfig:
             ent_coef=parsed.ent_coef,
             minibatch_size=parsed.minibatch_size,
             reward_clip=parsed.reward_clip,
+            algo=parsed.algo,
+            buffer_size=parsed.buffer_size,
+            sac_batch_size=parsed.sac_batch_size,
+            tau=parsed.tau,
+            learning_starts=parsed.learning_starts,
+            updates_per_step=parsed.updates_per_step,
+            init_alpha=parsed.init_alpha,
+            autotune_alpha=parsed.autotune_alpha,
             early_stopping=parsed.early_stopping,
             early_stopping_patience=parsed.early_stopping_patience,
             early_stopping_min_delta=parsed.early_stopping_min_delta,

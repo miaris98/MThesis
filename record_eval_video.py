@@ -71,7 +71,7 @@ def record_eval_video(
     num_npc_vehicles: int = 3, num_walkers: int = 10,
     checkpoint: Optional[str] = None, backbone: str = "lav",
     policy_arch: str = "qwen100m", weights_path: Optional[str] = None,
-    town: str = "Town10HD_Opt"
+    town: str = "Town10HD_Opt", algo: str = "ppo"
 ) -> None:
     if not weights_path:
         for wp in ["/workspace/pretrained_carla/model_0030_0.pth", "./papers_and_code/LAV/lav_pretrained.pth", "/workspace/MThesis/papers_and_code/LAV/lav_pretrained.pth"]:
@@ -80,7 +80,9 @@ def record_eval_video(
                 break
 
     if not checkpoint:
-        for cp in ["/workspace/checkpoints/ppo_carla_best.pth", "/workspace/checkpoints/ppo_carla_latest.pth", "./checkpoints/ppo_carla_best.pth", "./checkpoints/ppo_carla_latest.pth"]:
+        prefix = "sac" if algo == "sac" else "ppo"
+        for cp in [f"/workspace/checkpoints/{prefix}_carla_best.pth", f"/workspace/checkpoints/{prefix}_carla_latest.pth",
+                   f"./checkpoints/{prefix}_carla_best.pth", f"./checkpoints/{prefix}_carla_latest.pth"]:
             if os.path.exists(cp):
                 checkpoint = cp
                 break
@@ -88,7 +90,7 @@ def record_eval_video(
     print("==============================================================")
     print("   🎥 Starting 3-Camera CARLA PPO Driving Evaluation Studio   ")
     print("==============================================================")
-    print(f"Checkpoint: {checkpoint} | Arch: {policy_arch} | Backbone: {backbone} | Map: {town} (Port: {port})")
+    print(f"Algo: {algo.upper()} | Checkpoint: {checkpoint} | Arch: {policy_arch} | Backbone: {backbone} | Map: {town} (Port: {port})")
 
     easy_params = {
         'number_of_vehicles': num_npc_vehicles, 'number_of_walkers': num_walkers, 'display_size': 256,
@@ -101,15 +103,22 @@ def record_eval_video(
 
     env = CameraEasyCarlaEnv(params=easy_params)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    agent = ActorCriticPPO(
-        action_dim=3, features_dim=512, backbone_name=backbone, policy_arch=policy_arch,
-        freeze_backbone=True, use_pretrained=True, weights_path=weights_path
-    ).to(device)
+    if algo == "sac":
+        from src.models.sac_networks import SACActorCritic
+        agent = SACActorCritic(
+            action_dim=3, features_dim=512, backbone_name=backbone,
+            freeze_backbone=True, use_pretrained=True, weights_path=weights_path
+        ).to(device)
+    else:
+        agent = ActorCriticPPO(
+            action_dim=3, features_dim=512, backbone_name=backbone, policy_arch=policy_arch,
+            freeze_backbone=True, use_pretrained=True, weights_path=weights_path
+        ).to(device)
 
     if checkpoint and os.path.exists(checkpoint):
         try:
             agent.load_state_dict(torch.load(checkpoint, map_location=device), strict=False)
-            print(f"✓ Successfully loaded trained PPO policy: {checkpoint}")
+            print(f"✓ Successfully loaded trained {algo.upper()} policy: {checkpoint}")
         except Exception as e:
             print(f"Warning: Could not load checkpoint ({e}).")
     agent.eval()
@@ -168,7 +177,11 @@ def record_eval_video(
                 img_t = torch.as_tensor(model_rgb, dtype=torch.uint8, device=device).unsqueeze(0)
                 spd_t = torch.as_tensor([spd], dtype=torch.float32, device=device).unsqueeze(0)
                 with torch.inference_mode():
-                    action, _, _, _ = agent.get_action_and_value(img_t, spd_t, deterministic=True)
+                    if algo == "sac":
+                        vis = agent.extract_visual_features(img_t)
+                        action, _ = agent.sample_action(vis, spd_t, deterministic=True)
+                    else:
+                        action, _, _, _ = agent.get_action_and_value(img_t, spd_t, deterministic=True)
                 act = action.cpu().numpy()[0]
                 t_val = float(np.clip((act[0] + 1.0) / 2.0, 0.0, 1.0))
                 s_val = float(np.clip(act[1], -1.0, 1.0))
@@ -253,13 +266,14 @@ def main():
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--weights-path", type=str, default=None)
     parser.add_argument("--town", type=str, default="Town10HD_Opt")
+    parser.add_argument("--algo", type=str, default="ppo", choices=["ppo", "sac"], help="Which trained policy to evaluate")
     args = parser.parse_args()
 
     record_eval_video(
         port=args.port, steps=args.steps, max_episode_steps=args.max_episode_steps,
         min_speed=args.min_speed, output_video=args.output_video, num_npc_vehicles=args.npc_vehicles,
         num_walkers=args.num_walkers, checkpoint=args.checkpoint, backbone=args.backbone,
-        policy_arch=args.policy_arch, weights_path=args.weights_path, town=args.town
+        policy_arch=args.policy_arch, weights_path=args.weights_path, town=args.town, algo=args.algo
     )
 
 

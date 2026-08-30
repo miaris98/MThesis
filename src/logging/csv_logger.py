@@ -18,6 +18,7 @@ class CSVTelemetryLogger:
             "r_progress", "r_lane", "r_light", "r_obstacle", "r_ttc", "r_terminal",
             "lateral_dist", "heading_cos",
             "loss_policy", "loss_value", "loss_entropy", "loss_approx_kl", "loss_clip_fraction", "loss_explained_variance",
+            "sac_alpha", "sac_alpha_loss",
             "sps", "fps",
             "gpu_mem_used_mb", "gpu_mem_pct", "sys_cpu_pct", "sys_ram_used_gb",
             "is_collision", "is_off_road", "termination_reason"

@@ -33,9 +33,14 @@ from src.models.actor_critic import ActorCriticPPO  # Re-export for external too
 
 
 def main():
-    """Parse CLI flags and execute PPO training engine."""
+    """Parse CLI flags and execute the selected training engine (PPO or SAC)."""
     config = TrainingConfig.from_args()
-    trainer = PPOTrainer(config)
+    if config.algo == "sac":
+        # Imported lazily so a PPO run never pays for the SAC module graph.
+        from src.training.sac_trainer import SACTrainer
+        trainer = SACTrainer(config)
+    else:
+        trainer = PPOTrainer(config)
     trainer.train()
 
 
