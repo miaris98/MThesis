@@ -48,6 +48,7 @@ except ImportError:
 
 from src.envs.base_env import wait_for_carla_server, safe_clear_carla_actors
 from src.envs.camera_sensor import CameraSensorManager
+from src.envs.driving_state import DrivingStateExtractor
 from src.envs.reward_calculator import RewardCalculator
 
 
@@ -73,11 +74,15 @@ class CameraEasyCarlaEnv(gym.Env):
         self.img_width = self.params.get('img_width', 256)
         self.img_height = self.params.get('img_height', 256)
         self.frame_skip = int(self.params.get('frame_skip', 2))
+        self.dt = float(self.params.get('dt', 0.05))
         self.curriculum_factor = 1.0
         self.episode_count = 0
 
         self.sensor_mgr = CameraSensorManager(self.img_width, self.img_height)
-        self.reward_calc = RewardCalculator(desired_speed=self.params.get('desired_speed', 25.0))
+        # EasyCarla expresses 'desired_speed' in m/s while RewardCalculator compares against km/h.
+        desired_speed_ms = float(self.params.get('desired_speed', 8.0))
+        self.reward_calc = RewardCalculator(desired_speed=desired_speed_ms * 3.6)
+        self.state_extractor = DrivingStateExtractor()
 
         port = self.params.get('port', 2000)
         wait_for_carla_server(port, max_wait=60)
@@ -98,7 +103,9 @@ class CameraEasyCarlaEnv(gym.Env):
         self._init_easy_env(self.params)
         self._optimize_easy_env()
 
-        self.action_space = spaces.Box(low=np.array([0.0, -1.0, 0.0], dtype=np.float32), high=np.array([1.0, 1.0, 1.0], dtype=np.float32), dtype=np.float32)
+        # Raw policy output is Tanh-bounded [-1, 1] on every axis; _sub_step maps it to
+        # CARLA controls (throttle = (a0 + 1) / 2, steer = a1, brake gated on a2).
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
         self.observation_space = spaces.Dict({
             "image": spaces.Box(low=0, high=255, shape=(self.img_height, self.img_width * 3, 3), dtype=np.uint8),
             "speed": spaces.Box(low=0.0, high=150.0, shape=(1,), dtype=np.float32)
@@ -156,6 +163,7 @@ class CameraEasyCarlaEnv(gym.Env):
         }
         self.world_map = self.easy_env.world.get_map() if hasattr(self.easy_env, 'world') and self.easy_env.world is not None else None
         self.spawn_points = list(self.world_map.get_spawn_points()) if self.world_map is not None else []
+        self.state_extractor.bind(getattr(self.easy_env, 'world', None), self.world_map)
 
         def _safe_on_collision(event):
             impulse = getattr(event, 'normal_impulse', None)
@@ -193,6 +201,7 @@ class CameraEasyCarlaEnv(gym.Env):
             np.random.seed(seed)
         self.episode_count += 1
         self.reward_calc.reset_episode_tracking()
+        self.state_extractor.reset()
 
         ego_alive = self.sensor_mgr.are_all_alive(getattr(self.easy_env, 'ego', None))
         if ego_alive:
@@ -255,45 +264,24 @@ class CameraEasyCarlaEnv(gym.Env):
 
         obs = self._get_obs()
         speed_kmh = float(obs["speed"][0])
-        state = {
-            "speed_kmh": speed_kmh, "heading_cos": 1.0, "heading_cos_far": 1.0,
-            "lateral_dist": 0.0, "curve_factor": 1.0, "is_junction": False,
-            "steer": steer, "throttle": throttle, "brake": brake,
-            "is_at_red_light": False, "min_obs_dist": 99.0, "is_pedestrian": False,
-            "ttc_seconds": 99.0, "is_collision": self.easy_env._is_collision,
-            "is_off_road": self.easy_env._is_off_road, "time_step": self.easy_env.time_step
-        }
-        if hasattr(self.easy_env, 'ego') and self.easy_env.ego is not None and self.world_map is not None:
-            try:
-                tf = self.easy_env.ego.get_transform()
-                wp_exact = self.world_map.get_waypoint(tf.location, project_to_road=False, lane_type=carla.LaneType.Driving)
-                if wp_exact is None:
-                    self.easy_env._is_off_road = True
-
-                wp = self.world_map.get_waypoint(tf.location, project_to_road=True)
-                if wp:
-                    fwd, wp_fwd = tf.get_forward_vector(), wp.transform.get_forward_vector()
-                    state["heading_cos"] = float(np.clip(fwd.x * wp_fwd.x + fwd.y * wp_fwd.y, -1.0, 1.0))
-                    wp_right = wp.transform.get_right_vector()
-                    dx = tf.location.x - wp.transform.location.x
-                    dy = tf.location.y - wp.transform.location.y
-                    lat_cross = abs(dx * wp_right.x + dy * wp_right.y)
-                    state["lateral_dist"] = float(min(3.0, lat_cross))
-                    if not wp.is_junction and lat_cross > ((wp.lane_width / 2.0) + 0.8):
-                        self.easy_env._is_off_road = True
-                    if not wp.is_junction and state["heading_cos"] < -0.2:
-                        self.easy_env._is_off_road = True
-            except Exception:
-                pass
-
-        state["is_off_road"] = bool(self.easy_env._is_off_road)
-        state["is_collision"] = bool(self.easy_env._is_collision)
-        reward, sub_info = self.reward_calc.compute_reward(state, self.curriculum_factor)
+        state = self.state_extractor.extract(
+            ego=getattr(self.easy_env, 'ego', None), speed_kmh=speed_kmh,
+            time_step=self.easy_env.time_step, throttle=throttle, steer=steer, brake=brake,
+            is_collision=self.easy_env._is_collision, is_off_road=self.easy_env._is_off_road
+        )
+        self.easy_env._is_off_road = state["is_off_road"]
+        reward, sub_info = self.reward_calc.compute_reward(state, self.curriculum_factor, dt=self.dt)
         terminated = bool(done or self.easy_env._is_collision or self.easy_env._is_off_road or sub_info["is_stalled"])
         truncated = bool(self.easy_env.time_step >= self.easy_env.max_time_episode)
         reason = "Stalled" if sub_info["is_stalled"] else ("Collision" if self.easy_env._is_collision else ("Off-Road" if self.easy_env._is_off_road else ("Max Steps" if truncated else "Active")))
 
-        info = {"cost": cost, "is_collision": self.easy_env._is_collision, "is_off_road": self.easy_env._is_off_road, "termination_reason": reason, "speed_kmh": speed_kmh, **sub_info}
+        info = {
+            "cost": cost, "is_collision": self.easy_env._is_collision, "is_off_road": self.easy_env._is_off_road,
+            "termination_reason": reason, "speed_kmh": speed_kmh,
+            "is_at_red_light": state["is_at_red_light"], "min_obs_dist": state["min_obs_dist"],
+            "ttc_seconds": state["ttc_seconds"], "lateral_dist": state["lateral_dist"],
+            "heading_cos": state["heading_cos"], **sub_info
+        }
         return obs, reward, terminated, truncated, info
 
     def step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:

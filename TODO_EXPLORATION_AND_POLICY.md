@@ -9,16 +9,22 @@ During RL training, the agent fell into a passive local optimum: **holding throt
 
 ## 2. Actionable TODO Checklist
 
-### Phase 1: Reward Structure & Anti-Stalling Guards (Priority: Highest)
-- [ ] **1.1 Strict 30-Step Stall Termination** (`src/envs/reward_calculator.py`)
-  - Reduce stall timeout from 120 steps down to **30 steps (1.5 seconds at 20 FPS)** whenever speed $< 2.0\text{ km/h}$ (unless at a red light or obstacle).
-  - Standing still becomes an immediate failure with a $-15.0$ penalty.
-- [ ] **1.2 Speed-Gated Positive Rewards** (`src/envs/reward_calculator.py`)
-  - Gate **ALL** positive rewards (lane centering, heading alignment) by forward speed:
-    $$R_{\text{step}} = R_{\text{base}} \times \min\left(1.0, \frac{v_{\text{proj}}}{v_{\text{target}}}\right)$$
-  - Standing still ($v = 0$) will yield **$0.0$ positive reward**.
-- [ ] **1.3 Distance-Traveled Longitudinal Bonus** (`src/envs/reward_calculator.py`)
-  - Add explicit progress reward: $+0.1$ per meter traveled along the lane centerline.
+### Phase 1: Reward Structure & Anti-Stalling Guards (Priority: Highest) — SUPERSEDED, implemented differently
+Instead of gating each of the original shaping terms (lane centering, heading alignment, comfort,
+steering smoothness, etc.) individually by speed, `src/envs/reward_calculator.py` was rewritten
+around two signals: dense forward progress, and event-triggered violation penalties. Standing
+still is reward-neutral (0.0), never positive, which removes the idle local optimum without
+needing per-term speed gates.
+- [x] **1.1 Stall Termination** — 40-step grace period, then 30-step timeout (1.5s at 20 FPS) below 2.0 km/h (exempt at red lights / near obstacles), −15.0 terminal penalty.
+- [x] **1.2 No unconditional positive shaping** — the lane-centering/heading/comfort/steering terms were removed rather than speed-gated; the only positive term is progress, which is itself proportional to forward speed.
+- [x] **1.3 Distance-Traveled Progress Reward** — `PROGRESS_PER_METER * forward_speed_ms * dt`, credited only while heading forward and not violating (e.g. zeroed while running a red light).
+
+Also fixed alongside this: `DrivingStateExtractor` (`src/envs/driving_state.py`) now populates
+`is_at_red_light`, `min_obs_dist`/`is_pedestrian`, `ttc_seconds`, `curve_factor`, and `is_junction`,
+which were previously hardcoded to inert defaults so the obstacle/TTC/red-light terms could never
+fire. The `desired_speed` unit mismatch (EasyCarla passes m/s, the reward compared it as km/h) is
+also fixed, and the action space declaration now matches the actual `[-1, 1]` Tanh action mapping
+used by `_sub_step` in both `camera_easycarla_env.py` and `carla_gym_env.py`.
 
 ---
 

@@ -69,11 +69,8 @@ class CarlaGymEnv(gym.Env):
         self.synchronous_mode = synchronous_mode
         self.delta_seconds = delta_seconds
 
-        self.action_space = spaces.Box(
-            low=np.array([-1.0, 0.0, 0.0], dtype=np.float32),
-            high=np.array([1.0, 1.0, 1.0], dtype=np.float32),
-            dtype=np.float32
-        )
+        # Same convention as CameraEasyCarlaEnv: Tanh-bounded [-1, 1] on [throttle, steer, brake].
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
         self.observation_space = spaces.Dict({
             "image": spaces.Box(low=0, high=255, shape=(self.img_height, self.img_width, 3), dtype=np.uint8),
             "speed": spaces.Box(low=0.0, high=150.0, shape=(1,), dtype=np.float32)
@@ -164,9 +161,9 @@ class CarlaGymEnv(gym.Env):
 
     def step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
         self.step_count += 1
-        steer = float(action[0])
-        throttle = float(action[1])
-        brake = float(action[2])
+        throttle = float(np.clip((action[0] + 1.0) / 2.0, 0.0, 1.0))
+        steer = float(np.clip(action[1], -1.0, 1.0))
+        brake = float(np.clip(action[2], 0.0, 1.0)) if action[2] > 0.4 and throttle < 0.3 else 0.0
 
         if self.vehicle is not None:
             ctrl = carla.VehicleControl(throttle=throttle, steer=steer, brake=brake)
