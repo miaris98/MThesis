@@ -196,6 +196,20 @@ def record_eval_video(
                 if os.path.exists(output_video):
                     os.remove(raw_path)
                     print(f"🎬 Successfully generated HD driving video: {output_video}")
+                    try:
+                        import mlflow
+                        mlflow_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://127.0.0.1:10100")
+                        mlflow.set_tracking_uri(mlflow_uri)
+                        exp = mlflow.get_experiment_by_name("CARLA_PPO_RL")
+                        if exp:
+                            runs = mlflow.search_runs(experiment_ids=[exp.experiment_id], order_by=["start_time DESC"], max_results=1)
+                            if not runs.empty:
+                                latest_run_id = runs.iloc[0].run_id
+                                client = mlflow.tracking.MlflowClient()
+                                client.log_artifact(latest_run_id, output_video)
+                                print(f"📦 [MLflow] Synced {os.path.basename(output_video)} to MLflow run {latest_run_id}")
+                    except Exception:
+                        pass
             except Exception as e:
                 print(f"ffmpeg notice: {e}")
         cleanup_chase_camera()

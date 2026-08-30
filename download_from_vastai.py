@@ -134,7 +134,9 @@ def main():
     # 3. Eval Video
     if args.video_only or args.all:
         video_dest = os.path.join(args.dest, "eval_video.mp4")
-        run_scp_download(port, user_host, DEFAULT_REMOTE_PATHS["eval_video"], video_dest)
+        if not run_scp_download(port, user_host, DEFAULT_REMOTE_PATHS["eval_video"], video_dest):
+            # Check eval_video_best.mp4
+            run_scp_download(port, user_host, "/workspace/eval_video_best.mp4", os.path.join(args.dest, "eval_video_best.mp4"))
 
     print("\n" + "=" * 65)
     print("   ✨ Download Routine Complete!                             ")

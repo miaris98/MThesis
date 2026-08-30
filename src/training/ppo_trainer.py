@@ -386,8 +386,13 @@ class PPOTrainer:
         if os.path.exists(state_path):
             self.logger.log_artifact(state_path)
 
+        # Sync evaluation videos if present
+        for v_path in ["/workspace/eval_video.mp4", "./eval_video.mp4", "/workspace/eval_video_best.mp4"]:
+            if os.path.exists(v_path):
+                self.logger.log_artifact(v_path)
+
         now_str = time.strftime("%H:%M:%S")
-        print(f"[{now_str}] 📦 [MLflow Artifact Sync] Synced training_telemetry.csv & checkpoints at step {self.global_step:05d}", flush=True)
+        print(f"[{now_str}] 📦 [MLflow Artifact Sync] Synced training_telemetry.csv, model checkpoints & artifacts at step {self.global_step:05d}", flush=True)
 
     def _shutdown(self) -> None:
         self.env.close()
