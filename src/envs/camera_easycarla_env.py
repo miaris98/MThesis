@@ -77,6 +77,10 @@ class CameraEasyCarlaEnv(gym.Env):
         self.dt = float(self.params.get('dt', 0.05))
         self.curriculum_factor = 1.0
         self.episode_count = 0
+        # shared_mode: this instance is one of N vehicle-envs sharing a single CARLA
+        # server/world owned by a SharedServerCarlaVectorEnv coordinator, instead of
+        # owning its own dedicated server process.
+        self.shared_mode = bool(self.params.get('shared_mode', False))
 
         self.sensor_mgr = CameraSensorManager(self.img_width, self.img_height)
         # EasyCarla expresses 'desired_speed' in m/s while RewardCalculator compares against km/h.
@@ -85,21 +89,27 @@ class CameraEasyCarlaEnv(gym.Env):
         self.reward_calc = make_reward(self.reward_fn_name, desired_speed=desired_speed_ms * 3.6)
         self.state_extractor = DrivingStateExtractor()
 
-        port = self.params.get('port', 2000)
-        wait_for_carla_server(port, max_wait=60)
+        if self.shared_mode:
+            # The coordinator already confirmed server readiness and owns the client
+            # connection; reuse it instead of opening a second connection to the same
+            # server.
+            self.carla_client = self.params['external_client']
+        else:
+            port = self.params.get('port', 2000)
+            wait_for_carla_server(port, max_wait=60)
 
-        self.carla_client = None
-        if carla is not None:
-            for attempt in range(10):
-                try:
-                    self.carla_client = carla.Client('127.0.0.1', port)
-                    self.carla_client.set_timeout(120.0)
-                    _ = self.carla_client.get_server_version()
-                    break
-                except Exception:
-                    if attempt == 9:
-                        raise
-                    time.sleep(1.0)
+            self.carla_client = None
+            if carla is not None:
+                for attempt in range(10):
+                    try:
+                        self.carla_client = carla.Client('127.0.0.1', port)
+                        self.carla_client.set_timeout(120.0)
+                        _ = self.carla_client.get_server_version()
+                        break
+                    except Exception:
+                        if attempt == 9:
+                            raise
+                        time.sleep(1.0)
 
         self._init_easy_env(self.params)
         self._optimize_easy_env()
@@ -163,7 +173,14 @@ class CameraEasyCarlaEnv(gym.Env):
             'waypoints': np.zeros(36, dtype=np.float32)
         }
         self.world_map = self.easy_env.world.get_map() if hasattr(self.easy_env, 'world') and self.easy_env.world is not None else None
-        self.spawn_points = list(self.world_map.get_spawn_points()) if self.world_map is not None else []
+        spawn_point_subset = self.params.get('spawn_point_subset')
+        if spawn_point_subset:
+            # Coordinator-assigned, non-overlapping subset - this is what the fast
+            # in-place teleport reset path actually reads, so it's the load-bearing
+            # spawn-coordination surface for shared mode.
+            self.spawn_points = list(spawn_point_subset)
+        else:
+            self.spawn_points = list(self.world_map.get_spawn_points()) if self.world_map is not None else []
         self.state_extractor.bind(getattr(self.easy_env, 'world', None), self.world_map)
 
         def _safe_on_collision(event):
@@ -185,7 +202,11 @@ class CameraEasyCarlaEnv(gym.Env):
         self.easy_env._on_lane_invasion = lambda event: setattr(self.easy_env, '_is_off_road', True)
         self.easy_env._on_invasion = lambda event: setattr(self.easy_env, '_is_off_road', True)
         self.easy_env._terminal = lambda: bool(self.easy_env._is_collision or self.easy_env._is_off_road or (self.easy_env.time_step >= self.easy_env.max_time_episode))
-        self.easy_env._clear_all_actors = lambda filters: safe_clear_carla_actors(self.easy_env.world, self.carla_client, filters)
+        if not self.shared_mode:
+            # In shared mode, reset() routes to easy_env._clear_owned_actors() directly
+            # and never calls _clear_all_actors - this monkeypatch would be dead but
+            # misleading if left assigned.
+            self.easy_env._clear_all_actors = lambda filters: safe_clear_carla_actors(self.easy_env.world, self.carla_client, filters)
 
     def set_curriculum_factor(self, factor: float) -> None:
         self.curriculum_factor = max(0.2, min(1.0, float(factor)))
@@ -200,7 +221,11 @@ class CameraEasyCarlaEnv(gym.Env):
             pass
         return {"image": self.sensor_mgr.panorama_buffer, "speed": np.array([speed_kmh], dtype=np.float32)}
 
-    def reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
+    def begin_reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None) -> None:
+        """Everything a reset needs to do before the settling world.tick(). Call
+        finish_reset() afterward to get the resulting observation. Split out so a
+        shared-server coordinator can tick once for every vehicle-env resetting together,
+        instead of each one ticking independently."""
         if seed is not None:
             np.random.seed(seed)
         self.episode_count += 1
@@ -236,12 +261,7 @@ class CameraEasyCarlaEnv(gym.Env):
                 self.easy_env.time_step = 0
                 self.easy_env.total_reward = 0.0
                 self.easy_env.ego.set_simulate_physics(True)
-                if hasattr(self.easy_env, 'world') and self.easy_env.world is not None:
-                    try:
-                        self.easy_env.world.tick()
-                    except Exception:
-                        pass
-                return self._get_obs(), {}
+                return
             except Exception:
                 pass
 
@@ -257,24 +277,49 @@ class CameraEasyCarlaEnv(gym.Env):
             pass
         self._optimize_easy_env()
         self.sensor_mgr.setup_cameras(self.easy_env.world, self.easy_env.ego)
-        try:
-            if hasattr(self.easy_env, 'world') and self.easy_env.world is not None:
-                self.easy_env.world.tick()
-        except Exception:
-            pass
+
+    def finish_reset(self) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
+        """Pairs with begin_reset() - call after the settling world.tick() has happened."""
         return self._get_obs(), {}
 
-    def _sub_step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
+    def reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
+        self.begin_reset(seed=seed, options=options)
+        if not self.shared_mode:
+            try:
+                if hasattr(self.easy_env, 'world') and self.easy_env.world is not None:
+                    self.easy_env.world.tick()
+            except Exception:
+                pass
+        return self.finish_reset()
+
+    def _apply_sub_action(self, action: np.ndarray) -> None:
+        """Apply control for one frame_skip sub-step. Does not tick - reset() in
+        non-shared mode ticks right after this; a shared-server coordinator ticks once
+        across all vehicle-envs' _apply_sub_action calls before reading any of them."""
         throttle = float(np.clip((action[0] + 1.0) / 2.0, 0.0, 1.0))
         steer = float(np.clip(action[1], -1.0, 1.0))
         brake = float(np.clip(action[2], 0.0, 1.0)) if action[2] > 0.4 and throttle < 0.3 else 0.0
-
-        cost, done = 0.0, False
+        self._last_sub_action = (throttle, steer, brake)
+        self._last_apply_failed = False
         try:
-            _, _, cost, done, _ = self.easy_env.step([throttle, steer, brake])
+            self.easy_env._apply_action([throttle, steer, brake])
         except Exception:
+            self._last_apply_failed = True
+
+    def _read_sub_result(self) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
+        """Pairs with _apply_sub_action() - call after the world.tick() for this
+        sub-step has happened."""
+        throttle, steer, brake = self._last_sub_action
+        cost, done = 0.0, False
+        if self._last_apply_failed:
             cost, done = 1.0, True
             self.easy_env._is_collision = True
+        else:
+            try:
+                _, _, cost, done, _ = self.easy_env._post_tick()
+            except Exception:
+                cost, done = 1.0, True
+                self.easy_env._is_collision = True
 
         obs = self._get_obs()
         speed_kmh = float(obs["speed"][0])
@@ -300,6 +345,15 @@ class CameraEasyCarlaEnv(gym.Env):
         }
         return obs, reward, terminated, truncated, info
 
+    def _sub_step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
+        self._apply_sub_action(action)
+        if not self.shared_mode:
+            try:
+                self.easy_env.world.tick()
+            except Exception:
+                pass
+        return self._read_sub_result()
+
     def step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
         total_reward, total_cost = 0.0, 0.0
         for _ in range(self.frame_skip):
@@ -315,6 +369,14 @@ class CameraEasyCarlaEnv(gym.Env):
     def close(self) -> None:
         self.sensor_mgr.cleanup_cameras()
         if hasattr(self, 'easy_env') and self.easy_env is not None:
+            if self.shared_mode and hasattr(self.easy_env, '_clear_owned_actors'):
+                # A recovered/recreated coordinator is likely to reuse the still-alive
+                # world rather than reload it, so leftover actors must be cleaned up
+                # explicitly here or they'd leak across recovery cycles.
+                try:
+                    self.easy_env._clear_owned_actors()
+                except Exception:
+                    pass
             try:
                 self.easy_env.close()
             except Exception:

@@ -164,6 +164,20 @@ pip install "setuptools<80" gymnasium gym numpy pillow opencv-python tensorboard
 echo -e "${YELLOW}--> Installing EasyCarla-RL directly into Python environment...${NC}"
 pip install git+https://github.com/silverwingsbot/EasyCarla-RL.git
 
+# Overlay this repo's shared_mode patch onto the just-installed package. The upstream
+# EasyCarla-RL repo has no awareness of shared_mode - it's what lets N vehicle-envs
+# share ONE CARLA server on single-GPU machines (SharedServerCarlaVectorEnv) instead of
+# each spawning its own server process, which saturates a single GPU's rasterizer well
+# before raw compute is the bottleneck. See patches/easycarla_rl/carla_env.py.
+PATCH_SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+EASYCARLA_ENV_FILE=$(python -c "import easycarla.envs.carla_env as m, os; print(os.path.abspath(m.__file__))" 2>/dev/null || true)
+if [ -n "$EASYCARLA_ENV_FILE" ] && [ -f "$PATCH_SCRIPT_DIR/patches/easycarla_rl/carla_env.py" ]; then
+    cp "$PATCH_SCRIPT_DIR/patches/easycarla_rl/carla_env.py" "$EASYCARLA_ENV_FILE"
+    echo -e "${GREEN}✓ Applied shared_mode patch to $EASYCARLA_ENV_FILE${NC}"
+else
+    echo -e "${RED}[WARNING] Could not locate installed easycarla.envs.carla_env - shared_mode patch NOT applied. --shared-server training will fail until this is fixed.${NC}"
+fi
+
 # Auto-download CARLA-domain pretrained vision weights (TransFuser++ / Leaderboard 2.0)
 PRETRAINED_DIR="/workspace/pretrained_carla"
 if [ ! -f "$PRETRAINED_DIR/model_0030_0.pth" ]; then

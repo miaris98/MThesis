@@ -91,10 +91,32 @@ EOF
     chmod +x /usr/local/bin/xdg-user-dir 2>/dev/null || true
 fi
 
-# Compute non-overlapping CARLA port list (stride of 4 per instance)
+# Detect available GPUs early (port/server-launch loop bounds below depend on it).
+# On 2+ GPUs, keep today's model: one CARLA server per env, round-robined across
+# adapters. On a single GPU, N separate server processes each duplicate the
+# map/asset load and hold their own GPU context - this saturates the rasterizer
+# well before raw compute is the bottleneck, so instead run ONE server with all
+# vehicle-envs sharing it as actors in one world (SharedServerCarlaVectorEnv).
+NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
+[ -z "$NUM_GPUS" ] || [ "$NUM_GPUS" -lt 1 ] && NUM_GPUS=1
+# PyTorch training is pinned to the last GPU so it doesn't silently pile onto
+# whichever adapter CARLA server #0 already renders on.
+TRAIN_GPU=$((NUM_GPUS - 1))
+SHARED_SERVER=false
+[ "$NUM_GPUS" -le 1 ] && SHARED_SERVER=true
+SERVER_COUNT=$NUM_ENVS
+[ "$SHARED_SERVER" = true ] && SERVER_COUNT=1
+echo "Detected GPUs: $NUM_GPUS"
+if [ "$SHARED_SERVER" = true ]; then
+    echo "  -> Single-GPU mode: launching 1 shared CARLA server, $NUM_ENVS vehicle-envs as actors within it"
+else
+    echo "  -> Multi-GPU mode: launching $SERVER_COUNT CARLA servers round-robined across adapters, training pinned to GPU $TRAIN_GPU"
+fi
+
+# Compute non-overlapping CARLA port list (stride of 4 per server)
 PORTS=()
 PORTS_CSV=""
-for ((i=0; i<NUM_ENVS; i++)); do
+for ((i=0; i<SERVER_COUNT; i++)); do
     P=$((START_PORT + i * 4))
     PORTS+=("$P")
     if [ -z "$PORTS_CSV" ]; then
@@ -146,15 +168,6 @@ done
 export CUDA_MODULE_LOADING=LAZY
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
-# Detect available GPUs so CARLA servers can be spread across adapters instead
-# of every instance defaulting to adapter 0 (Unreal Engine's default).
-NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
-[ -z "$NUM_GPUS" ] || [ "$NUM_GPUS" -lt 1 ] && NUM_GPUS=1
-# PyTorch training is pinned to the last GPU so it doesn't silently pile onto
-# whichever adapter CARLA server #0 already renders on.
-TRAIN_GPU=$((NUM_GPUS - 1))
-echo "Detected GPUs: $NUM_GPUS (CARLA servers round-robin across adapters, training pinned to GPU $TRAIN_GPU)"
-
 # Ensure required tracking packages exist in target environment
 export PYTHONWARNINGS="ignore"
 export OMP_NUM_THREADS=1
@@ -166,7 +179,7 @@ export NUMEXPR_NUM_THREADS=1
 echo "=============================================================="
 echo "   🔄 Starting Multi-CARLA Auto-Restart Training Supervisor   "
 echo "=============================================================="
-echo "Parallel Environments: $NUM_ENVS Instances (Ports: $PORTS_CSV)"
+echo "Parallel Environments: $NUM_ENVS Vehicle-Envs on $SERVER_COUNT CARLA Server(s) (Ports: $PORTS_CSV)"
 echo "Policy Architecture:   ${POLICY_ARCH^^} (~100M Params)"
 echo "Vision Backbone:       $BACKBONE"
 echo "Target Steps:          $TOTAL_STEPS"
@@ -398,7 +411,7 @@ while true; do
     pkill -9 -f CarlaUE4 2>/dev/null || true
     pkill -9 -f CarlaUE4-Linux-Shipping 2>/dev/null || true
     killall -9 CarlaUE4-Linux-Shipping CarlaUE4 CarlaUE4.sh 2>/dev/null || true
-    for ((i=0; i<NUM_ENVS; i++)); do
+    for ((i=0; i<SERVER_COUNT; i++)); do
         tmux kill-session -t "carla_server_${i}" 2>/dev/null || true
         P=${PORTS[$i]}
         fuser -k -9 ${P}/tcp $((P+1))/tcp $((P+2))/tcp 2>/dev/null || true
@@ -418,12 +431,12 @@ while true; do
     fi
 
     # 2. Launch CARLA servers (staggered by 2s to prevent GPU driver race conditions)
-    for ((i=0; i<NUM_ENVS; i++)); do
+    for ((i=0; i<SERVER_COUNT; i++)); do
         PORT=${PORTS[$i]}
         SESSION_NAME="carla_server_${i}"
         LOG_FILE="/workspace/carla_server_${PORT}.log"
         GPU_IDX=$((i % NUM_GPUS))
-        echo "--> Launching CARLA Server #$((i+1))/$NUM_ENVS on port $PORT (tmux: $SESSION_NAME, GPU $GPU_IDX)..."
+        echo "--> Launching CARLA Server #$((i+1))/$SERVER_COUNT on port $PORT (tmux: $SESSION_NAME, GPU $GPU_IDX)..."
 
         > "$LOG_FILE" 2>/dev/null || true
         tmux new-session -d -s "$SESSION_NAME" \
@@ -433,13 +446,13 @@ while true; do
     sleep 3
 
     # 3. Health check all CARLA server instances
-    echo "--> Probing all $NUM_ENVS CARLA server instances..."
+    echo "--> Probing all $SERVER_COUNT CARLA server instances..."
     all_ready=true
-    for ((i=0; i<NUM_ENVS; i++)); do
+    for ((i=0; i<SERVER_COUNT; i++)); do
         PORT=${PORTS[$i]}
         SESSION_NAME="carla_server_${i}"
         LOG_FILE="/workspace/carla_server_${PORT}.log"
-        echo -n "   [CARLA #$((i+1))/$NUM_ENVS | Port $PORT] Waiting for server initialization"
+        echo -n "   [CARLA #$((i+1))/$SERVER_COUNT | Port $PORT] Waiting for server initialization"
         ready=false
         for attempt_check in $(seq 1 45); do
             echo -n "."
@@ -497,7 +510,7 @@ if bp is None:
             sleep 2
             tmux new-session -d -s "$SESSION_NAME" \
                 "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -graphicsadapter=${GPU_IDX} -quality-level=Low -benchmark -fps=20' > ${LOG_FILE} 2>&1"
-            echo -n "   [CARLA #$((i+1))/$NUM_ENVS | Port $PORT (Retry)] Waiting for initialization"
+            echo -n "   [CARLA #$((i+1))/$SERVER_COUNT | Port $PORT (Retry)] Waiting for initialization"
             for attempt_check in $(seq 1 40); do
                 echo -n "."
                 if [ "$attempt_check" -ge 4 ]; then
@@ -585,6 +598,15 @@ v = c.get_server_version()
         echo "🔄 Resuming training from latest saved checkpoint..."
     fi
 
+    # Shared mode must pass a single --port, never --carla-ports - TrainingConfig
+    # derives num_envs from len(carla_ports) whenever that flag is present at all,
+    # which would silently collapse num_envs to 1.
+    if [ "$SHARED_SERVER" = true ]; then
+        CARLA_SERVER_ARGS="--num-envs $NUM_ENVS --port ${PORTS[0]} --shared-server"
+    else
+        CARLA_SERVER_ARGS="--num-envs $NUM_ENVS --carla-ports $PORTS_CSV"
+    fi
+
     # 5. Launch Training Pipeline with capped thread allocations and silenced warnings
     export PYTHONWARNINGS="ignore"
     export OMP_NUM_THREADS=1
@@ -599,8 +621,7 @@ v = c.get_server_version()
 
     "$PYTHON_BIN" -W ignore train_rl_agent.py \
         --env-type camera_easycarla \
-        --num-envs "$NUM_ENVS" \
-        --carla-ports "$PORTS_CSV" \
+        $CARLA_SERVER_ARGS \
         --backbone "$BACKBONE" \
         --policy-arch "$POLICY_ARCH" \
         --town "$TOWN" \

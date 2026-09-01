@@ -9,6 +9,7 @@ warnings.filterwarnings("ignore")
 os.environ["PYTHONWARNINGS"] = "ignore"
 
 from typing import List, Callable, Dict, Any, Tuple, Optional
+import random
 import numpy as np
 import multiprocessing as mp
 from multiprocessing.connection import Connection
@@ -24,8 +25,14 @@ except ImportError:
         gym = object
         spaces = object
 
+try:
+    import carla
+except ImportError:
+    carla = None
+
 from src.envs.camera_easycarla_env import CameraEasyCarlaEnv
 from src.envs.carla_gym_env import CarlaGymEnv
+from src.envs.base_env import wait_for_carla_server, safe_clear_owned_actors
 from src.config.training_config import TrainingConfig
 
 
@@ -228,13 +235,232 @@ class DummyCarlaVectorEnv:
             env.close()
 
 
+class SharedServerCarlaVectorEnv:
+    """
+    Single-GPU vectorized CARLA environment: ONE CARLA server/world, N vehicle actors
+    sharing it, driven by one coordinator that owns synchronous-mode/tick. Replaces
+    SubprocCarlaVectorEnv's N-separate-server-process model on single-GPU machines,
+    where N independent UE4 processes each duplicating map/asset load + holding their
+    own GPU context saturate the rasterizer well before raw compute is the bottleneck.
+    Runs entirely in-process (no subprocess workers) - N sequential lightweight RPCs
+    through one shared carla.Client per tick.
+    """
+
+    def __init__(self, cfg: TrainingConfig, port: int):
+        self.cfg = cfg
+        self.num_envs = cfg.num_envs
+        self.frame_skip = cfg.frame_skip
+        self.closed = False
+        # Matches CameraEasyCarlaEnv._apply_sub_action's action mapping: throttle =
+        # (a0+1)/2 -> 0.0, steer = a1 -> 0.0, brake gated on (a2>0.4 and throttle<0.3) -> 1.0.
+        self._brake_action = np.array([-1.0, 0.0, 1.0], dtype=np.float32)
+        self._npc_owned_ids: List[int] = []
+
+        wait_for_carla_server(port, max_wait=60)
+        self.client = carla.Client('127.0.0.1', port)
+        self.client.set_timeout(120.0)
+        try:
+            curr_world = self.client.get_world()
+            if cfg.town.lower() in curr_world.get_map().name.lower():
+                self.world = curr_world
+            else:
+                self.world = self.client.load_world(cfg.town)
+        except Exception:
+            self.world = self.client.load_world(cfg.town)
+        self.world.set_weather(carla.WeatherParameters.ClearNoon)
+
+        self.settings = self.world.get_settings()
+        self.settings.synchronous_mode = True
+        self.settings.fixed_delta_seconds = 0.05
+        self.world.apply_settings(self.settings)
+
+        all_spawns = list(self.world.get_map().get_spawn_points())
+        random.shuffle(all_spawns)
+        spawn_chunks = [all_spawns[i::self.num_envs] for i in range(self.num_envs)]
+
+        self._spawn_shared_npc_pool()
+
+        self.slots: List[Any] = []
+        for i in range(self.num_envs):
+            factory = CarlaEnvFactory(cfg, port)
+            params_override = {
+                'shared_mode': True,
+                'external_client': self.client,
+                'external_world': self.world,
+                'spawn_point_subset': spawn_chunks[i] if spawn_chunks[i] else all_spawns,
+                'number_of_vehicles': 0,
+                'number_of_walkers': 0,
+            }
+            self.slots.append(factory(params_override=params_override))
+
+    def _spawn_shared_npc_pool(self) -> None:
+        """Spawn background traffic exactly once for the whole shared world, instead of
+        once per vehicle-slot per episode reset (which would thrash the actor pool and
+        respawn traffic every ~15-25 steps)."""
+        num_vehicles = self.cfg.num_vehicles
+        num_walkers = self.cfg.num_walkers
+
+        if num_vehicles > 0:
+            spawn_points = list(self.world.get_map().get_spawn_points())
+            random.shuffle(spawn_points)
+            count = num_vehicles
+            for sp in spawn_points:
+                if count <= 0:
+                    break
+                vehicle = self._try_spawn_npc_vehicle(sp)
+                if vehicle is not None:
+                    self._npc_owned_ids.append(vehicle.id)
+                    vehicle.set_autopilot()
+                    count -= 1
+
+        if num_walkers > 0:
+            walker_spawns = []
+            for _ in range(num_walkers):
+                loc = self.world.get_random_location_from_navigation()
+                if loc is not None:
+                    walker_spawns.append(carla.Transform(loc))
+            count = num_walkers
+            for sp in walker_spawns:
+                if count <= 0:
+                    break
+                if self._try_spawn_npc_walker(sp):
+                    count -= 1
+
+        # Freeze traffic lights once for the whole shared world - each vehicle-slot's
+        # own reset() skips this in shared mode (see CarlaEnv.reset()).
+        for actor in self.world.get_actors().filter('traffic.traffic_light*'):
+            actor.set_state(carla.TrafficLightState.Green)
+            actor.freeze(True)
+
+    def _try_spawn_npc_vehicle(self, transform: Any) -> Optional[Any]:
+        blueprints = self.world.get_blueprint_library().filter('vehicle.*')
+        blueprint_library = [x for x in blueprints if int(x.get_attribute('number_of_wheels')) == 4]
+        if not blueprint_library:
+            return None
+        blueprint = random.choice(blueprint_library)
+        if blueprint.has_attribute('color'):
+            blueprint.set_attribute('color', random.choice(blueprint.get_attribute('color').recommended_values))
+        blueprint.set_attribute('role_name', 'autopilot')
+        return self.world.try_spawn_actor(blueprint, transform)
+
+    def _try_spawn_npc_walker(self, transform: Any) -> bool:
+        walker_bp = random.choice(self.world.get_blueprint_library().filter('walker.*'))
+        if walker_bp.has_attribute('is_invincible'):
+            walker_bp.set_attribute('is_invincible', 'false')
+        walker_actor = self.world.try_spawn_actor(walker_bp, transform)
+        if walker_actor is None:
+            return False
+        self._npc_owned_ids.append(walker_actor.id)
+        controller_bp = self.world.get_blueprint_library().find('controller.ai.walker')
+        controller_actor = self.world.spawn_actor(controller_bp, carla.Transform(), walker_actor)
+        self._npc_owned_ids.append(controller_actor.id)
+        controller_actor.start()
+        controller_actor.go_to_location(self.world.get_random_location_from_navigation())
+        controller_actor.set_max_speed(1 + random.random())
+        return True
+
+    def reset(self, seed: Optional[int] = None) -> Tuple[Dict[str, np.ndarray], List[Dict[str, Any]]]:
+        for i, slot in enumerate(self.slots):
+            env_seed = seed + i if seed is not None else None
+            slot.begin_reset(seed=env_seed)
+        self.world.tick()
+
+        obs_list, info_list = [], []
+        for slot in self.slots:
+            obs, info = slot.finish_reset()
+            obs_list.append(obs)
+            info_list.append(info)
+
+        return {
+            "image": np.stack([o["image"] for o in obs_list]),
+            "speed": np.stack([o["speed"] for o in obs_list])
+        }, info_list
+
+    def step(self, actions: np.ndarray) -> Tuple[Dict[str, np.ndarray], np.ndarray, np.ndarray, np.ndarray, List[Dict[str, Any]]]:
+        n = self.num_envs
+        total_reward = np.zeros(n, dtype=np.float32)
+        total_cost = np.zeros(n, dtype=np.float32)
+        final_obs: List[Any] = [None] * n
+        final_info: List[Any] = [None] * n
+        terminated = np.zeros(n, dtype=bool)
+        truncated = np.zeros(n, dtype=bool)
+
+        for _ in range(self.frame_skip):
+            for i, slot in enumerate(self.slots):
+                if terminated[i] or truncated[i]:
+                    # Already done this outer step - keep braking rather than coasting
+                    # on its last-applied throttle, so it doesn't drift into a
+                    # neighboring slot's still-active ego during the remaining ticks
+                    # this shared world must still advance for them.
+                    slot._apply_sub_action(self._brake_action)
+                else:
+                    slot._apply_sub_action(actions[i])
+
+            self.world.tick()  # single tick shared across every slot's sub-step
+
+            for i, slot in enumerate(self.slots):
+                if terminated[i] or truncated[i]:
+                    slot._read_sub_result()  # keep bookkeeping consistent; discard
+                    continue
+                obs, reward, term, trunc, info = slot._read_sub_result()
+                total_reward[i] += reward
+                total_cost[i] += info.get("cost", 0.0)
+                final_obs[i] = obs
+                final_info[i] = info
+                if term or trunc:
+                    terminated[i] = term
+                    truncated[i] = trunc
+
+        for i in range(n):
+            final_info[i]["cost"] = float(total_cost[i])
+            final_info[i]["frame_skip"] = self.frame_skip
+
+        reset_idxs = [i for i in range(n) if terminated[i] or truncated[i]]
+        if reset_idxs:
+            for i in reset_idxs:
+                final_info[i]["terminal_observation"] = final_obs[i]
+                self.slots[i].begin_reset()
+            self.world.tick()
+            for i in reset_idxs:
+                obs, reset_info = self.slots[i].finish_reset()
+                final_obs[i] = obs
+                final_info[i]["reset_info"] = reset_info
+
+        batched_obs = {
+            "image": np.stack([o["image"] for o in final_obs]),
+            "speed": np.stack([o["speed"] for o in final_obs])
+        }
+        return batched_obs, total_reward, terminated, truncated, final_info
+
+    def set_curriculum_factor(self, factor: float) -> None:
+        for slot in self.slots:
+            if hasattr(slot, "set_curriculum_factor"):
+                slot.set_curriculum_factor(factor)
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        for slot in self.slots:
+            try:
+                slot.close()
+            except Exception:
+                pass
+        safe_clear_owned_actors(self.world, self.client, self._npc_owned_ids)
+        try:
+            self.settings.synchronous_mode = False
+            self.world.apply_settings(self.settings)
+        except Exception:
+            pass
+
+
 class CarlaEnvFactory:
     """Picklable top-level factory creating an isolated CARLA environment instance."""
     def __init__(self, cfg: TrainingConfig, port: int):
         self.cfg = cfg
         self.port = port
 
-    def __call__(self) -> Any:
+    def __call__(self, params_override: Optional[Dict[str, Any]] = None) -> Any:
         if self.cfg.env_type == "camera_easycarla":
             easy_params = {
                 'number_of_vehicles': self.cfg.num_vehicles,
@@ -258,16 +484,22 @@ class CarlaEnvFactory:
                 'img_height': 256,
                 'reward_fn': getattr(self.cfg, 'reward_fn', 'custom_1'),
             }
+            if params_override:
+                easy_params.update(params_override)
             return CameraEasyCarlaEnv(params=easy_params)
         return CarlaGymEnv(host=self.cfg.host, port=self.port, img_width=256, img_height=256, max_steps=self.cfg.rollout_steps)
 
 
 def create_vector_carla_env(cfg: TrainingConfig) -> Any:
-    """Instantiate vectorized multi-server environment based on configuration."""
+    """Instantiate vectorized environment based on configuration."""
+    if getattr(cfg, "shared_server", False):
+        print(f"--> Initializing {cfg.num_envs} Parallel Vehicle-Envs on a single shared CARLA server (port {cfg.port})")
+        return SharedServerCarlaVectorEnv(cfg, port=cfg.port)
+
     ports = cfg.get_ports()
     print(f"--> Initializing {len(ports)} Parallel CARLA Environment Workers on ports: {ports}")
     factories = [CarlaEnvFactory(cfg, p) for p in ports]
-    
+
     if len(ports) > 1:
         return SubprocCarlaVectorEnv(factories)
     return DummyCarlaVectorEnv(factories)

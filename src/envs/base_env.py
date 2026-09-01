@@ -113,3 +113,31 @@ def safe_clear_carla_actors(world: Any, client: Any, actor_filters: List[str]) -
                 client.apply_batch(batch)
             except Exception:
                 pass
+
+
+def safe_clear_owned_actors(world: Any, client: Any, owned_ids: List[int]) -> None:
+    """Destroy only the given actor ids, never a global type-filter. Used by the
+    shared-server coordinator to tear down its own NPC/walker traffic pool without
+    touching any vehicle-env's ego/sensors sharing the same world."""
+    if world is None or not owned_ids:
+        return
+    for actor_id in owned_ids:
+        actor = world.get_actor(actor_id)
+        if actor is None:
+            continue
+        try:
+            if hasattr(actor, 'stop') and callable(actor.stop):
+                actor.stop()
+        except Exception:
+            pass
+
+    batch = [carla.command.DestroyActor(actor_id) for actor_id in owned_ids
+             if world.get_actor(actor_id) is not None]
+    if batch and client is not None:
+        try:
+            client.apply_batch_sync(batch, False)
+        except Exception:
+            try:
+                client.apply_batch(batch)
+            except Exception:
+                pass

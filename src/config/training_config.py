@@ -12,6 +12,7 @@ class TrainingConfig:
     port: int = 2000
     num_envs: int = 2
     carla_ports: Optional[List[int]] = None
+    shared_server: bool = False
     env_type: str = "camera_easycarla"
     backbone: str = "resnet18"
     policy_arch: str = "qwen100m"
@@ -79,6 +80,7 @@ class TrainingConfig:
         parser.add_argument("--port", type=int, default=2000, help="CARLA primary port")
         parser.add_argument("--num-envs", type=int, default=2, help="Number of parallel CARLA server environments")
         parser.add_argument("--carla-ports", type=str, default=None, help="Comma-separated list of CARLA server ports (e.g. 2000,2004)")
+        parser.add_argument("--shared-server", action="store_true", default=False, help="Run all --num-envs vehicle-envs as actors sharing a single CARLA server (single-GPU mode) instead of one server per env")
         parser.add_argument("--env-type", type=str, default="camera_easycarla", choices=["camera_easycarla", "carla_gym"])
         parser.add_argument("--backbone", type=str, default="resnet18", choices=["resnet18", "resnet34", "resnet50", "lav", "wor", "erfnet", "qwen100m", "qwen500m", "qwen900m", "qwen", "transformer"])
         parser.add_argument("--policy-arch", type=str, default="qwen100m", choices=["wor", "world_on_rails", "qwen100m", "qwen500m", "qwen900m", "mlp", "transformer"])
@@ -148,6 +150,7 @@ class TrainingConfig:
             port=parsed.port,
             num_envs=num_envs,
             carla_ports=ports_list,
+            shared_server=parsed.shared_server,
             env_type=parsed.env_type,
             backbone=parsed.backbone,
             policy_arch=parsed.policy_arch,
