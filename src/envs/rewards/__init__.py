@@ -6,12 +6,15 @@ from src.envs.rewards.custom_1 import Custom1Reward
 from src.envs.rewards.leaderboard import LeaderboardReward
 from src.envs.rewards.interp_e2e import InterpE2EReward
 from src.envs.rewards.roach import RoachReward
+from src.envs.rewards.world_on_rails import WorldOnRailsReward
 
 REWARD_REGISTRY: Dict[str, Type[BaseReward]] = {
     Custom1Reward.NAME: Custom1Reward,
     LeaderboardReward.NAME: LeaderboardReward,
     InterpE2EReward.NAME: InterpE2EReward,
     RoachReward.NAME: RoachReward,
+    WorldOnRailsReward.NAME: WorldOnRailsReward,
+    "world_on_rails": WorldOnRailsReward,
 }
 
 
@@ -30,6 +33,7 @@ def make_reward(name: str = "custom_1", **kwargs: Any) -> BaseReward:
 
 __all__ = [
     "BaseReward", "REWARD_COMPONENTS", "REWARD_REGISTRY",
-    "Custom1Reward", "LeaderboardReward", "InterpE2EReward", "RoachReward",
+    "Custom1Reward", "LeaderboardReward", "InterpE2EReward", "RoachReward", "WorldOnRailsReward",
     "available_rewards", "make_reward",
 ]
+

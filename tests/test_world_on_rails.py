@@ -153,3 +153,38 @@ def test_wor_agent():
     control = agent.run_step(dummy_input)
     assert "steer" in control or hasattr(control, "steer")
     agent.destroy()
+
+
+def test_wor_reward_function():
+    """Tests World on Rails paper reward function calculations."""
+    from src.envs.rewards import make_reward, WorldOnRailsReward
+    reward_fn = make_reward("wor")
+    assert isinstance(reward_fn, WorldOnRailsReward)
+
+    # 1. Test normal forward progress
+    state_normal = {
+        "speed_kmh": 20.0,
+        "heading_cos": 1.0,
+        "lateral_dist": 0.1,
+        "is_collision": False,
+        "is_off_road": False,
+        "is_at_red_light": False
+    }
+    r_step, info = reward_fn.compute_reward(state_normal, dt=0.05)
+    assert r_step > 0.0
+    assert info["r_progress"] > 0.0
+    assert info["r_terminal"] == 0.0
+
+    # 2. Test collision penalty
+    state_collision = {
+        "speed_kmh": 10.0,
+        "heading_cos": 1.0,
+        "lateral_dist": 0.0,
+        "is_collision": True,
+        "is_off_road": False,
+        "is_at_red_light": False
+    }
+    r_coll, info_coll = reward_fn.compute_reward(state_collision)
+    assert r_coll <= -20.0
+    assert info_coll["r_terminal"] == -25.0
+
