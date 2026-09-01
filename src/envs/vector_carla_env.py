@@ -243,11 +243,12 @@ class SharedServerCarlaVectorEnv:
     SubprocCarlaVectorEnv's N-separate-server-process model on single-GPU machines,
     where N independent UE4 processes each duplicating map/asset load + holding their
     own GPU context saturate the rasterizer well before raw compute is the bottleneck.
-    Runs entirely in-process (no subprocess workers): each slot has its own
-    carla.Client connection to the one shared server, and per-slot apply/read RPCs are
-    dispatched through a ThreadPoolExecutor (CPython releases the GIL during blocking
-    socket I/O, so this genuinely parallelizes round-trip latency) - only world.tick()
-    itself stays a single sequential call owned by this coordinator's own connection.
+    Runs entirely in-process (no subprocess workers): slots share a small, capped pool
+    of dedicated carla.Client connections (round-robin, see shared_server_max_connections),
+    and each connection's group of slots is dispatched to its own worker thread via
+    ThreadPoolExecutor (CPython releases the GIL during blocking socket I/O, so this
+    genuinely parallelizes round-trip latency across groups) - only world.tick() itself
+    stays a single sequential call owned by this coordinator's own connection.
     """
 
     def __init__(self, cfg: TrainingConfig, port: int):
@@ -284,45 +285,60 @@ class SharedServerCarlaVectorEnv:
 
         self._spawn_shared_npc_pool()
 
-        # Each slot gets its OWN carla.Client connection (CARLA supports many
-        # simultaneous connections to one server) rather than sharing self.client -
-        # a shared connection would serialize every RPC at the socket layer
-        # regardless of how many Python threads dispatch them. With separate
-        # connections, ThreadPoolExecutor genuinely parallelizes the per-slot
-        # apply/read RPC round-trips below, since CPython releases the GIL during
-        # blocking socket I/O.
-        self.slots: List[Any] = []
-        for i in range(self.num_envs):
+        # Slots share a small, capped pool of dedicated carla.Client connections
+        # (round-robin), rather than either one connection per slot or one shared
+        # connection for all. One-per-slot hit a hard ceiling in practice (confirmed
+        # empirically: 4 dedicated connections is fine, 20 fails with "Resource
+        # temporarily unavailable" on the bare carla.Client(...) constructor - some
+        # resource ceiling below 20, cause unconfirmed, possibly CARLA-server-side or
+        # a container-level limit invisible to `ulimit`). A single shared connection
+        # would serialize every RPC at the socket layer regardless of Python-level
+        # threading. This pool gets most of the latency-hiding benefit (each
+        # connection's group of slots still parallelizes against every OTHER
+        # connection's group) while capping how many raw connections/threads get
+        # opened - safe at any num_envs. Each connection's own slots are only ever
+        # touched sequentially, from a single dedicated worker thread, never
+        # concurrently, so no serialization is reintroduced within a group.
+        num_connections = max(1, min(self.num_envs, int(getattr(cfg, 'shared_server_max_connections', 8))))
+        self._groups: List[List[int]] = [
+            [i for i in range(self.num_envs) if i % num_connections == g]
+            for g in range(num_connections)
+        ]
+
+        self.slots: List[Any] = [None] * self.num_envs
+        for group in self._groups:
             factory = CarlaEnvFactory(cfg, port)
             # Opening many client connections back-to-back can transiently overrun
             # CARLA's RPC server accept path ("Resource temporarily unavailable"),
             # so retry with backoff and stagger successive connections slightly.
-            slot_client = None
+            group_client = None
             for attempt in range(10):
                 try:
-                    slot_client = carla.Client('127.0.0.1', port)
-                    slot_client.set_timeout(120.0)
-                    _ = slot_client.get_server_version()
+                    group_client = carla.Client('127.0.0.1', port)
+                    group_client.set_timeout(120.0)
+                    _ = group_client.get_server_version()
                     break
                 except Exception:
                     if attempt == 9:
                         raise
                     time.sleep(0.5)
-            slot_world = slot_client.get_world()  # attaches to the already-loaded world
+            group_world = group_client.get_world()  # attaches to the already-loaded world
             time.sleep(0.05)
-            params_override = {
-                'shared_mode': True,
-                'external_client': slot_client,
-                'external_world': slot_world,
-                'spawn_point_subset': spawn_chunks[i] if spawn_chunks[i] else all_spawns,
-                'number_of_vehicles': 0,
-                'number_of_walkers': 0,
-            }
-            self.slots.append(factory(params_override=params_override))
+            for i in group:
+                params_override = {
+                    'shared_mode': True,
+                    'external_client': group_client,
+                    'external_world': group_world,
+                    'spawn_point_subset': spawn_chunks[i] if spawn_chunks[i] else all_spawns,
+                    'number_of_vehicles': 0,
+                    'number_of_walkers': 0,
+                }
+                self.slots[i] = factory(params_override=params_override)
 
         # world.tick() stays a single sequential call owned by self.client - only the
-        # per-slot actor RPCs (apply control, read state, reset) are parallelized.
-        self._pool = ThreadPoolExecutor(max_workers=self.num_envs, thread_name_prefix="carla-slot")
+        # per-group actor RPCs (apply control, read state, reset) are parallelized,
+        # one worker thread per connection group.
+        self._pool = ThreadPoolExecutor(max_workers=num_connections, thread_name_prefix="carla-slot-group")
 
     def _spawn_shared_npc_pool(self) -> None:
         """Spawn background traffic exactly once for the whole shared world, instead of
@@ -390,30 +406,38 @@ class SharedServerCarlaVectorEnv:
         controller_actor.set_max_speed(1 + random.random())
         return True
 
-    @staticmethod
-    def _apply_slot_action(slot: Any, action: np.ndarray) -> None:
-        slot._apply_sub_action(action)
+    # Each of these processes one connection GROUP - i.e. one dedicated carla.Client -
+    # sequentially over that group's slots. They're dispatched one-per-worker-thread via
+    # self._pool, so different groups' RPCs genuinely run in parallel (separate
+    # connections), while calls within a single group never overlap (same connection,
+    # same thread).
+    def _apply_group(self, group: List[int], actions: List[np.ndarray]) -> None:
+        for idx, action in zip(group, actions):
+            self.slots[idx]._apply_sub_action(action)
 
-    @staticmethod
-    def _read_slot_result(slot: Any) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
-        return slot._read_sub_result()
+    def _read_group(self, group: List[int]) -> List[Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]]:
+        return [self.slots[idx]._read_sub_result() for idx in group]
 
-    @staticmethod
-    def _begin_slot_reset(slot: Any, seed: Optional[int]) -> None:
-        slot.begin_reset(seed=seed)
+    def _begin_group_reset(self, group: List[int], seeds: List[Optional[int]]) -> None:
+        for idx, s in zip(group, seeds):
+            self.slots[idx].begin_reset(seed=s)
 
-    @staticmethod
-    def _finish_slot_reset(slot: Any) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
-        return slot.finish_reset()
+    def _finish_group_reset(self, group: List[int]) -> List[Tuple[Dict[str, np.ndarray], Dict[str, Any]]]:
+        return [self.slots[idx].finish_reset() for idx in group]
 
     def reset(self, seed: Optional[int] = None) -> Tuple[Dict[str, np.ndarray], List[Dict[str, Any]]]:
         seeds = [(seed + i if seed is not None else None) for i in range(self.num_envs)]
-        list(self._pool.map(self._begin_slot_reset, self.slots, seeds))
+        seeds_per_group = [[seeds[idx] for idx in group] for group in self._groups]
+        list(self._pool.map(self._begin_group_reset, self._groups, seeds_per_group))
         self.world.tick()
 
-        results = list(self._pool.map(self._finish_slot_reset, self.slots))
-        obs_list = [obs for obs, _ in results]
-        info_list = [info for _, info in results]
+        group_results = list(self._pool.map(self._finish_group_reset, self._groups))
+        obs_list: List[Any] = [None] * self.num_envs
+        info_list: List[Any] = [None] * self.num_envs
+        for group, results in zip(self._groups, group_results):
+            for idx, (obs, info) in zip(group, results):
+                obs_list[idx] = obs
+                info_list[idx] = info
 
         return {
             "image": np.stack([o["image"] for o in obs_list]),
@@ -437,21 +461,23 @@ class SharedServerCarlaVectorEnv:
                 self._brake_action if (terminated[i] or truncated[i]) else actions[i]
                 for i in range(n)
             ]
-            list(self._pool.map(self._apply_slot_action, self.slots, effective_actions))
+            actions_per_group = [[effective_actions[idx] for idx in group] for group in self._groups]
+            list(self._pool.map(self._apply_group, self._groups, actions_per_group))
 
-            self.world.tick()  # single tick shared across every slot's sub-step
+            self.world.tick()  # single tick shared across every group's sub-step
 
-            results = list(self._pool.map(self._read_slot_result, self.slots))
-            for i, (obs, reward, term, trunc, info) in enumerate(results):
-                if terminated[i] or truncated[i]:
-                    continue  # already done this outer step; result discarded above
-                total_reward[i] += reward
-                total_cost[i] += info.get("cost", 0.0)
-                final_obs[i] = obs
-                final_info[i] = info
-                if term or trunc:
-                    terminated[i] = term
-                    truncated[i] = trunc
+            group_results = list(self._pool.map(self._read_group, self._groups))
+            for group, results in zip(self._groups, group_results):
+                for idx, (obs, reward, term, trunc, info) in zip(group, results):
+                    if terminated[idx] or truncated[idx]:
+                        continue  # already done this outer step; result discarded above
+                    total_reward[idx] += reward
+                    total_cost[idx] += info.get("cost", 0.0)
+                    final_obs[idx] = obs
+                    final_info[idx] = info
+                    if term or trunc:
+                        terminated[idx] = term
+                        truncated[idx] = trunc
 
         for i in range(n):
             final_info[i]["cost"] = float(total_cost[i])
@@ -459,15 +485,18 @@ class SharedServerCarlaVectorEnv:
 
         reset_idxs = [i for i in range(n) if terminated[i] or truncated[i]]
         if reset_idxs:
-            reset_slots = [self.slots[i] for i in reset_idxs]
+            reset_idx_set = set(reset_idxs)
+            reset_groups = [[idx for idx in group if idx in reset_idx_set] for group in self._groups]
+            reset_groups = [g for g in reset_groups if g]
             for i in reset_idxs:
                 final_info[i]["terminal_observation"] = final_obs[i]
-            list(self._pool.map(self._begin_slot_reset, reset_slots, [None] * len(reset_idxs)))
+            list(self._pool.map(self._begin_group_reset, reset_groups, [[None] * len(g) for g in reset_groups]))
             self.world.tick()
-            reset_results = list(self._pool.map(self._finish_slot_reset, reset_slots))
-            for i, (obs, reset_info) in zip(reset_idxs, reset_results):
-                final_obs[i] = obs
-                final_info[i]["reset_info"] = reset_info
+            reset_group_results = list(self._pool.map(self._finish_group_reset, reset_groups))
+            for group, results in zip(reset_groups, reset_group_results):
+                for idx, (obs, reset_info) in zip(group, results):
+                    final_obs[idx] = obs
+                    final_info[idx]["reset_info"] = reset_info
 
         batched_obs = {
             "image": np.stack([o["image"] for o in final_obs]),
