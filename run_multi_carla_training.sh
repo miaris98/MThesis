@@ -18,6 +18,8 @@ REWARD_FN=wor
 EARLY_STOPPING=true
 PATIENCE=20
 MIN_DELTA=1.0
+IMG_WIDTH=256
+IMG_HEIGHT=256
 
 # Argument parsing
 POS_ARGS=()
@@ -49,6 +51,12 @@ for arg in "$@"; do
             ;;
         --min-delta=*)
             MIN_DELTA="${arg#*=}"
+            ;;
+        --img-width=*)
+            IMG_WIDTH="${arg#*=}"
+            ;;
+        --img-height=*)
+            IMG_HEIGHT="${arg#*=}"
             ;;
         *)
             POS_ARGS+=("$arg")
@@ -627,6 +635,8 @@ v = c.get_server_version()
         --town "$TOWN" \
         --num-vehicles "$NUM_VEHICLES" \
         --num-walkers "$NUM_WALKERS" \
+        --img-width "$IMG_WIDTH" \
+        --img-height "$IMG_HEIGHT" \
         --frame-skip 2 \
         --rollout-steps 250 \
         --minibatch-size 256 \

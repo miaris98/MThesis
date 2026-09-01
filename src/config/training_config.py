@@ -60,6 +60,8 @@ class TrainingConfig:
     num_vehicles: int = 3
     num_walkers: int = 10
     town: str = "Town10HD_Opt"
+    img_width: int = 256
+    img_height: int = 256
     
     use_mlflow: bool = True
     experiment_name: str = "CARLA_PPO_RL"
@@ -131,6 +133,8 @@ class TrainingConfig:
         parser.add_argument("--num-vehicles", type=int, default=3)
         parser.add_argument("--num-walkers", type=int, default=10)
         parser.add_argument("--town", type=str, default="Town10HD_Opt")
+        parser.add_argument("--img-width", type=int, default=256, help="Per-camera render width in pixels - directly sets CARLA's image_size_x, real render cost")
+        parser.add_argument("--img-height", type=int, default=256, help="Per-camera render height in pixels - directly sets CARLA's image_size_y, real render cost")
 
         parser.add_argument("--use-mlflow", action="store_true", default=True)
         parser.add_argument("--no-mlflow", action="store_false", dest="use_mlflow")
@@ -193,6 +197,8 @@ class TrainingConfig:
             num_vehicles=parsed.num_vehicles,
             num_walkers=parsed.num_walkers,
             town=parsed.town,
+            img_width=parsed.img_width,
+            img_height=parsed.img_height,
             use_mlflow=parsed.use_mlflow,
             experiment_name=parsed.experiment_name,
             mlflow_port=parsed.mlflow_port,

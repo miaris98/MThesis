@@ -587,14 +587,14 @@ class CarlaEnvFactory:
                 'traffic': 'off',
                 'lidar_max_range': 50.0,
                 'max_nearby_vehicles': 5,
-                'img_width': 256,
-                'img_height': 256,
+                'img_width': self.cfg.img_width,
+                'img_height': self.cfg.img_height,
                 'reward_fn': getattr(self.cfg, 'reward_fn', 'custom_1'),
             }
             if params_override:
                 easy_params.update(params_override)
             return CameraEasyCarlaEnv(params=easy_params)
-        return CarlaGymEnv(host=self.cfg.host, port=self.port, img_width=256, img_height=256, max_steps=self.cfg.rollout_steps)
+        return CarlaGymEnv(host=self.cfg.host, port=self.port, img_width=self.cfg.img_width, img_height=self.cfg.img_height, max_steps=self.cfg.rollout_steps)
 
 
 def create_vector_carla_env(cfg: TrainingConfig) -> Any:
