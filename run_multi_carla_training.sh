@@ -14,6 +14,7 @@ TOWN=Town10HD_Opt
 NUM_VEHICLES=3
 NUM_WALKERS=10
 START_FRESH=false
+REWARD_FN=custom_1
 EARLY_STOPPING=true
 PATIENCE=20
 MIN_DELTA=1.0
@@ -27,6 +28,9 @@ for arg in "$@"; do
             ;;
         --num-envs=*)
             NUM_ENVS="${arg#*=}"
+            ;;
+        --reward-fn=*)
+            REWARD_FN="${arg#*=}"
             ;;
         --policy=*)
             POLICY_ARCH="${arg#*=}"
@@ -161,6 +165,7 @@ echo "Policy Architecture:   ${POLICY_ARCH^^} (~100M Params)"
 echo "Vision Backbone:       $BACKBONE"
 echo "Target Steps:          $TOTAL_STEPS"
 echo "CARLA Map:             $TOWN"
+echo "Reward Function:       $REWARD_FN"
 echo "Mode:                  $([ "$START_FRESH" = true ] && echo 'FRESH (From Scratch)' || echo 'RESUME (From Checkpoint)')"
 echo "Python Executable:     $PYTHON_BIN"
 echo "=============================================================="
@@ -592,7 +597,8 @@ v = c.get_server_version()
         --frame-skip 2 \
         --rollout-steps 250 \
         --minibatch-size 128 \
-        --ent-coef 0.05 \
+        --ent-coef 0.005 \
+        --reward-fn "$REWARD_FN" \
         --use-mlflow \
         --mlflow-port "$MLFLOW_PORT" \
         --log-dir /workspace/runs \

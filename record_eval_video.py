@@ -71,7 +71,7 @@ def record_eval_video(
     num_npc_vehicles: int = 3, num_walkers: int = 10,
     checkpoint: Optional[str] = None, backbone: str = "lav",
     policy_arch: str = "qwen100m", weights_path: Optional[str] = None,
-    town: str = "Town10HD_Opt", algo: str = "ppo"
+    town: str = "Town10HD_Opt", algo: str = "ppo", sac_policy_arch: str = "mlp"
 ) -> None:
     if not weights_path:
         for wp in ["/workspace/pretrained_carla/model_0030_0.pth", "./papers_and_code/LAV/lav_pretrained.pth", "/workspace/MThesis/papers_and_code/LAV/lav_pretrained.pth"]:
@@ -107,7 +107,8 @@ def record_eval_video(
         from src.models.sac_networks import SACActorCritic
         agent = SACActorCritic(
             action_dim=3, features_dim=512, backbone_name=backbone,
-            freeze_backbone=True, use_pretrained=True, weights_path=weights_path
+            freeze_backbone=True, use_pretrained=True, weights_path=weights_path,
+            policy_arch=sac_policy_arch
         ).to(device)
     else:
         agent = ActorCriticPPO(
@@ -267,13 +268,14 @@ def main():
     parser.add_argument("--weights-path", type=str, default=None)
     parser.add_argument("--town", type=str, default="Town10HD_Opt")
     parser.add_argument("--algo", type=str, default="ppo", choices=["ppo", "sac"], help="Which trained policy to evaluate")
+    parser.add_argument("--sac-policy-arch", type=str, default="mlp", choices=["mlp", "qwen100m", "qwen500m", "qwen900m"], help="Architecture the SAC checkpoint was trained with")
     args = parser.parse_args()
 
     record_eval_video(
         port=args.port, steps=args.steps, max_episode_steps=args.max_episode_steps,
         min_speed=args.min_speed, output_video=args.output_video, num_npc_vehicles=args.npc_vehicles,
         num_walkers=args.num_walkers, checkpoint=args.checkpoint, backbone=args.backbone,
-        policy_arch=args.policy_arch, weights_path=args.weights_path, town=args.town, algo=args.algo
+        policy_arch=args.policy_arch, weights_path=args.weights_path, town=args.town, algo=args.algo, sac_policy_arch=args.sac_policy_arch
     )
 
 

@@ -28,12 +28,14 @@ class TrainingConfig:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_coef: float = 0.2
-    ent_coef: float = 0.05
+    ent_coef: float = 0.005
     minibatch_size: int = 128
     reward_clip: float = 50.0
 
     # Algorithm selection and off-policy (SAC) hyperparameters
+    reward_fn: str = "custom_1"
     algo: str = "ppo"
+    sac_policy_arch: str = "mlp"
     buffer_size: int = 100000
     sac_batch_size: int = 256
     tau: float = 0.005
@@ -95,12 +97,14 @@ class TrainingConfig:
         parser.add_argument("--gamma", type=float, default=0.99)
         parser.add_argument("--gae-lambda", type=float, default=0.95)
         parser.add_argument("--clip-coef", type=float, default=0.2)
-        parser.add_argument("--ent-coef", type=float, default=0.05)
+        parser.add_argument("--ent-coef", type=float, default=0.005, help="Entropy bonus; must stay well below the reward scale")
         parser.add_argument("--minibatch-size", type=int, default=128)
         parser.add_argument("--reward-clip", type=float, default=50.0)
 
         # Algorithm selection and SAC-specific flags
+        parser.add_argument("--reward-fn", type=str, default="custom_1", choices=["custom_1", "leaderboard", "roach", "interp_e2e"], help="Swappable reward function")
         parser.add_argument("--algo", type=str, default="ppo", choices=["ppo", "sac"], help="Training algorithm")
+        parser.add_argument("--sac-policy-arch", type=str, default="mlp", choices=["mlp", "qwen100m", "qwen500m", "qwen900m"], help="SAC actor/critic architecture")
         parser.add_argument("--buffer-size", type=int, default=100000, help="SAC replay buffer capacity")
         parser.add_argument("--sac-batch-size", type=int, default=256, help="SAC gradient minibatch size")
         parser.add_argument("--tau", type=float, default=0.005, help="SAC target network Polyak coefficient")
@@ -162,7 +166,9 @@ class TrainingConfig:
             ent_coef=parsed.ent_coef,
             minibatch_size=parsed.minibatch_size,
             reward_clip=parsed.reward_clip,
+            reward_fn=parsed.reward_fn,
             algo=parsed.algo,
+            sac_policy_arch=parsed.sac_policy_arch,
             buffer_size=parsed.buffer_size,
             sac_batch_size=parsed.sac_batch_size,
             tau=parsed.tau,

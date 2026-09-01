@@ -256,6 +256,7 @@ class CarlaEnvFactory:
                 'max_nearby_vehicles': 5,
                 'img_width': 256,
                 'img_height': 256,
+                'reward_fn': getattr(self.cfg, 'reward_fn', 'custom_1'),
             }
             return CameraEasyCarlaEnv(params=easy_params)
         return CarlaGymEnv(host=self.cfg.host, port=self.port, img_width=256, img_height=256, max_steps=self.cfg.rollout_steps)

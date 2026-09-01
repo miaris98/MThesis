@@ -103,11 +103,11 @@ class ActorCriticPPO(nn.Module):
 
         if self.decision_net is not None:
             action_mean, actor_log_std, value = self.decision_net(visual_features, speed)
-            action_std = torch.exp(torch.clamp(actor_log_std, -2.0, 0.5))
+            action_std = torch.exp(torch.clamp(actor_log_std, -2.0, 0.0))
         else:
             features = self.encoder.forward_with_visual_features(visual_features, speed)
             action_mean = self.actor_mean(features)
-            action_std = torch.exp(torch.clamp(self.actor_log_std, -2.0, 0.5))
+            action_std = torch.exp(torch.clamp(self.actor_log_std, -2.0, 0.0))
             value = self.critic(features).squeeze(-1)
 
         dist = Normal(action_mean, action_std)

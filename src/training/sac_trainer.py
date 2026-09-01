@@ -49,7 +49,7 @@ class SACTrainer(TelemetryMixin):
         self.agent = SACActorCritic(
             action_dim=3, features_dim=512, backbone_name=self.cfg.backbone,
             freeze_backbone=True, use_pretrained=self.cfg.use_pretrained,
-            weights_path=self.cfg.weights_path
+            weights_path=self.cfg.weights_path, policy_arch=self.cfg.sac_policy_arch
         ).to(self.device)
 
         # Explicit: pins the frozen backbone's BatchNorm layers to eval so cached replay

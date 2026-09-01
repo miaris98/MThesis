@@ -49,7 +49,7 @@ except ImportError:
 from src.envs.base_env import wait_for_carla_server, safe_clear_carla_actors
 from src.envs.camera_sensor import CameraSensorManager
 from src.envs.driving_state import DrivingStateExtractor
-from src.envs.reward_calculator import RewardCalculator
+from src.envs.rewards import make_reward
 
 
 class CameraEasyCarlaEnv(gym.Env):
@@ -66,7 +66,7 @@ class CameraEasyCarlaEnv(gym.Env):
             'visualize_waypoints': False, 'desired_speed': 8, 'max_ego_spawn_times': 200,
             'view_mode': 'top', 'traffic': 'off', 'lidar_max_range': 50.0,
             'max_nearby_vehicles': 5, 'surrounding_vehicle_spawned_randomly': True,
-            'img_width': 256, 'img_height': 256, 'frame_skip': 2,
+            'img_width': 256, 'img_height': 256, 'frame_skip': 2, 'reward_fn': 'custom_1',
         }
         if params:
             default_params.update(params)
@@ -81,7 +81,8 @@ class CameraEasyCarlaEnv(gym.Env):
         self.sensor_mgr = CameraSensorManager(self.img_width, self.img_height)
         # EasyCarla expresses 'desired_speed' in m/s while RewardCalculator compares against km/h.
         desired_speed_ms = float(self.params.get('desired_speed', 8.0))
-        self.reward_calc = RewardCalculator(desired_speed=desired_speed_ms * 3.6)
+        self.reward_fn_name = str(self.params.get('reward_fn', 'custom_1'))
+        self.reward_calc = make_reward(self.reward_fn_name, desired_speed=desired_speed_ms * 3.6)
         self.state_extractor = DrivingStateExtractor()
 
         port = self.params.get('port', 2000)
@@ -216,8 +217,18 @@ class CameraEasyCarlaEnv(gym.Env):
                     sp = random.choice(self.spawn_points)
                     sp.location.z += 0.5
                     self.easy_env.ego.set_transform(sp)
-                self.easy_env.ego.set_target_velocity(carla.Vector3D(0, 0, 0))
-                self.easy_env.ego.set_target_angular_velocity(carla.Vector3D(0, 0, 0))
+                zero = carla.Vector3D(0, 0, 0)
+                # Physics is disabled here, so both the target and the actual rigid-body
+                # velocity must be cleared - otherwise the ego inherits the speed it
+                # crashed at (observed: ~16 km/h at step 1 of every episode).
+                self.easy_env.ego.set_target_velocity(zero)
+                self.easy_env.ego.set_target_angular_velocity(zero)
+                try:
+                    self.easy_env.ego.enable_constant_velocity(zero)
+                    self.easy_env.ego.disable_constant_velocity()
+                except Exception:
+                    pass
+                self.easy_env.ego.apply_control(carla.VehicleControl(throttle=0.0, steer=0.0, brake=1.0))
                 self.easy_env._is_collision = False
                 self.easy_env._is_off_road = False
                 if hasattr(self.easy_env, 'collision_hist'):
