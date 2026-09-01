@@ -1,4 +1,7 @@
-"""CARLA 3-Camera Autonomous Driving Evaluation Studio (1280x720 HD 4-View Layout)."""
+"""CARLA 3-Camera Autonomous Driving Evaluation Studio (1280x720 HD 4-View Layout).
+
+Records a trained PPO, SAC or World on Rails (WoR) policy driving in CARLA.
+"""
 import os
 import sys
 import time
@@ -30,6 +33,18 @@ except ImportError:
 from src.envs.camera_easycarla_env import CameraEasyCarlaEnv
 from src.models.actor_critic import ActorCriticPPO
 from src.utils.evaluation_studio import draw_hud
+
+
+def _wor_control_to_action(throttle: float, steer: float, brake: float) -> np.ndarray:
+    """Map a WoR VehicleControl onto the env's tanh action space.
+
+    CameraEasyCarlaEnv decodes throttle = (a0 + 1) / 2, steer = a1 and only honours
+    the brake when a2 > 0.4 *and* the decoded throttle is < 0.3, so a braking step
+    has to zero the throttle axis for the brake to survive the round-trip.
+    """
+    if brake > 0.0:
+        return np.array([-1.0, steer, max(float(brake), 0.41)], dtype=np.float32)
+    return np.array([2.0 * float(throttle) - 1.0, steer, 0.0], dtype=np.float32)
 
 
 def _upload_to_mlflow(video_path: str, experiment_name: str = "CARLA_PPO_RL") -> None:
@@ -71,7 +86,8 @@ def record_eval_video(
     num_npc_vehicles: int = 3, num_walkers: int = 10,
     checkpoint: Optional[str] = None, backbone: str = "lav",
     policy_arch: str = "qwen100m", weights_path: Optional[str] = None,
-    town: str = "Town10HD_Opt", algo: str = "ppo", sac_policy_arch: str = "mlp"
+    town: str = "Town10HD_Opt", algo: str = "ppo", sac_policy_arch: str = "mlp",
+    wor_model_type: str = "wor_nc"
 ) -> None:
     if not weights_path:
         for wp in ["/workspace/pretrained_carla/model_0030_0.pth", "./papers_and_code/LAV/lav_pretrained.pth", "/workspace/MThesis/papers_and_code/LAV/lav_pretrained.pth"]:
@@ -80,9 +96,14 @@ def record_eval_video(
                 break
 
     if not checkpoint:
-        prefix = "sac" if algo == "sac" else "ppo"
-        for cp in [f"/workspace/checkpoints/{prefix}_carla_best.pth", f"/workspace/checkpoints/{prefix}_carla_latest.pth",
-                   f"./checkpoints/{prefix}_carla_best.pth", f"./checkpoints/{prefix}_carla_latest.pth"]:
+        if algo == "wor":
+            cands = ["/workspace/checkpoints/wor_10k/best_model.pth", "/workspace/checkpoints/wor_10k/last_model.pth",
+                     "./checkpoints/wor_10k/best_model.pth"]
+        else:
+            prefix = "sac" if algo == "sac" else "ppo"
+            cands = [f"/workspace/checkpoints/{prefix}_carla_best.pth", f"/workspace/checkpoints/{prefix}_carla_latest.pth",
+                     f"./checkpoints/{prefix}_carla_best.pth", f"./checkpoints/{prefix}_carla_latest.pth"]
+        for cp in cands:
             if os.path.exists(cp):
                 checkpoint = cp
                 break
@@ -103,7 +124,13 @@ def record_eval_video(
 
     env = CameraEasyCarlaEnv(params=easy_params)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if algo == "sac":
+    if algo == "wor":
+        from src.agents.wor_agent import WorldOnRailsAgent
+        agent = WorldOnRailsAgent(
+            checkpoint_path=checkpoint if checkpoint and os.path.exists(checkpoint) else None,
+            model_type=wor_model_type, backbone_name=backbone, device=str(device)
+        )
+    elif algo == "sac":
         from src.models.sac_networks import SACActorCritic
         agent = SACActorCritic(
             action_dim=3, features_dim=512, backbone_name=backbone,
@@ -116,13 +143,16 @@ def record_eval_video(
             freeze_backbone=True, use_pretrained=True, weights_path=weights_path
         ).to(device)
 
-    if checkpoint and os.path.exists(checkpoint):
-        try:
-            agent.load_state_dict(torch.load(checkpoint, map_location=device), strict=False)
-            print(f"✓ Successfully loaded trained {algo.upper()} policy: {checkpoint}")
-        except Exception as e:
-            print(f"Warning: Could not load checkpoint ({e}).")
-    agent.eval()
+    if algo == "wor":
+        agent.net.eval()  # weights were already loaded by WorldOnRailsAgent
+    else:
+        if checkpoint and os.path.exists(checkpoint):
+            try:
+                agent.load_state_dict(torch.load(checkpoint, map_location=device), strict=False)
+                print(f"✓ Successfully loaded trained {algo.upper()} policy: {checkpoint}")
+            except Exception as e:
+                print(f"Warning: Could not load checkpoint ({e}).")
+        agent.eval()
 
     chase_w, chase_h = 580, 430
     chase_cam_holder, chase_frame_buffer = [None], [None]
@@ -175,18 +205,34 @@ def record_eval_video(
                 spd = float(obs["speed"][0])
                 episode_speeds.append(spd)
 
-                img_t = torch.as_tensor(model_rgb, dtype=torch.uint8, device=device).unsqueeze(0)
-                spd_t = torch.as_tensor([spd], dtype=torch.float32, device=device).unsqueeze(0)
-                with torch.inference_mode():
-                    if algo == "sac":
-                        vis = agent.extract_visual_features(img_t)
-                        action, _ = agent.sample_action(vis, spd_t, deterministic=True)
+                if algo == "wor":
+                    # WoR consumes a single 256x256 front view: the centre tile of the panorama.
+                    control = agent.run_step({
+                        "rgb_front": (step_in_ep, np.ascontiguousarray(model_rgb[:, 256:512, :])),
+                        "speed": (step_in_ep, spd),
+                        "command": 2,
+                    })
+                    if isinstance(control, dict):
+                        raw_t, raw_s, raw_b = control["throttle"], control["steer"], control["brake"]
                     else:
-                        action, _, _, _ = agent.get_action_and_value(img_t, spd_t, deterministic=True)
-                act = action.cpu().numpy()[0]
-                t_val = float(np.clip((act[0] + 1.0) / 2.0, 0.0, 1.0))
-                s_val = float(np.clip(act[1], -1.0, 1.0))
-                b_val = float(np.clip(act[2], 0.0, 1.0)) if act[2] > 0.4 and t_val < 0.3 else 0.0
+                        raw_t, raw_s, raw_b = control.throttle, control.steer, control.brake
+                    t_val = float(np.clip(raw_t, 0.0, 1.0))
+                    s_val = float(np.clip(raw_s, -1.0, 1.0))
+                    b_val = float(np.clip(raw_b, 0.0, 1.0))
+                    act = _wor_control_to_action(t_val, s_val, b_val)
+                else:
+                    img_t = torch.as_tensor(model_rgb, dtype=torch.uint8, device=device).unsqueeze(0)
+                    spd_t = torch.as_tensor([spd], dtype=torch.float32, device=device).unsqueeze(0)
+                    with torch.inference_mode():
+                        if algo == "sac":
+                            vis = agent.extract_visual_features(img_t)
+                            action, _ = agent.sample_action(vis, spd_t, deterministic=True)
+                        else:
+                            action, _, _, _ = agent.get_action_and_value(img_t, spd_t, deterministic=True)
+                    act = action.cpu().numpy()[0]
+                    t_val = float(np.clip((act[0] + 1.0) / 2.0, 0.0, 1.0))
+                    s_val = float(np.clip(act[1], -1.0, 1.0))
+                    b_val = float(np.clip(act[2], 0.0, 1.0)) if act[2] > 0.4 and t_val < 0.3 else 0.0
 
                 next_obs, reward, term, trunc, info = env.step(act)
                 done = term or trunc
@@ -196,7 +242,7 @@ def record_eval_video(
                 header = np.zeros((header_h, canvas_w, 3), dtype=np.uint8)
                 cv2.rectangle(header, (0, 0), (canvas_w, header_h), (15, 23, 42), -1)
                 cv2.putText(header, "CARLA 3-CAMERA AUTONOMOUS DRIVING EVALUATION STUDIO", (25, 33), cv2.FONT_HERSHEY_DUPLEX, 0.68, (255, 255, 255), 1, cv2.LINE_AA)
-                cv2.putText(header, f"Vision: 3x RGB + {backbone.upper()} | Map: {town}", (750, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (156, 163, 175), 1, cv2.LINE_AA)
+                cv2.putText(header, f"{algo.upper()} | Vision: 3x RGB + {backbone.upper()} | Map: {town}", (750, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (156, 163, 175), 1, cv2.LINE_AA)
                 canvas[0:header_h, 0:canvas_w] = header
 
                 left_bgr = cv2.cvtColor(model_rgb[:, :256, :], cv2.COLOR_RGB2BGR)
@@ -229,6 +275,8 @@ def record_eval_video(
                 print(f"✓ [VIDEO] Ep #{saved_episodes} | Steps: {len(ep_frames)} | Total Video Frames: {recorded_valid_steps}/{steps}")
 
             try:
+                if algo == "wor":
+                    agent.net.controller.reset()
                 obs, info = env.reset()
                 setup_chase_camera()
             except Exception:
@@ -267,7 +315,8 @@ def main():
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--weights-path", type=str, default=None)
     parser.add_argument("--town", type=str, default="Town10HD_Opt")
-    parser.add_argument("--algo", type=str, default="ppo", choices=["ppo", "sac"], help="Which trained policy to evaluate")
+    parser.add_argument("--algo", type=str, default="ppo", choices=["ppo", "sac", "wor"], help="Which trained policy to evaluate")
+    parser.add_argument("--wor-model-type", type=str, default="wor_nc", choices=["wor_nc", "wor_lb"], help="Pretrained World on Rails variant, used only when --checkpoint is absent")
     parser.add_argument("--sac-policy-arch", type=str, default="mlp", choices=["mlp", "qwen100m", "qwen500m", "qwen900m"], help="Architecture the SAC checkpoint was trained with")
     args = parser.parse_args()
 
@@ -275,7 +324,8 @@ def main():
         port=args.port, steps=args.steps, max_episode_steps=args.max_episode_steps,
         min_speed=args.min_speed, output_video=args.output_video, num_npc_vehicles=args.npc_vehicles,
         num_walkers=args.num_walkers, checkpoint=args.checkpoint, backbone=args.backbone,
-        policy_arch=args.policy_arch, weights_path=args.weights_path, town=args.town, algo=args.algo, sac_policy_arch=args.sac_policy_arch
+        policy_arch=args.policy_arch, weights_path=args.weights_path, town=args.town, algo=args.algo,
+        sac_policy_arch=args.sac_policy_arch, wor_model_type=args.wor_model_type
     )
 
 

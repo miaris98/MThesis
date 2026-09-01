@@ -264,6 +264,18 @@ python record_eval_video.py \
     --output-video /workspace/output_screenshots/driving_multiview.mp4
 ```
 
+Evaluate a World on Rails checkpoint through the same studio (4-view HD layout, HUD, MLflow sync):
+```bash
+python record_eval_video.py \
+    --algo wor \
+    --checkpoint /workspace/checkpoints/wor_10k/best_model.pth \
+    --backbone resnet34 \
+    --town Town01 \
+    --steps 600 \
+    --output-video /workspace/output_screenshots/wor_driving_multiview.mp4
+```
+Omit `--checkpoint` to fall back to the pretrained variant selected by `--wor-model-type` (`wor_nc` / `wor_lb`).
+
 In JupyterLab, play the recorded video cell:
 ```python
 from IPython.display import Video
