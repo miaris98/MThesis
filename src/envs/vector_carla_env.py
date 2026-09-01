@@ -13,6 +13,7 @@ import random
 import numpy as np
 import multiprocessing as mp
 from multiprocessing.connection import Connection
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     import gymnasium as gym
@@ -242,8 +243,11 @@ class SharedServerCarlaVectorEnv:
     SubprocCarlaVectorEnv's N-separate-server-process model on single-GPU machines,
     where N independent UE4 processes each duplicating map/asset load + holding their
     own GPU context saturate the rasterizer well before raw compute is the bottleneck.
-    Runs entirely in-process (no subprocess workers) - N sequential lightweight RPCs
-    through one shared carla.Client per tick.
+    Runs entirely in-process (no subprocess workers): each slot has its own
+    carla.Client connection to the one shared server, and per-slot apply/read RPCs are
+    dispatched through a ThreadPoolExecutor (CPython releases the GIL during blocking
+    socket I/O, so this genuinely parallelizes round-trip latency) - only world.tick()
+    itself stays a single sequential call owned by this coordinator's own connection.
     """
 
     def __init__(self, cfg: TrainingConfig, port: int):
@@ -280,18 +284,32 @@ class SharedServerCarlaVectorEnv:
 
         self._spawn_shared_npc_pool()
 
+        # Each slot gets its OWN carla.Client connection (CARLA supports many
+        # simultaneous connections to one server) rather than sharing self.client -
+        # a shared connection would serialize every RPC at the socket layer
+        # regardless of how many Python threads dispatch them. With separate
+        # connections, ThreadPoolExecutor genuinely parallelizes the per-slot
+        # apply/read RPC round-trips below, since CPython releases the GIL during
+        # blocking socket I/O.
         self.slots: List[Any] = []
         for i in range(self.num_envs):
             factory = CarlaEnvFactory(cfg, port)
+            slot_client = carla.Client('127.0.0.1', port)
+            slot_client.set_timeout(120.0)
+            slot_world = slot_client.get_world()  # attaches to the already-loaded world
             params_override = {
                 'shared_mode': True,
-                'external_client': self.client,
-                'external_world': self.world,
+                'external_client': slot_client,
+                'external_world': slot_world,
                 'spawn_point_subset': spawn_chunks[i] if spawn_chunks[i] else all_spawns,
                 'number_of_vehicles': 0,
                 'number_of_walkers': 0,
             }
             self.slots.append(factory(params_override=params_override))
+
+        # world.tick() stays a single sequential call owned by self.client - only the
+        # per-slot actor RPCs (apply control, read state, reset) are parallelized.
+        self._pool = ThreadPoolExecutor(max_workers=self.num_envs, thread_name_prefix="carla-slot")
 
     def _spawn_shared_npc_pool(self) -> None:
         """Spawn background traffic exactly once for the whole shared world, instead of
@@ -359,17 +377,30 @@ class SharedServerCarlaVectorEnv:
         controller_actor.set_max_speed(1 + random.random())
         return True
 
+    @staticmethod
+    def _apply_slot_action(slot: Any, action: np.ndarray) -> None:
+        slot._apply_sub_action(action)
+
+    @staticmethod
+    def _read_slot_result(slot: Any) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
+        return slot._read_sub_result()
+
+    @staticmethod
+    def _begin_slot_reset(slot: Any, seed: Optional[int]) -> None:
+        slot.begin_reset(seed=seed)
+
+    @staticmethod
+    def _finish_slot_reset(slot: Any) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
+        return slot.finish_reset()
+
     def reset(self, seed: Optional[int] = None) -> Tuple[Dict[str, np.ndarray], List[Dict[str, Any]]]:
-        for i, slot in enumerate(self.slots):
-            env_seed = seed + i if seed is not None else None
-            slot.begin_reset(seed=env_seed)
+        seeds = [(seed + i if seed is not None else None) for i in range(self.num_envs)]
+        list(self._pool.map(self._begin_slot_reset, self.slots, seeds))
         self.world.tick()
 
-        obs_list, info_list = [], []
-        for slot in self.slots:
-            obs, info = slot.finish_reset()
-            obs_list.append(obs)
-            info_list.append(info)
+        results = list(self._pool.map(self._finish_slot_reset, self.slots))
+        obs_list = [obs for obs, _ in results]
+        info_list = [info for _, info in results]
 
         return {
             "image": np.stack([o["image"] for o in obs_list]),
@@ -386,23 +417,21 @@ class SharedServerCarlaVectorEnv:
         truncated = np.zeros(n, dtype=bool)
 
         for _ in range(self.frame_skip):
-            for i, slot in enumerate(self.slots):
-                if terminated[i] or truncated[i]:
-                    # Already done this outer step - keep braking rather than coasting
-                    # on its last-applied throttle, so it doesn't drift into a
-                    # neighboring slot's still-active ego during the remaining ticks
-                    # this shared world must still advance for them.
-                    slot._apply_sub_action(self._brake_action)
-                else:
-                    slot._apply_sub_action(actions[i])
+            # Already-done slots keep braking rather than coasting on their last
+            # throttle, so they don't drift into a neighboring slot's still-active
+            # ego during the remaining ticks this shared world must still advance for.
+            effective_actions = [
+                self._brake_action if (terminated[i] or truncated[i]) else actions[i]
+                for i in range(n)
+            ]
+            list(self._pool.map(self._apply_slot_action, self.slots, effective_actions))
 
             self.world.tick()  # single tick shared across every slot's sub-step
 
-            for i, slot in enumerate(self.slots):
+            results = list(self._pool.map(self._read_slot_result, self.slots))
+            for i, (obs, reward, term, trunc, info) in enumerate(results):
                 if terminated[i] or truncated[i]:
-                    slot._read_sub_result()  # keep bookkeeping consistent; discard
-                    continue
-                obs, reward, term, trunc, info = slot._read_sub_result()
+                    continue  # already done this outer step; result discarded above
                 total_reward[i] += reward
                 total_cost[i] += info.get("cost", 0.0)
                 final_obs[i] = obs
@@ -417,12 +446,13 @@ class SharedServerCarlaVectorEnv:
 
         reset_idxs = [i for i in range(n) if terminated[i] or truncated[i]]
         if reset_idxs:
+            reset_slots = [self.slots[i] for i in reset_idxs]
             for i in reset_idxs:
                 final_info[i]["terminal_observation"] = final_obs[i]
-                self.slots[i].begin_reset()
+            list(self._pool.map(self._begin_slot_reset, reset_slots, [None] * len(reset_idxs)))
             self.world.tick()
-            for i in reset_idxs:
-                obs, reset_info = self.slots[i].finish_reset()
+            reset_results = list(self._pool.map(self._finish_slot_reset, reset_slots))
+            for i, (obs, reset_info) in zip(reset_idxs, reset_results):
                 final_obs[i] = obs
                 final_info[i]["reset_info"] = reset_info
 
@@ -441,6 +471,7 @@ class SharedServerCarlaVectorEnv:
         if self.closed:
             return
         self.closed = True
+        self._pool.shutdown(wait=True)
         for slot in self.slots:
             try:
                 slot.close()
