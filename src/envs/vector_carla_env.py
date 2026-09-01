@@ -256,6 +256,15 @@ class SharedServerCarlaVectorEnv:
         self.num_envs = cfg.num_envs
         self.frame_skip = cfg.frame_skip
         self.closed = False
+        # Lightweight step()-phase timing breakdown, printed periodically - apply/tick/
+        # read isolate CARLA-side cost, "other" catches this method's own aggregation
+        # overhead (np.stack etc). Not for anything outside this method (e.g. the PPO
+        # forward pass in ppo_trainer.py happens before step() is even called).
+        self._prof_apply = 0.0
+        self._prof_tick = 0.0
+        self._prof_read = 0.0
+        self._prof_wall = 0.0
+        self._prof_calls = 0
         # Matches CameraEasyCarlaEnv._apply_sub_action's action mapping: throttle =
         # (a0+1)/2 -> 0.0, steer = a1 -> 0.0, brake gated on (a2>0.4 and throttle<0.3) -> 1.0.
         self._brake_action = np.array([-1.0, 0.0, 1.0], dtype=np.float32)
@@ -445,6 +454,7 @@ class SharedServerCarlaVectorEnv:
         }, info_list
 
     def step(self, actions: np.ndarray) -> Tuple[Dict[str, np.ndarray], np.ndarray, np.ndarray, np.ndarray, List[Dict[str, Any]]]:
+        _step_t0 = time.time()
         n = self.num_envs
         total_reward = np.zeros(n, dtype=np.float32)
         total_cost = np.zeros(n, dtype=np.float32)
@@ -462,11 +472,18 @@ class SharedServerCarlaVectorEnv:
                 for i in range(n)
             ]
             actions_per_group = [[effective_actions[idx] for idx in group] for group in self._groups]
+            _t0 = time.time()
             list(self._pool.map(self._apply_group, self._groups, actions_per_group))
 
+            _t1 = time.time()
             self.world.tick()  # single tick shared across every group's sub-step
 
+            _t2 = time.time()
             group_results = list(self._pool.map(self._read_group, self._groups))
+            _t3 = time.time()
+            self._prof_apply += _t1 - _t0
+            self._prof_tick += _t2 - _t1
+            self._prof_read += _t3 - _t2
             for group, results in zip(self._groups, group_results):
                 for idx, (obs, reward, term, trunc, info) in zip(group, results):
                     if terminated[idx] or truncated[idx]:
@@ -502,6 +519,23 @@ class SharedServerCarlaVectorEnv:
             "image": np.stack([o["image"] for o in final_obs]),
             "speed": np.stack([o["speed"] for o in final_obs])
         }
+
+        self._prof_wall += time.time() - _step_t0
+        self._prof_calls += 1
+        if self._prof_calls % 50 == 0:
+            wall = max(self._prof_wall, 1e-9)
+            other = max(0.0, wall - self._prof_apply - self._prof_tick - self._prof_read)
+            print(
+                f"[PROFILE last {self._prof_calls} step() calls] "
+                f"apply={self._prof_apply*1000:.0f}ms({100*self._prof_apply/wall:.0f}%) "
+                f"tick={self._prof_tick*1000:.0f}ms({100*self._prof_tick/wall:.0f}%) "
+                f"read={self._prof_read*1000:.0f}ms({100*self._prof_read/wall:.0f}%) "
+                f"other={other*1000:.0f}ms({100*other/wall:.0f}%) "
+                f"wall={wall*1000:.0f}ms",
+                flush=True,
+            )
+            self._prof_apply = self._prof_tick = self._prof_read = self._prof_wall = 0.0
+
         return batched_obs, total_reward, terminated, truncated, final_info
 
     def set_curriculum_factor(self, factor: float) -> None:
