@@ -66,6 +66,30 @@ class ActorCriticPPO(nn.Module):
             )
             param_count = sum(p.numel() for p in self.decision_net.parameters())
             print(f"✓ {model_size.upper()} Qwen Decision Transformer initialized! Policy Parameters: {param_count:,} ({param_count/1e6:.1f}M)")
+        elif policy_arch in ["wor", "world_on_rails", "rails"]:
+            print(f"--> Initializing World on Rails (WoR) Sensorimotor Policy with {backbone_name.upper()} Backbone...")
+            self.decision_net = None
+            self.actor_mean = nn.Sequential(
+                nn.Linear(features_dim, 256),
+                nn.ReLU(),
+                nn.Linear(256, 128),
+                nn.ReLU(),
+                nn.Linear(128, action_dim),
+                nn.Tanh()
+            )
+            with torch.no_grad():
+                self.actor_mean[4].bias.data[0] = 0.5   # Throttle bias (forward momentum)
+                self.actor_mean[4].bias.data[1] = 0.0   # Steering strictly centered
+                self.actor_mean[4].bias.data[2] = -0.5  # Brake disengaged
+            self.actor_log_std = nn.Parameter(torch.tensor([-0.7, -1.0, -0.7]))  # Tighter initial steer variance
+            self.critic = nn.Sequential(
+                nn.Linear(features_dim, 256),
+                nn.ReLU(),
+                nn.Linear(256, 128),
+                nn.ReLU(),
+                nn.Linear(128, 1)
+            )
+            print(f"✓ World on Rails Policy Architecture ready! (Backbone: {backbone_name.upper()}, Pretrained: {use_pretrained})")
         else:
             self.decision_net = None
             self.actor_mean = nn.Sequential(
