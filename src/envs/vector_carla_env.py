@@ -294,9 +294,22 @@ class SharedServerCarlaVectorEnv:
         self.slots: List[Any] = []
         for i in range(self.num_envs):
             factory = CarlaEnvFactory(cfg, port)
-            slot_client = carla.Client('127.0.0.1', port)
-            slot_client.set_timeout(120.0)
+            # Opening many client connections back-to-back can transiently overrun
+            # CARLA's RPC server accept path ("Resource temporarily unavailable"),
+            # so retry with backoff and stagger successive connections slightly.
+            slot_client = None
+            for attempt in range(10):
+                try:
+                    slot_client = carla.Client('127.0.0.1', port)
+                    slot_client.set_timeout(120.0)
+                    _ = slot_client.get_server_version()
+                    break
+                except Exception:
+                    if attempt == 9:
+                        raise
+                    time.sleep(0.5)
             slot_world = slot_client.get_world()  # attaches to the already-loaded world
+            time.sleep(0.05)
             params_override = {
                 'shared_mode': True,
                 'external_client': slot_client,
