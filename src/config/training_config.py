@@ -80,8 +80,8 @@ class TrainingConfig:
         parser.add_argument("--num-envs", type=int, default=2, help="Number of parallel CARLA server environments")
         parser.add_argument("--carla-ports", type=str, default=None, help="Comma-separated list of CARLA server ports (e.g. 2000,2004)")
         parser.add_argument("--env-type", type=str, default="camera_easycarla", choices=["camera_easycarla", "carla_gym"])
-        parser.add_argument("--backbone", type=str, default="resnet34", choices=["resnet18", "resnet34", "resnet50", "lav", "wor", "erfnet", "qwen100m", "qwen500m", "qwen900m", "qwen", "transformer"])
-        parser.add_argument("--policy-arch", type=str, default="wor", choices=["wor", "world_on_rails", "qwen100m", "qwen500m", "qwen900m", "mlp", "transformer"])
+        parser.add_argument("--backbone", type=str, default="resnet18", choices=["resnet18", "resnet34", "resnet50", "lav", "wor", "erfnet", "qwen100m", "qwen500m", "qwen900m", "qwen", "transformer"])
+        parser.add_argument("--policy-arch", type=str, default="qwen100m", choices=["wor", "world_on_rails", "qwen100m", "qwen500m", "qwen900m", "mlp", "transformer"])
         parser.add_argument("--fresh", action="store_true", default=False, help="Start training fresh from scratch")
         parser.add_argument("--weights-path", type=str, default=None, help="Path to custom pretrained checkpoint (.pth)")
         parser.add_argument("--freeze-backbone", action="store_true", default=True, help="Freeze vision backbone parameters")
@@ -102,7 +102,7 @@ class TrainingConfig:
         parser.add_argument("--reward-clip", type=float, default=50.0)
 
         # Algorithm selection and SAC-specific flags
-        parser.add_argument("--reward-fn", type=str, default="wor", choices=["wor", "world_on_rails", "custom_1", "leaderboard", "roach", "interp_e2e"], help="Swappable reward function")
+        parser.add_argument("--reward-fn", type=str, default="custom_1", choices=["wor", "world_on_rails", "custom_1", "leaderboard", "roach", "interp_e2e"], help="Swappable reward function")
         parser.add_argument("--algo", type=str, default="ppo", choices=["ppo", "sac"], help="Training algorithm")
         parser.add_argument("--sac-policy-arch", type=str, default="mlp", choices=["mlp", "qwen100m", "qwen500m", "qwen900m"], help="SAC actor/critic architecture")
         parser.add_argument("--buffer-size", type=int, default=100000, help="SAC replay buffer capacity")
