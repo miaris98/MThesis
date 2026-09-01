@@ -284,10 +284,10 @@ class CameraEasyCarlaEnv(gym.Env):
             is_collision=self.easy_env._is_collision, is_off_road=self.easy_env._is_off_road
         )
         self.easy_env._is_off_road = state["is_off_road"]
-        reward, sub_info = self.reward_calc.compute_reward(state, self.curriculum_factor, dt=self.dt)
-        terminated = bool(done or self.easy_env._is_collision or self.easy_env._is_off_road or sub_info["is_stalled"])
+        is_stalled = bool(sub_info.get("is_stalled", False))
+        terminated = bool(done or self.easy_env._is_collision or self.easy_env._is_off_road or is_stalled)
         truncated = bool(self.easy_env.time_step >= self.easy_env.max_time_episode)
-        reason = "Stalled" if sub_info["is_stalled"] else ("Collision" if self.easy_env._is_collision else ("Off-Road" if self.easy_env._is_off_road else ("Max Steps" if truncated else "Active")))
+        reason = "Stalled" if is_stalled else ("Collision" if self.easy_env._is_collision else ("Off-Road" if self.easy_env._is_off_road else ("Max Steps" if truncated else "Active")))
 
         info = {
             "cost": cost, "is_collision": self.easy_env._is_collision, "is_off_road": self.easy_env._is_off_road,

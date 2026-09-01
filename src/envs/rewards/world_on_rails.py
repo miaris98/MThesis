@@ -81,6 +81,7 @@ class WorldOnRailsReward(BaseReward):
 
         # 4. Terminal Events (Collision, Off-Road, Stall)
         r_terminal = 0.0
+        is_stalled = False
         if is_collision:
             r_terminal = self.COLLISION_PENALTY
         elif is_off_road:
@@ -100,13 +101,12 @@ class WorldOnRailsReward(BaseReward):
         # Total composite reward
         raw_reward = r_progress + r_lane + r_light + r_terminal
 
-        breakdown = {
-            "r_progress": r_progress,
-            "r_lane": r_lane,
-            "r_light": r_light,
-            "r_obstacle": 0.0,
-            "r_ttc": 0.0,
-            "r_terminal": r_terminal,
-        }
-
-        return raw_reward, breakdown
+        return raw_reward, self._blank_info(
+            r_progress=r_progress,
+            r_lane=r_lane,
+            r_light=r_light,
+            r_obstacle=0.0,
+            r_ttc=0.0,
+            r_terminal=r_terminal,
+            is_stalled=is_stalled,
+        )
