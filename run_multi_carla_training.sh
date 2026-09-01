@@ -35,6 +35,12 @@ for arg in "$@"; do
         --policy=*)
             POLICY_ARCH="${arg#*=}"
             ;;
+        --backbone=*)
+            BACKBONE="${arg#*=}"
+            ;;
+        --weights-path=*|--weights=*)
+            CUSTOM_WEIGHTS="${arg#*=}"
+            ;;
         --no-early-stopping)
             EARLY_STOPPING=false
             ;;
@@ -559,7 +565,13 @@ v = c.get_server_version()
 
     # 4. Configure weights and resume/fresh flags
     WEIGHTS_ARG=""
-    if [ -f "./papers_and_code/LAV/lav_pretrained.pth" ]; then
+    if [ -n "$CUSTOM_WEIGHTS" ] && [ -f "$CUSTOM_WEIGHTS" ]; then
+        WEIGHTS_ARG="--weights-path $CUSTOM_WEIGHTS"
+    elif [ -f "/workspace/checkpoints/wor_10k/best_model.pth" ]; then
+        WEIGHTS_ARG="--weights-path /workspace/checkpoints/wor_10k/best_model.pth"
+    elif [ -f "/workspace/checkpoints/carla_lav_pretrained.pth" ]; then
+        WEIGHTS_ARG="--weights-path /workspace/checkpoints/carla_lav_pretrained.pth"
+    elif [ -f "./papers_and_code/LAV/lav_pretrained.pth" ]; then
         WEIGHTS_ARG="--weights-path ./papers_and_code/LAV/lav_pretrained.pth"
     elif [ -f "/workspace/pretrained_carla/model_0030_0.pth" ]; then
         WEIGHTS_ARG="--weights-path /workspace/pretrained_carla/model_0030_0.pth"
