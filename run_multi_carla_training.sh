@@ -608,7 +608,7 @@ v = c.get_server_version()
         --num-walkers "$NUM_WALKERS" \
         --frame-skip 2 \
         --rollout-steps 250 \
-        --minibatch-size 128 \
+        --minibatch-size 256 \
         --ent-coef 0.005 \
         --reward-fn "$REWARD_FN" \
         --use-mlflow \
