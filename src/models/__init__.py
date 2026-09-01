@@ -14,6 +14,13 @@ from src.models.transformer import (
     Qwen500MVisionTransformer
 )
 
+from src.models.world_on_rails import (
+    WorldOnRailsPolicy,
+    WorldModel,
+    load_wor_model,
+    download_pretrained_weights
+)
+
 __all__ = [
     "ActorCriticPPO",
     "CNNFeatureExtractor",
@@ -24,5 +31,10 @@ __all__ = [
     "QwenAttentionWithSkip",
     "QwenTransformerBlock",
     "QwenDecisionTransformer",
-    "Qwen500MVisionTransformer"
+    "Qwen500MVisionTransformer",
+    "WorldOnRailsPolicy",
+    "WorldModel",
+    "load_wor_model",
+    "download_pretrained_weights"
 ]
+
