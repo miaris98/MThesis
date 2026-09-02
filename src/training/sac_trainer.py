@@ -42,9 +42,12 @@ class SACTrainer(TelemetryMixin):
                 "would need tens of GB of buffer; the cached-feature buffer assumes a frozen encoder."
             )
 
-        self.ports = self.cfg.get_ports()
-        self.num_envs = len(self.ports)
         self.env = create_vector_carla_env(self.cfg)
+        # The vehicle-env count equals the port count only in the classic
+        # one-env-per-server mode. In shared-server mode a port is a SERVER hosting many
+        # envs, so take the authoritative count from the env itself - every vector env
+        # class exposes num_envs.
+        self.num_envs = self.env.num_envs
 
         self.agent = SACActorCritic(
             action_dim=3, features_dim=512, backbone_name=self.cfg.backbone,
