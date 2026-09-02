@@ -207,14 +207,22 @@ class SACTrainer(TelemetryMixin):
                 info_e = infos[e]
                 spd_val = info_e.get("speed_kmh", float(next_obs["speed"][e][0]))
                 ep_speeds[e].append(spd_val)
+                # Settle the episode before writing the row so its aggregates land on the
+                # step that ended it. _on_episode_done bumps episode_count, so carry the
+                # number this episode actually ran under and let extra override it.
+                ep_extra = None
+                if dones[e]:
+                    ep_num = self.episode_count
+                    ep_extra = self._on_episode_done(e, float(ep_rewards[e]), ep_lengths[e], ep_speeds[e], info_e)
+                    ep_extra["episode"] = ep_num
+
                 self.log_telemetry_row(
                     env_id=e, info=info_e, action_np=action_np, raw_reward=raw_r[e],
                     stored_reward=stored_r[e], curriculum_factor=curriculum_factor,
                     step_in_ep=ep_lengths[e], speed_kmh=spd_val, done=bool(dones[e]),
-                    hardware=hw, extra=self._sac_metrics())
+                    hardware=hw, extra=ep_extra)
 
                 if dones[e]:
-                    self._on_episode_done(e, float(ep_rewards[e]), ep_speeds[e], info_e)
                     ep_rewards[e], ep_lengths[e], ep_speeds[e] = 0.0, 0, []
 
             self.report_progress(suffix=f" | Buffer: {len(self.buffer):,} | alpha: {self.alpha:.3f}")
@@ -271,17 +279,18 @@ class SACTrainer(TelemetryMixin):
         self.last_alpha_loss = alpha_loss_val
         self.last_entropy = float(-logp.mean().item())
 
-    def _sac_metrics(self) -> dict:
+    def _optimizer_metrics(self) -> dict:
         """SAC-specific loss columns appended to the shared telemetry schema."""
         return {
             "loss_policy": round(self.last_pi_loss, 4) if self.last_pi_loss is not None else "",
             "loss_value": round(self.last_q_loss, 4) if self.last_q_loss is not None else "",
             "loss_entropy": round(self.last_entropy, 4) if self.last_entropy is not None else "",
+            "learning_rate": self.actor_opt.param_groups[0]["lr"],
             "sac_alpha": round(self.alpha, 4),
             "sac_alpha_loss": round(self.last_alpha_loss, 4) if self.last_alpha_loss is not None else ""
         }
 
-    def _on_episode_done(self, env_id: int, ep_reward: float, ep_speeds: list, info: dict) -> None:
+    def _on_episode_done(self, env_id: int, ep_reward: float, ep_length: int, ep_speeds: list, info: dict) -> dict:
         """Record episode statistics, checkpoint on improvement, and evaluate early stopping."""
         self.episode_count += 1
         self.recent_rewards.append(ep_reward)
@@ -320,6 +329,8 @@ class SACTrainer(TelemetryMixin):
                     self.early_stop_reason = (f"Plateau: {self.patience_counter} episodes without "
                                               f"improvement (Best MA: {self.best_moving_avg:.2f}, "
                                               f"Cur: {ma_reward:.2f})")
+
+        return self.episode_summary_row(ep_reward, ep_length, avg_speed, ma_reward)
         if self.cfg.target_reward is not None and ma_reward >= self.cfg.target_reward:
             self.early_stop_triggered = True
             self.early_stop_reason = f"Target reward achieved: MA {ma_reward:.2f} >= {self.cfg.target_reward:.2f}"

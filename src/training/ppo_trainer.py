@@ -16,9 +16,10 @@ from src.logging.hardware_monitor import HardwareMonitor
 from src.logging.csv_logger import CSVTelemetryLogger
 from src.logging.experiment_logger import ExperimentLogger
 from src.training.rollout_buffer import RolloutBuffer
+from src.training.trainer_telemetry import TelemetryMixin
 
 
-class PPOTrainer:
+class PPOTrainer(TelemetryMixin):
     """High-throughput PPO Deep RL Trainer supporting parallel CARLA server environments."""
 
     def __init__(self, config: TrainingConfig):
@@ -56,6 +57,13 @@ class PPOTrainer:
         self.episode_count, self.train_start_time, self.last_progress_step, self.last_progress_time = 1, None, 0, None
         self.last_p_loss, self.last_v_loss, self.last_entropy = None, None, None
         self.last_kl, self.last_clip_frac, self.last_expl_var = None, None, None
+        self.last_total_loss, self.last_grad_norm, self.last_update_ms = None, None, None
+        # Batch statistics from the last update. adv/return/value spreads are what make a
+        # flat explained-variance readable: a critic can look useless either because the
+        # returns carry no variance to explain or because it is not fitting them.
+        self.last_adv_mean, self.last_adv_std = None, None
+        self.last_ret_mean, self.last_ret_std = None, None
+        self.last_val_mean, self.last_val_std = None, None
         self.last_sps, self.last_fps = 0.0, 0.0
         self.last_artifact_sync_step = 0
         self.artifact_sync_interval = 5000
@@ -170,33 +178,22 @@ class PPOTrainer:
                     spd_val = info_e.get("speed_kmh", float(next_obs["speed"][e][0]))
                     ep_speeds[e].append(spd_val)
 
-                    self.csv_logger.log_step({
-                        "global_step": self.global_step, "env_id": e, "episode": self.episode_count,
-                        "step_in_ep": ep_lengths[e], "speed_kmh": round(float(spd_val), 2),
-                        "action_throttle": round(float(action_np[e, 0]), 3),
-                        "action_steer": round(float(action_np[e, 1]), 3),
-                        "action_brake": round(float(action_np[e, 2]), 3),
-                        "raw_reward": round(float(raw_r[e]), 4),
-                        "normalized_reward": round(float(norm_r[e]), 4),
-                        "curriculum_alpha": round(float(curriculum_factor), 2),
-                        **{k: round(float(info_e.get(k, 0.0)), 3) for k in
-                           ("r_progress", "r_lane", "r_light", "r_obstacle", "r_ttc", "r_terminal", "lateral_dist")},
-                        "heading_cos": round(float(info_e.get("heading_cos", 1.0)), 3),
-                        "loss_policy": round(self.last_p_loss, 4) if self.last_p_loss is not None else "",
-                        "loss_value": round(self.last_v_loss, 4) if self.last_v_loss is not None else "",
-                        "loss_entropy": round(self.last_entropy, 4) if self.last_entropy is not None else "",
-                        "loss_approx_kl": round(self.last_kl, 4) if self.last_kl is not None else "",
-                        "loss_clip_fraction": round(self.last_clip_frac, 4) if self.last_clip_frac is not None else "",
-                        "loss_explained_variance": round(self.last_expl_var, 4) if self.last_expl_var is not None else "",
-                        "sps": round(self.last_sps, 1) if self.last_sps else "",
-                        "fps": round(self.last_fps, 1) if self.last_fps else "",
-                        **hw, "is_collision": info_e.get("is_collision", False),
-                        "is_off_road": info_e.get("is_off_road", False),
-                        "termination_reason": info_e.get("termination_reason", "") if dones[e] else ""
-                    })
+                    # Settle the episode before writing the row so its aggregates land on the
+                    # step that ended it. _on_episode_done bumps episode_count, so carry the
+                    # number this episode actually ran under and let extra override it.
+                    ep_extra = None
+                    if dones[e]:
+                        ep_num = self.episode_count
+                        ep_extra = self._on_episode_done(e, float(ep_rewards[e]), ep_lengths[e], ep_speeds[e], info_e)
+                        ep_extra["episode"] = ep_num
+
+                    self.log_telemetry_row(
+                        env_id=e, info=info_e, action_np=action_np, raw_reward=float(raw_r[e]),
+                        stored_reward=float(norm_r[e]), curriculum_factor=curriculum_factor,
+                        step_in_ep=ep_lengths[e], speed_kmh=spd_val, done=bool(dones[e]),
+                        hardware=hw, extra=ep_extra)
 
                     if dones[e]:
-                        self._on_episode_done(e, float(ep_rewards[e]), ep_speeds[e], info_e)
                         ep_rewards[e] = 0.0
                         ep_lengths[e] = 0
                         ep_speeds[e] = []
@@ -233,7 +230,8 @@ class PPOTrainer:
 
         self._shutdown()
 
-    def _on_episode_done(self, env_id: int, ep_reward: float, ep_speeds: list, info: dict) -> None:
+    def _on_episode_done(self, env_id: int, ep_reward: float, ep_length: int, ep_speeds: list, info: dict) -> dict:
+        """Record episode statistics and return the aggregates for the terminal CSV row."""
         self.episode_count += 1
         self.recent_rewards.append(ep_reward)
         if len(self.recent_rewards) > self.cfg.early_stopping_window * 2:
@@ -264,6 +262,50 @@ class PPOTrainer:
             self.early_stop_triggered = True
             self.early_stop_reason = f"Target reward achieved: MA {ma_reward:.2f} >= {self.cfg.target_reward:.2f}"
 
+        return self.episode_summary_row(ep_reward, ep_length, avg_speed, ma_reward)
+
+    def _policy_action_std(self):
+        """
+        Per-axis exploration std the policy is currently sampling with.
+
+        Lives either directly on the agent or on its decision_net depending on --policy-arch,
+        and both paths sample from exp(clamp(log_std, -2, 0)), so mirror that clamp here.
+        Worth logging: steering std is what decides how fast a fresh policy random-walks out
+        of its lane, and it is otherwise invisible in the telemetry.
+        """
+        source = getattr(self.agent, "actor_log_std", None)
+        if source is None:
+            decision_net = getattr(self.agent, "decision_net", None)
+            source = getattr(decision_net, "actor_log_std", None) if decision_net is not None else None
+        if source is None:
+            return None
+        with torch.no_grad():
+            return torch.exp(torch.clamp(source.detach().float(), -2.0, 0.0)).cpu().numpy()
+
+    def _optimizer_metrics(self) -> dict:
+        """PPO loss and batch-statistic columns appended to the shared telemetry schema."""
+        def num(value, digits=4):
+            return round(float(value), digits) if value is not None else ""
+
+        metrics = {
+            "loss_policy": num(self.last_p_loss), "loss_value": num(self.last_v_loss),
+            "loss_entropy": num(self.last_entropy), "loss_total": num(self.last_total_loss),
+            "loss_approx_kl": num(self.last_kl), "loss_clip_fraction": num(self.last_clip_frac),
+            "loss_explained_variance": num(self.last_expl_var),
+            "grad_norm": num(self.last_grad_norm),
+            "learning_rate": self.optimizer.param_groups[0]["lr"],
+            "adv_mean": num(self.last_adv_mean), "adv_std": num(self.last_adv_std),
+            "return_mean": num(self.last_ret_mean), "return_std": num(self.last_ret_std),
+            "value_mean": num(self.last_val_mean), "value_std": num(self.last_val_std),
+            "update_ms": num(self.last_update_ms, 1),
+        }
+        action_std = self._policy_action_std()
+        if action_std is not None and len(action_std) >= 3:
+            metrics["action_std_throttle"] = round(float(action_std[0]), 4)
+            metrics["action_std_steer"] = round(float(action_std[1]), 4)
+            metrics["action_std_brake"] = round(float(action_std[2]), 4)
+        return metrics
+
     def _update_ppo(self, buffer: RolloutBuffer, last_obs: dict, last_dones: np.ndarray, is_frozen: bool, rollout_start: float) -> None:
         with torch.inference_mode():
             last_img = torch.as_tensor(last_obs["image"], dtype=torch.uint8, device=self.device)
@@ -275,6 +317,7 @@ class PPOTrainer:
         total_samples = buffer.total_transitions
         b_inds = np.arange(total_samples)
         policy_losses, value_losses, entropies, kls, clip_fracs = [], [], [], [], []
+        total_losses, grad_norms = [], []
         ppo_start = time.time()
 
         if torch.cuda.is_available():
@@ -303,13 +346,17 @@ class PPOTrainer:
                 self.optimizer.zero_grad()
                 self.scaler.scale(total_loss).backward()
                 self.scaler.unscale_(self.optimizer)
-                nn.utils.clip_grad_norm_(self.agent.parameters(), max_norm=0.5)
+                # clip_grad_norm_ returns the PRE-clip total norm. Logging it says whether
+                # max_norm=0.5 is actually binding, which changes how policy loss reads.
+                grad_norm = nn.utils.clip_grad_norm_(self.agent.parameters(), max_norm=0.5)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
 
                 policy_losses.append(pg_loss.item())
                 value_losses.append(v_loss.item())
                 entropies.append(entropy.mean().item())
+                total_losses.append(total_loss.item())
+                grad_norms.append(float(grad_norm))
                 kls.append(approx_kl)
                 clip_fracs.append(clip_frac)
 
@@ -326,11 +373,15 @@ class PPOTrainer:
         mean_kl = float(np.mean(kls)) if kls else 0.0
         mean_clip_frac = float(np.mean(clip_fracs)) if clip_fracs else 0.0
 
+        mean_total_loss = float(np.mean(total_losses)) if total_losses else 0.0
+        mean_grad_norm = float(np.mean(grad_norms)) if grad_norms else 0.0
+
         with torch.no_grad():
             y_true = b_ret.cpu().numpy()
             y_pred = b_val.cpu().numpy()
             var_y = np.var(y_true)
             expl_var = float(1.0 - np.var(y_true - y_pred) / (var_y + 1e-8)) if var_y > 0 else 0.0
+            adv_np = b_adv.cpu().numpy()
 
         self.logger.add_scalar("Loss/Policy_Loss", mean_p_loss, self.global_step)
         self.logger.add_scalar("Loss/Value_Loss", mean_v_loss, self.global_step)
@@ -338,6 +389,13 @@ class PPOTrainer:
         self.logger.add_scalar("Loss/Approx_KL", mean_kl, self.global_step)
         self.logger.add_scalar("Loss/Clip_Fraction", mean_clip_frac, self.global_step)
         self.logger.add_scalar("Loss/Explained_Variance", expl_var, self.global_step)
+        self.logger.add_scalar("Loss/Total", mean_total_loss, self.global_step)
+        self.logger.add_scalar("Loss/Grad_Norm", mean_grad_norm, self.global_step)
+        self.logger.add_scalar("Batch/Advantage_Std", float(np.std(adv_np)), self.global_step)
+        self.logger.add_scalar("Batch/Return_Std", float(np.std(y_true)), self.global_step)
+        action_std = self._policy_action_std()
+        if action_std is not None and len(action_std) >= 3:
+            self.logger.add_scalar("Policy/Action_Std_Steer", float(action_std[1]), self.global_step)
         self.logger.add_scalar("Perf/PPO_Optimization_MS", ppo_elapsed * 1000.0, self.global_step)
 
         print(f"[{now_str} | PPO Policy Update] Step: {self.global_step:05d}/{self.cfg.total_steps} | Rollout: {sps:4.1f} Steps/s ({fps:4.1f} FPS) | PPO Opt: {ppo_elapsed*1000.0:5.1f}ms | Policy Loss: {mean_p_loss:+.4f} | Value Loss: {mean_v_loss:.4f} | KL: {mean_kl:.4f} | ExplVar: {expl_var:.2f}", flush=True)
@@ -348,6 +406,12 @@ class PPOTrainer:
         self.last_kl = mean_kl
         self.last_clip_frac = mean_clip_frac
         self.last_expl_var = expl_var
+        self.last_total_loss = mean_total_loss
+        self.last_grad_norm = mean_grad_norm
+        self.last_update_ms = ppo_elapsed * 1000.0
+        self.last_adv_mean, self.last_adv_std = float(np.mean(adv_np)), float(np.std(adv_np))
+        self.last_ret_mean, self.last_ret_std = float(np.mean(y_true)), float(np.std(y_true))
+        self.last_val_mean, self.last_val_std = float(np.mean(y_pred)), float(np.std(y_pred))
         self.last_sps = sps
         self.last_fps = fps
 
