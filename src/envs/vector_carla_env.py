@@ -265,6 +265,9 @@ class SharedServerCarlaVectorEnv:
         self._prof_read = 0.0
         self._prof_wall = 0.0
         self._prof_calls = 0
+        self._prof_stale_max = 0
+        self._prof_stale_sum = 0.0
+        self._prof_stale_n = 0
         # Matches CameraEasyCarlaEnv._apply_sub_action's action mapping: throttle =
         # (a0+1)/2 -> 0.0, steer = a1 -> 0.0, brake gated on (a2>0.4 and throttle<0.3) -> 1.0.
         self._brake_action = np.array([-1.0, 0.0, 1.0], dtype=np.float32)
@@ -496,6 +499,26 @@ class SharedServerCarlaVectorEnv:
                         terminated[idx] = term
                         truncated[idx] = trunc
 
+        # Observation staleness check. With sensor_tick = dt * frame_skip the cameras only
+        # render once per step() call. If that render lands on the final sub-step the obs
+        # just read is current (gap 0); if a reset shifts the phase onto an earlier
+        # sub-step, every returned obs is silently a tick or more old. Sampled here, before
+        # the reset block below ticks the world again and muddies the frame numbers.
+        try:
+            world_frame = self.world.get_snapshot().frame
+            gaps = [
+                world_frame - slot.sensor_mgr.last_capture_frame
+                for slot in self.slots
+                if getattr(slot, "sensor_mgr", None) is not None
+                and slot.sensor_mgr.last_capture_frame > 0
+            ]
+            if gaps:
+                self._prof_stale_max = max(self._prof_stale_max, max(gaps))
+                self._prof_stale_sum += sum(gaps) / len(gaps)
+                self._prof_stale_n += 1
+        except Exception:
+            pass
+
         for i in range(n):
             final_info[i]["cost"] = float(total_cost[i])
             final_info[i]["frame_skip"] = self.frame_skip
@@ -531,10 +554,14 @@ class SharedServerCarlaVectorEnv:
                 f"tick={self._prof_tick*1000:.0f}ms({100*self._prof_tick/wall:.0f}%) "
                 f"read={self._prof_read*1000:.0f}ms({100*self._prof_read/wall:.0f}%) "
                 f"other={other*1000:.0f}ms({100*other/wall:.0f}%) "
-                f"wall={wall*1000:.0f}ms",
+                f"wall={wall*1000:.0f}ms "
+                f"obs_stale(avg/max ticks)={self._prof_stale_sum/max(self._prof_stale_n,1):.2f}/{self._prof_stale_max}",
                 flush=True,
             )
             self._prof_apply = self._prof_tick = self._prof_read = self._prof_wall = 0.0
+            self._prof_stale_max = 0
+            self._prof_stale_sum = 0.0
+            self._prof_stale_n = 0
 
         return batched_obs, total_reward, terminated, truncated, final_info
 

@@ -17,6 +17,10 @@ class CameraSensorManager:
         self.img_width = img_width
         self.img_height = img_height
         self.sensor_tick = sensor_tick
+        # CARLA frame number of the most recent image any of these cameras delivered.
+        # Compared against the world's current frame to detect observation staleness when
+        # sensor_tick > the world tick interval (see SharedServerCarlaVectorEnv's profiler).
+        self.last_capture_frame = 0
         self.num_cameras = 3
         self.panorama_buffer = np.zeros((img_height, img_width * self.num_cameras, 3), dtype=np.uint8)
         self.sensors: Dict[str, Optional[Any]] = {"left": None, "center": None, "right": None}
@@ -51,6 +55,7 @@ class CameraSensorManager:
                     array = np.reshape(array, (self.img_height, self.img_width, 4))
                     # CARLA raw_data is BGRA. Convert to standard RGB [R, G, B]
                     self.panorama_buffer[:, start_c:end_c, :] = array[:, :, [2, 1, 0]]
+                    self.last_capture_frame = image.frame
                 return _callback
 
             cam_sensor.listen(make_callback(col_start, col_end))
