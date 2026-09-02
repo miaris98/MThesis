@@ -162,7 +162,21 @@ pip install --upgrade pip
 pip install "setuptools<80" gymnasium gym numpy pillow opencv-python tensorboard mlflow torch torchvision jupyterlab ipywidgets nvitop scipy matplotlib
 
 echo -e "${YELLOW}--> Installing EasyCarla-RL directly into Python environment...${NC}"
-pip install git+https://github.com/silverwingsbot/EasyCarla-RL.git
+# Retry a few times: this is a single external host (github.com), not a mirrored/CDN'd
+# PyPI download, so it's the step most exposed to a transient resolver/network blip.
+EASYCARLA_INSTALLED=false
+for attempt in 1 2 3 4 5; do
+    if pip install git+https://github.com/silverwingsbot/EasyCarla-RL.git; then
+        EASYCARLA_INSTALLED=true
+        break
+    fi
+    echo -e "${YELLOW}--> EasyCarla-RL install failed (attempt $attempt/5), retrying in 5s...${NC}"
+    sleep 5
+done
+if [ "$EASYCARLA_INSTALLED" != "true" ]; then
+    echo -e "${RED}[ERROR] Could not install EasyCarla-RL after 5 attempts. Check network/DNS (e.g. 'getent hosts github.com') and re-run this script.${NC}"
+    exit 1
+fi
 
 # Overlay this repo's shared_mode patch onto the just-installed package. The upstream
 # EasyCarla-RL repo has no awareness of shared_mode - it's what lets N vehicle-envs
