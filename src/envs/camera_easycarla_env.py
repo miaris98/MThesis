@@ -122,8 +122,9 @@ class CameraEasyCarlaEnv(gym.Env):
         self._init_easy_env(self.params)
         self._optimize_easy_env()
 
-        # Raw policy output is Tanh-bounded [-1, 1] on every axis; _sub_step maps it to
-        # CARLA controls (throttle = (a0 + 1) / 2, steer = a1, brake gated on a2).
+        # Raw policy output is Tanh-bounded [-1, 1] on every axis; _apply_sub_action maps it
+        # to CARLA controls (throttle = (a0 + 1) / 2, steer = a1, brake = a2 when a2 > 0.4,
+        # which then overrides throttle to 0).
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
         self.observation_space = spaces.Dict({
             "image": spaces.Box(low=0, high=255, shape=(self.img_height, self.img_width * 3, 3), dtype=np.uint8),
@@ -306,7 +307,16 @@ class CameraEasyCarlaEnv(gym.Env):
         across all vehicle-envs' _apply_sub_action calls before reading any of them."""
         throttle = float(np.clip((action[0] + 1.0) / 2.0, 0.0, 1.0))
         steer = float(np.clip(action[1], -1.0, 1.0))
-        brake = float(np.clip(action[2], 0.0, 1.0)) if action[2] > 0.4 and throttle < 0.3 else 0.0
+        # Brake and throttle stay mutually exclusive, but the brake axis decides that on its
+        # own and cuts throttle when it engages. Previously both had to hold on the SAME step
+        # (action[2] > 0.4 AND throttle < 0.3), which made braking effectively unreachable:
+        # measured over a 10k-step run, the brake condition fired on 3.3% of steps and the
+        # throttle condition on 4.0%, but both together on 0.1% - so the policy was carrying
+        # a third action dimension it could not actually apply, at a median throttle of 0.73.
+        # Matches the signed-acceleration convention in models/world_on_rails/wor_policy.py.
+        brake = float(np.clip(action[2], 0.0, 1.0)) if action[2] > 0.4 else 0.0
+        if brake > 0.0:
+            throttle = 0.0
         self._last_sub_action = (throttle, steer, brake)
         self._last_apply_failed = False
         try:

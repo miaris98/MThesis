@@ -163,7 +163,11 @@ class CarlaGymEnv(gym.Env):
         self.step_count += 1
         throttle = float(np.clip((action[0] + 1.0) / 2.0, 0.0, 1.0))
         steer = float(np.clip(action[1], -1.0, 1.0))
-        brake = float(np.clip(action[2], 0.0, 1.0)) if action[2] > 0.4 and throttle < 0.3 else 0.0
+        # Kept identical to CameraEasyCarlaEnv._apply_sub_action - see the note there on why
+        # the old conjunction made the brake axis unreachable.
+        brake = float(np.clip(action[2], 0.0, 1.0)) if action[2] > 0.4 else 0.0
+        if brake > 0.0:
+            throttle = 0.0
 
         if self.vehicle is not None:
             ctrl = carla.VehicleControl(throttle=throttle, steer=steer, brake=brake)
