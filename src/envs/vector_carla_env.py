@@ -292,7 +292,7 @@ class SharedServerCarlaVectorEnv:
 
         self.settings = self.world.get_settings()
         self.settings.synchronous_mode = True
-        self.settings.fixed_delta_seconds = 0.05
+        self.settings.fixed_delta_seconds = float(getattr(cfg, "sim_dt", 0.05))
         self.world.apply_settings(self.settings)
 
         all_spawns = list(self.world.get_map().get_spawn_points())
@@ -631,7 +631,7 @@ class CarlaEnvFactory:
                 'number_of_vehicles': self.cfg.num_vehicles,
                 'number_of_walkers': self.cfg.num_walkers,
                 'frame_skip': self.cfg.frame_skip,
-                'dt': 0.05,
+                'dt': float(getattr(self.cfg, 'sim_dt', 0.05)),
                 'ego_vehicle_filter': 'vehicle.tesla.model3',
                 'surrounding_vehicle_spawned_randomly': True,
                 'port': self.port,

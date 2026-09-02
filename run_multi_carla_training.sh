@@ -20,6 +20,8 @@ PATIENCE=20
 MIN_DELTA=1.0
 IMG_WIDTH=256
 IMG_HEIGHT=256
+FRAME_SKIP=2
+SIM_DT=0.05
 
 # Argument parsing
 POS_ARGS=()
@@ -57,6 +59,12 @@ for arg in "$@"; do
             ;;
         --img-height=*)
             IMG_HEIGHT="${arg#*=}"
+            ;;
+        --frame-skip=*)
+            FRAME_SKIP="${arg#*=}"
+            ;;
+        --sim-dt=*)
+            SIM_DT="${arg#*=}"
             ;;
         *)
             POS_ARGS+=("$arg")
@@ -637,7 +645,8 @@ v = c.get_server_version()
         --num-walkers "$NUM_WALKERS" \
         --img-width "$IMG_WIDTH" \
         --img-height "$IMG_HEIGHT" \
-        --frame-skip 2 \
+        --frame-skip "$FRAME_SKIP" \
+        --sim-dt "$SIM_DT" \
         --rollout-steps 250 \
         --minibatch-size 256 \
         --ent-coef 0.005 \

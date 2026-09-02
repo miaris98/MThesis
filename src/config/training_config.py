@@ -62,6 +62,7 @@ class TrainingConfig:
     town: str = "Town10HD_Opt"
     img_width: int = 256
     img_height: int = 256
+    sim_dt: float = 0.05
     
     use_mlflow: bool = True
     experiment_name: str = "CARLA_PPO_RL"
@@ -135,6 +136,7 @@ class TrainingConfig:
         parser.add_argument("--town", type=str, default="Town10HD_Opt")
         parser.add_argument("--img-width", type=int, default=256, help="Per-camera render width in pixels - directly sets CARLA's image_size_x, real render cost")
         parser.add_argument("--img-height", type=int, default=256, help="Per-camera render height in pixels - directly sets CARLA's image_size_y, real render cost")
+        parser.add_argument("--sim-dt", type=float, default=0.05, help="CARLA physics timestep (fixed_delta_seconds). Raising this to dt*frame_skip with --frame-skip 1 gives the same simulated time per agent step in ONE tick instead of several, so cameras render every tick and observations are never stale. CARLA recommends not exceeding 0.1")
 
         parser.add_argument("--use-mlflow", action="store_true", default=True)
         parser.add_argument("--no-mlflow", action="store_false", dest="use_mlflow")
@@ -199,6 +201,7 @@ class TrainingConfig:
             town=parsed.town,
             img_width=parsed.img_width,
             img_height=parsed.img_height,
+            sim_dt=parsed.sim_dt,
             use_mlflow=parsed.use_mlflow,
             experiment_name=parsed.experiment_name,
             mlflow_port=parsed.mlflow_port,
