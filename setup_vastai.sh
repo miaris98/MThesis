@@ -25,6 +25,17 @@ if [ "$EUID" -ne 0 ]; then
     echo -e "${YELLOW}[WARNING] Not running as root. Some apt-get commands may require sudo.${NC}"
 fi
 
+# --- Pin reliable DNS resolvers ---
+# Some Vast.ai hosts hand out a flaky/rate-limited default resolver, causing intermittent
+# "Temporary failure in name resolution" against arbitrary hosts (seen in practice against
+# github.com, conda.anaconda.org, and files.pythonhosted.org across different runs/hosts),
+# which can abort this script at any of its many network-dependent steps below. Pin
+# known-reliable public resolvers up front so every apt/conda/pip/git call benefits,
+# instead of patching one call site at a time as each different domain happens to flake.
+if [ -w /etc/resolv.conf ] || [ ! -e /etc/resolv.conf ]; then
+    { echo "nameserver 1.1.1.1"; echo "nameserver 8.8.8.8"; } > /etc/resolv.conf 2>/dev/null || true
+fi
+
 # --- 1. System Packages & Monitoring Utilities ---
 echo -e "\n${CYAN}[1/7] Installing system libraries and monitoring tools...${NC}"
 export DEBIAN_FRONTEND=noninteractive
