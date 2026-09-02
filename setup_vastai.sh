@@ -170,6 +170,10 @@ pip install git+https://github.com/silverwingsbot/EasyCarla-RL.git
 # each spawning its own server process, which saturates a single GPU's rasterizer well
 # before raw compute is the bottleneck. See patches/easycarla_rl/carla_env.py.
 PATCH_SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+# carla_env.py does `import carla` at module level, so PYTHONPATH must point at the CARLA
+# .egg before this check can succeed - export it now (step 5 also persists it to .bashrc).
+export CARLA_ROOT=/workspace/carla
+export PYTHONPATH="$(ls /workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg 2>/dev/null | tail -n 1):/workspace/carla/PythonAPI/carla:$PYTHONPATH"
 EASYCARLA_ENV_FILE=$(python -c "import easycarla.envs.carla_env as m, os; print(os.path.abspath(m.__file__))" 2>/dev/null || true)
 if [ -n "$EASYCARLA_ENV_FILE" ] && [ -f "$PATCH_SCRIPT_DIR/patches/easycarla_rl/carla_env.py" ]; then
     cp "$PATCH_SCRIPT_DIR/patches/easycarla_rl/carla_env.py" "$EASYCARLA_ENV_FILE"
