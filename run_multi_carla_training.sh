@@ -22,6 +22,7 @@ IMG_WIDTH=256
 IMG_HEIGHT=256
 FRAME_SKIP=2
 SIM_DT=0.05
+SERVERS=1
 
 # Argument parsing
 POS_ARGS=()
@@ -65,6 +66,9 @@ for arg in "$@"; do
             ;;
         --sim-dt=*)
             SIM_DT="${arg#*=}"
+            ;;
+        --servers=*)
+            SERVERS="${arg#*=}"
             ;;
         *)
             POS_ARGS+=("$arg")
@@ -121,10 +125,14 @@ TRAIN_GPU=$((NUM_GPUS - 1))
 SHARED_SERVER=false
 [ "$NUM_GPUS" -le 1 ] && SHARED_SERVER=true
 SERVER_COUNT=$NUM_ENVS
-[ "$SHARED_SERVER" = true ] && SERVER_COUNT=1
+# In shared mode --servers picks how many CARLA server processes share the GPU, with the
+# vehicle-envs split evenly across them. Each server loads its own copy of the map/engine
+# (~5.3GB on Town10HD_Opt), so this is bounded by VRAM, not compute - oversubscribing it
+# thrashes and collapses throughput. Default 1 preserves previous behavior.
+[ "$SHARED_SERVER" = true ] && SERVER_COUNT=$SERVERS
 echo "Detected GPUs: $NUM_GPUS"
 if [ "$SHARED_SERVER" = true ]; then
-    echo "  -> Single-GPU mode: launching 1 shared CARLA server, $NUM_ENVS vehicle-envs as actors within it"
+    echo "  -> Single-GPU mode: launching $SERVER_COUNT shared CARLA server(s), $NUM_ENVS vehicle-envs split across them as actors"
 else
     echo "  -> Multi-GPU mode: launching $SERVER_COUNT CARLA servers round-robined across adapters, training pinned to GPU $TRAIN_GPU"
 fi
@@ -614,11 +622,17 @@ v = c.get_server_version()
         echo "🔄 Resuming training from latest saved checkpoint..."
     fi
 
-    # Shared mode must pass a single --port, never --carla-ports - TrainingConfig
-    # derives num_envs from len(carla_ports) whenever that flag is present at all,
-    # which would silently collapse num_envs to 1.
+    # In shared mode --carla-ports lists the SERVERS sharing the GPU (envs are split
+    # across them), so it is only passed when there is more than one; with a single
+    # server the simpler --port path is used. TrainingConfig.from_args no longer derives
+    # num_envs from the port count when --shared-server is set, which is what previously
+    # made passing --carla-ports here collapse num_envs.
     if [ "$SHARED_SERVER" = true ]; then
-        CARLA_SERVER_ARGS="--num-envs $NUM_ENVS --port ${PORTS[0]} --shared-server"
+        if [ "$SERVER_COUNT" -gt 1 ]; then
+            CARLA_SERVER_ARGS="--num-envs $NUM_ENVS --carla-ports $PORTS_CSV --shared-server"
+        else
+            CARLA_SERVER_ARGS="--num-envs $NUM_ENVS --port ${PORTS[0]} --shared-server"
+        fi
     else
         CARLA_SERVER_ARGS="--num-envs $NUM_ENVS --carla-ports $PORTS_CSV"
     fi

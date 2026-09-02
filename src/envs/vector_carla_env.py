@@ -9,6 +9,7 @@ warnings.filterwarnings("ignore")
 os.environ["PYTHONWARNINGS"] = "ignore"
 
 from typing import List, Callable, Dict, Any, Tuple, Optional
+from dataclasses import replace
 import random
 import numpy as np
 import multiprocessing as mp
@@ -655,9 +656,130 @@ class CarlaEnvFactory:
         return CarlaGymEnv(host=self.cfg.host, port=self.port, img_width=self.cfg.img_width, img_height=self.cfg.img_height, max_steps=self.cfg.rollout_steps)
 
 
+class MultiServerSharedCarlaVectorEnv:
+    """
+    K independent CARLA servers on one GPU, each hosting num_envs/K vehicle-actor slots.
+
+    Motivation: profiling a single shared server showed GPU utilization at ~22% while
+    world.tick() accounted for ~75-85% of wall time. The tick is a serialized dispatch
+    chain (the server walks each camera sensor in turn, CPU-side setup plus a round-trip
+    per sensor) rather than GPU-bound work, so the card sits idle waiting. Splitting the
+    slots across separate server processes gives the machine K independent chains that
+    can genuinely progress at once.
+
+    The critical detail is that the coordinators must be stepped CONCURRENTLY. Each owns
+    its own client, world and tick, so they are already independent - but calling their
+    step()s back to back would cost tickA + tickB, exactly what one server doing all the
+    work costs today, defeating the entire point. They are therefore driven from a thread
+    pool: world.tick() blocks on socket I/O to a separate server process and CPython
+    releases the GIL for the duration, so the two waits overlap in wall-clock time.
+
+    VRAM is the limiting factor, not compute: each server loads its own copy of the map
+    and engine (~5.3GB observed on Town10HD_Opt), which is why 3 servers collapsed on a
+    12GB card - 3 x 5.3GB oversubscribes it and thrashes. Camera render targets are
+    negligible by comparison (~4MB total at 128px), so slots-per-server barely affects
+    the footprint; the server COUNT is what has to fit.
+    """
+
+    def __init__(self, cfg: TrainingConfig, ports: List[int]):
+        self.cfg = cfg
+        self.num_servers = len(ports)
+        self.num_envs = cfg.num_envs
+        self.frame_skip = cfg.frame_skip
+        self.closed = False
+
+        if self.num_servers < 1:
+            raise ValueError("MultiServerSharedCarlaVectorEnv requires at least one port")
+        if cfg.num_envs < self.num_servers:
+            raise ValueError(
+                f"num_envs ({cfg.num_envs}) must be >= number of servers ({self.num_servers})"
+            )
+
+        # Distribute slots as evenly as possible; the first `remainder` servers take one extra.
+        base, remainder = divmod(cfg.num_envs, self.num_servers)
+        counts = [base + (1 if i < remainder else 0) for i in range(self.num_servers)]
+
+        self._slices: List[Tuple[int, int]] = []
+        start = 0
+        for count in counts:
+            self._slices.append((start, start + count))
+            start += count
+
+        self.coordinators: List[SharedServerCarlaVectorEnv] = []
+        for port, count in zip(ports, counts):
+            print(f"--> Initializing shared CARLA server on port {port} with {count} vehicle-envs")
+            sub_cfg = replace(cfg, num_envs=count)
+            self.coordinators.append(SharedServerCarlaVectorEnv(sub_cfg, port=port))
+
+        self._pool = ThreadPoolExecutor(
+            max_workers=self.num_servers, thread_name_prefix="carla-server"
+        )
+
+    def _merge(self, per_server: List[Tuple[Dict[str, np.ndarray], Any]]) -> Tuple[Dict[str, np.ndarray], List[Any]]:
+        """Concatenate per-coordinator batched observations back into one batch."""
+        images = np.concatenate([obs["image"] for obs, _ in per_server], axis=0)
+        speeds = np.concatenate([obs["speed"] for obs, _ in per_server], axis=0)
+        infos: List[Any] = []
+        for _, info_list in per_server:
+            infos.extend(info_list)
+        return {"image": images, "speed": speeds}, infos
+
+    def reset(self, seed: Optional[int] = None) -> Tuple[Dict[str, np.ndarray], List[Dict[str, Any]]]:
+        # Offset each coordinator's seed by its slot range so the per-slot seeds stay
+        # globally distinct rather than repeating the same sequence on every server.
+        seeds = [
+            (seed + start if seed is not None else None) for start, _ in self._slices
+        ]
+        results = list(self._pool.map(
+            lambda pair: pair[0].reset(seed=pair[1]),
+            list(zip(self.coordinators, seeds)),
+        ))
+        return self._merge(results)
+
+    def step(self, actions: np.ndarray) -> Tuple[Dict[str, np.ndarray], np.ndarray, np.ndarray, np.ndarray, List[Dict[str, Any]]]:
+        per_server_actions = [actions[start:end] for start, end in self._slices]
+        results = list(self._pool.map(
+            lambda pair: pair[0].step(pair[1]),
+            list(zip(self.coordinators, per_server_actions)),
+        ))
+
+        images = np.concatenate([r[0]["image"] for r in results], axis=0)
+        speeds = np.concatenate([r[0]["speed"] for r in results], axis=0)
+        rewards = np.concatenate([r[1] for r in results], axis=0)
+        terminated = np.concatenate([r[2] for r in results], axis=0)
+        truncated = np.concatenate([r[3] for r in results], axis=0)
+        infos: List[Any] = []
+        for r in results:
+            infos.extend(r[4])
+
+        return {"image": images, "speed": speeds}, rewards, terminated, truncated, infos
+
+    def set_curriculum_factor(self, factor: float) -> None:
+        for coordinator in self.coordinators:
+            coordinator.set_curriculum_factor(factor)
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        self._pool.shutdown(wait=True)
+        for coordinator in self.coordinators:
+            try:
+                coordinator.close()
+            except Exception:
+                pass
+
+
 def create_vector_carla_env(cfg: TrainingConfig) -> Any:
     """Instantiate vectorized environment based on configuration."""
     if getattr(cfg, "shared_server", False):
+        shared_ports = cfg.get_ports() if cfg.carla_ports else [cfg.port]
+        if len(shared_ports) > 1:
+            print(
+                f"--> Initializing {cfg.num_envs} Vehicle-Envs across "
+                f"{len(shared_ports)} shared CARLA servers (ports: {shared_ports})"
+            )
+            return MultiServerSharedCarlaVectorEnv(cfg, ports=shared_ports)
         print(f"--> Initializing {cfg.num_envs} Parallel Vehicle-Envs on a single shared CARLA server (port {cfg.port})")
         return SharedServerCarlaVectorEnv(cfg, port=cfg.port)
 

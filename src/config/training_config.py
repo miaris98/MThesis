@@ -149,6 +149,11 @@ class TrainingConfig:
         ports_list = None
         if parsed.carla_ports:
             ports_list = [int(p.strip()) for p in parsed.carla_ports.split(",") if p.strip()]
+
+        # In shared-server mode --carla-ports lists SERVERS, not envs: each server hosts
+        # num_envs/len(ports) vehicle-actor slots, so the two counts are independent.
+        # In the classic one-env-per-server mode the port count IS the env count.
+        if ports_list and not parsed.shared_server:
             num_envs = len(ports_list)
         else:
             num_envs = parsed.num_envs
