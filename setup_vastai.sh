@@ -212,7 +212,13 @@ PRETRAINED_DIR="/workspace/pretrained_carla"
 if [ ! -f "$PRETRAINED_DIR/model_0030_0.pth" ]; then
     echo -e "${YELLOW}--> Downloading CARLA-domain TransFuser++ pretrained vision weights...${NC}"
     mkdir -p "$PRETRAINED_DIR"
-    wget -q --show-progress https://s3.eu-central-1.amazonaws.com/avg-projects-2/garage_2/models/pretrained_models.zip -O "$PRETRAINED_DIR/models.zip" || true
+    WEIGHTS_URL="https://s3.eu-central-1.amazonaws.com/avg-projects-2/garage_2/models/pretrained_models.zip"
+    if command -v aria2c &>/dev/null; then
+        aria2c -x 16 -s 16 -k 1M --check-certificate=false "$WEIGHTS_URL" -d "$PRETRAINED_DIR" -o models.zip || \
+        wget -c "$WEIGHTS_URL" -O "$PRETRAINED_DIR/models.zip" || true
+    else
+        wget -c "$WEIGHTS_URL" -O "$PRETRAINED_DIR/models.zip" || true
+    fi
     if [ -f "$PRETRAINED_DIR/models.zip" ]; then
         unzip -q "$PRETRAINED_DIR/models.zip" -d "$PRETRAINED_DIR/" 2>/dev/null || true
         rm -f "$PRETRAINED_DIR/models.zip"
