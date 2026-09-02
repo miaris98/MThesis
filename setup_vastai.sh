@@ -159,32 +159,10 @@ conda install -y ipykernel
 python -m ipykernel install --user --name=carla_py38 --display-name "Python 3.8 (CARLA RL)"
 
 pip install --upgrade pip
-
-# Prefer uv for the heavy downloads below (torch + its ~4GB of bundled CUDA wheels): uv
-# fetches multiple wheels concurrently, which matters a lot on the throttled/high-latency
-# links some Vast.ai hosts have to PyPI - plain single-connection pip can take 10x longer.
-# --python is passed explicitly since uv's env auto-detection keys off $VIRTUAL_ENV, which
-# conda does not set, so without it uv could silently install into the wrong interpreter.
-if ! command -v uv &>/dev/null; then
-    curl -LsSf https://astral.sh/uv/install.sh | sh 2>/dev/null || true
-    export PATH="$HOME/.local/bin:$PATH"
-fi
-UV_PY=$(command -v uv &>/dev/null && which python || true)
-
-PY_DEPS='setuptools<80 gymnasium gym numpy pillow opencv-python tensorboard mlflow torch torchvision jupyterlab ipywidgets nvitop scipy matplotlib'
-if [ -n "$UV_PY" ]; then
-    uv pip install --python "$UV_PY" $PY_DEPS || pip install $PY_DEPS
-else
-    pip install $PY_DEPS
-fi
+pip install "setuptools<80" gymnasium gym numpy pillow opencv-python tensorboard mlflow torch torchvision jupyterlab ipywidgets nvitop scipy matplotlib
 
 echo -e "${YELLOW}--> Installing EasyCarla-RL directly into Python environment...${NC}"
-if [ -n "$UV_PY" ]; then
-    uv pip install --python "$UV_PY" git+https://github.com/silverwingsbot/EasyCarla-RL.git \
-        || pip install git+https://github.com/silverwingsbot/EasyCarla-RL.git
-else
-    pip install git+https://github.com/silverwingsbot/EasyCarla-RL.git
-fi
+pip install git+https://github.com/silverwingsbot/EasyCarla-RL.git
 
 # Overlay this repo's shared_mode patch onto the just-installed package. The upstream
 # EasyCarla-RL repo has no awareness of shared_mode - it's what lets N vehicle-envs
