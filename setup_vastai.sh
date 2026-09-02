@@ -35,11 +35,34 @@ fi
 if [ -w /etc/resolv.conf ] || [ ! -e /etc/resolv.conf ]; then
     { echo "nameserver 1.1.1.1"; echo "nameserver 8.8.8.8"; } > /etc/resolv.conf 2>/dev/null || true
 fi
+if getent hosts github.com &>/dev/null; then
+    echo -e "${GREEN}✓ DNS resolution OK (github.com resolved).${NC}"
+else
+    echo -e "${YELLOW}[WARNING] DNS resolution to github.com failed even after pinning 1.1.1.1/8.8.8.8 - network-dependent steps below may fail.${NC}"
+fi
+
+# Retry a network-dependent command a few times with a short backoff. Even with reliable
+# resolvers pinned above, these hosts have shown occasional transient failures on individual
+# calls (DNS blips, brief connection resets) - retrying beats aborting the whole script over
+# what's usually a few-second hiccup.
+retry_cmd() {
+    local desc="$1"; shift
+    local attempt
+    for attempt in 1 2 3 4 5; do
+        if "$@"; then
+            return 0
+        fi
+        echo -e "${YELLOW}--> $desc failed (attempt $attempt/5), retrying in 5s...${NC}"
+        sleep 5
+    done
+    echo -e "${RED}[ERROR] $desc failed after 5 attempts.${NC}"
+    return 1
+}
 
 # --- 1. System Packages & Monitoring Utilities ---
 echo -e "\n${CYAN}[1/7] Installing system libraries and monitoring tools...${NC}"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
+retry_cmd "apt-get update" apt-get update -y
 
 # Install standard packages (using modern libgl1 and libglx-mesa0 for Ubuntu 22.04 / 24.04 Noble)
 apt-get install -y --no-install-recommends \
@@ -166,28 +189,14 @@ fi
 conda activate carla_py38 2>/dev/null || source /opt/conda/bin/activate carla_py38 2>/dev/null || source activate carla_py38 2>/dev/null
 
 echo -e "${YELLOW}--> Installing Python libraries & PyTorch...${NC}"
-conda install -y ipykernel
+retry_cmd "conda install ipykernel" conda install -y ipykernel
 python -m ipykernel install --user --name=carla_py38 --display-name "Python 3.8 (CARLA RL)"
 
 pip install --upgrade pip
 pip install "setuptools<80" gymnasium gym numpy pillow opencv-python tensorboard mlflow torch torchvision jupyterlab ipywidgets nvitop scipy matplotlib
 
 echo -e "${YELLOW}--> Installing EasyCarla-RL directly into Python environment...${NC}"
-# Retry a few times: this is a single external host (github.com), not a mirrored/CDN'd
-# PyPI download, so it's the step most exposed to a transient resolver/network blip.
-EASYCARLA_INSTALLED=false
-for attempt in 1 2 3 4 5; do
-    if pip install git+https://github.com/silverwingsbot/EasyCarla-RL.git; then
-        EASYCARLA_INSTALLED=true
-        break
-    fi
-    echo -e "${YELLOW}--> EasyCarla-RL install failed (attempt $attempt/5), retrying in 5s...${NC}"
-    sleep 5
-done
-if [ "$EASYCARLA_INSTALLED" != "true" ]; then
-    echo -e "${RED}[ERROR] Could not install EasyCarla-RL after 5 attempts. Check network/DNS (e.g. 'getent hosts github.com') and re-run this script.${NC}"
-    exit 1
-fi
+retry_cmd "EasyCarla-RL install" pip install git+https://github.com/silverwingsbot/EasyCarla-RL.git
 
 # Overlay this repo's shared_mode patch onto the just-installed package. The upstream
 # EasyCarla-RL repo has no awareness of shared_mode - it's what lets N vehicle-envs
