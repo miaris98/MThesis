@@ -82,7 +82,11 @@ class CameraEasyCarlaEnv(gym.Env):
         # owning its own dedicated server process.
         self.shared_mode = bool(self.params.get('shared_mode', False))
 
-        self.sensor_mgr = CameraSensorManager(self.img_width, self.img_height)
+        # sensor_tick = dt * frame_skip so cameras render once per outer step() call (on
+        # the final frame_skip sub-step) instead of every world tick - intermediate
+        # sub-steps' frames are computed and immediately overwritten in step()'s loop and
+        # were never observed, just fully rendered and thrown away.
+        self.sensor_mgr = CameraSensorManager(self.img_width, self.img_height, sensor_tick=self.dt * self.frame_skip)
         # EasyCarla expresses 'desired_speed' in m/s while RewardCalculator compares against km/h.
         desired_speed_ms = float(self.params.get('desired_speed', 8.0))
         self.reward_fn_name = str(self.params.get('reward_fn', 'custom_1'))

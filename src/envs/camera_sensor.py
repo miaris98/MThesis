@@ -13,9 +13,10 @@ class CameraSensorManager:
     Manages 3 RGB Camera Sensors (Left -60°, Center 0°, Right +60°).
     Performs zero-copy memory copy directly into pre-allocated NumPy panorama buffer.
     """
-    def __init__(self, img_width: int = 256, img_height: int = 256):
+    def __init__(self, img_width: int = 256, img_height: int = 256, sensor_tick: float = 0.05):
         self.img_width = img_width
         self.img_height = img_height
+        self.sensor_tick = sensor_tick
         self.num_cameras = 3
         self.panorama_buffer = np.zeros((img_height, img_width * self.num_cameras, 3), dtype=np.uint8)
         self.sensors: Dict[str, Optional[Any]] = {"left": None, "center": None, "right": None}
@@ -31,7 +32,7 @@ class CameraSensorManager:
         cam_bp.set_attribute('image_size_x', str(self.img_width))
         cam_bp.set_attribute('image_size_y', str(self.img_height))
         cam_bp.set_attribute('fov', '100')
-        cam_bp.set_attribute('sensor_tick', '0.05')
+        cam_bp.set_attribute('sensor_tick', str(self.sensor_tick))
 
         configs = {
             "left": (carla.Transform(carla.Location(x=1.3, y=0.0, z=1.4), carla.Rotation(pitch=0, yaw=-60, roll=0)), 0),
