@@ -257,6 +257,10 @@ class SharedServerCarlaVectorEnv:
         self.num_envs = cfg.num_envs
         self.frame_skip = cfg.frame_skip
         self.closed = False
+        # Labels this coordinator's PROFILE output. With several coordinators running
+        # concurrently their lines interleave, and thread scheduling means print order
+        # does not reliably identify which server produced which line.
+        self._port = port
         # Lightweight step()-phase timing breakdown, printed periodically - apply/tick/
         # read isolate CARLA-side cost, "other" catches this method's own aggregation
         # overhead (np.stack etc). Not for anything outside this method (e.g. the PPO
@@ -575,7 +579,7 @@ class SharedServerCarlaVectorEnv:
             wall = max(self._prof_wall, 1e-9)
             other = max(0.0, wall - self._prof_apply - self._prof_tick - self._prof_read)
             print(
-                f"[PROFILE last {self._prof_calls} step() calls] "
+                f"[PROFILE port={self._port} last {self._prof_calls} step() calls] "
                 f"apply={self._prof_apply*1000:.0f}ms({100*self._prof_apply/wall:.0f}%) "
                 f"tick={self._prof_tick*1000:.0f}ms({100*self._prof_tick/wall:.0f}%) "
                 f"read={self._prof_read*1000:.0f}ms({100*self._prof_read/wall:.0f}%) "
