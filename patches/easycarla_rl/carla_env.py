@@ -58,6 +58,10 @@ class CarlaEnv(gym.Env):
         # (SharedServerCarlaVectorEnv) already owns the client/world/tick/sync-mode; this
         # instance only spawns and drives its own ego vehicle within that shared world.
         self.shared_mode = bool(params.get('shared_mode', False))
+        # Defaults True to preserve upstream behavior; wrappers that replace _get_obs (and
+        # so never read self.lidar_data) set it False to avoid paying for a per-ego sensor
+        # that ticks into nothing. See the spawn site in reset().
+        self.enable_lidar = bool(params.get('enable_lidar', True))
         self._owned_actor_ids = set()
         self.client = params.get('external_client')
 
@@ -263,12 +267,16 @@ class CarlaEnv(gym.Env):
         # a collision typically triggers episode termination and reset.
         self.collision_hist = []
 
-        # Add lidar sensor
-        self.lidar_sensor = self.world.spawn_actor(self.lidar_bp, self.lidar_trans, attach_to=self.ego)
-        self._owned_actor_ids.add(self.lidar_sensor.id)
-        self.lidar_sensor.listen(lambda data: get_lidar_data(data))
-        def get_lidar_data(data):
-            self.lidar_data = data
+        # Add lidar sensor. Skipped entirely when enable_lidar is False: in a shared world
+        # every ego carries one, and each still ray-casts and dispatches a Python callback
+        # on every tick even when nothing reads self.lidar_data - which is the case whenever
+        # a wrapper replaces _get_obs (CameraEasyCarlaEnv stubs it to zeros).
+        if self.enable_lidar:
+            self.lidar_sensor = self.world.spawn_actor(self.lidar_bp, self.lidar_trans, attach_to=self.ego)
+            self._owned_actor_ids.add(self.lidar_sensor.id)
+            self.lidar_sensor.listen(lambda data: get_lidar_data(data))
+            def get_lidar_data(data):
+                self.lidar_data = data
 
         # Update timesteps
         self.time_step = 1  # Indicates a new episode has started
@@ -579,8 +587,9 @@ class CarlaEnv(gym.Env):
         ego_y = ego_transform.location.y
         ego_yaw = np.deg2rad(ego_transform.rotation.yaw)
 
-        # Traverse all point clouds
-        for detection in self.lidar_data:
+        # Traverse all point clouds (empty when the sensor is disabled or no scan has
+        # arrived yet, leaving lidar_features at max_range - i.e. "nothing detected")
+        for detection in (self.lidar_data or []):
             x = detection.point.x
             y = detection.point.y
 

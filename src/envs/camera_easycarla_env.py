@@ -67,6 +67,10 @@ class CameraEasyCarlaEnv(gym.Env):
             'view_mode': 'top', 'traffic': 'off', 'lidar_max_range': 50.0,
             'max_nearby_vehicles': 5, 'surrounding_vehicle_spawned_randomly': True,
             'img_width': 256, 'img_height': 256, 'frame_skip': 2, 'reward_fn': 'custom_1',
+            # _optimize_easy_env replaces easy_env._get_obs with a zeros stub, so nothing
+            # ever reads the LIDAR scan - but the sensor would still ray-cast and dispatch
+            # a callback on every tick, per ego vehicle. Don't spawn it at all.
+            'enable_lidar': False,
         }
         if params:
             default_params.update(params)
