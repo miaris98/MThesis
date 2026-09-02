@@ -268,6 +268,10 @@ class SharedServerCarlaVectorEnv:
         self._prof_stale_max = 0
         self._prof_stale_sum = 0.0
         self._prof_stale_n = 0
+        self._prof_reset_stale_max = 0
+        self._prof_reset_stale_sum = 0.0
+        self._prof_reset_stale_n = 0
+        self._prof_resets = 0
         # Matches CameraEasyCarlaEnv._apply_sub_action's action mapping: throttle =
         # (a0+1)/2 -> 0.0, steer = a1 -> 0.0, brake gated on (a2>0.4 and throttle<0.3) -> 1.0.
         self._brake_action = np.array([-1.0, 0.0, 1.0], dtype=np.float32)
@@ -525,6 +529,7 @@ class SharedServerCarlaVectorEnv:
 
         reset_idxs = [i for i in range(n) if terminated[i] or truncated[i]]
         if reset_idxs:
+            self._prof_resets += 1
             reset_idx_set = set(reset_idxs)
             reset_groups = [[idx for idx in group if idx in reset_idx_set] for group in self._groups]
             reset_groups = [g for g in reset_groups if g]
@@ -537,6 +542,26 @@ class SharedServerCarlaVectorEnv:
                 for idx, (obs, reset_info) in zip(group, results):
                     final_obs[idx] = obs
                     final_info[idx]["reset_info"] = reset_info
+
+            # Same staleness question for the reset path, which is the riskier one: the
+            # single settle tick above only yields a fresh frame if it happens to be a
+            # render tick under sensor_tick = dt * frame_skip. If it isn't, a just-respawned
+            # vehicle's first observation is the image from where the previous episode
+            # ended - wrong position entirely, not merely one tick late.
+            try:
+                world_frame = self.world.get_snapshot().frame
+                reset_gaps = [
+                    world_frame - self.slots[idx].sensor_mgr.last_capture_frame
+                    for group in reset_groups for idx in group
+                    if getattr(self.slots[idx], "sensor_mgr", None) is not None
+                    and self.slots[idx].sensor_mgr.last_capture_frame > 0
+                ]
+                if reset_gaps:
+                    self._prof_reset_stale_max = max(self._prof_reset_stale_max, max(reset_gaps))
+                    self._prof_reset_stale_sum += sum(reset_gaps) / len(reset_gaps)
+                    self._prof_reset_stale_n += 1
+            except Exception:
+                pass
 
         batched_obs = {
             "image": np.stack([o["image"] for o in final_obs]),
@@ -555,13 +580,19 @@ class SharedServerCarlaVectorEnv:
                 f"read={self._prof_read*1000:.0f}ms({100*self._prof_read/wall:.0f}%) "
                 f"other={other*1000:.0f}ms({100*other/wall:.0f}%) "
                 f"wall={wall*1000:.0f}ms "
-                f"obs_stale(avg/max ticks)={self._prof_stale_sum/max(self._prof_stale_n,1):.2f}/{self._prof_stale_max}",
+                f"obs_stale(avg/max ticks)={self._prof_stale_sum/max(self._prof_stale_n,1):.2f}/{self._prof_stale_max} "
+                f"reset_stale={self._prof_reset_stale_sum/max(self._prof_reset_stale_n,1):.2f}/{self._prof_reset_stale_max} "
+                f"reset_ticks={self._prof_resets}/50",
                 flush=True,
             )
             self._prof_apply = self._prof_tick = self._prof_read = self._prof_wall = 0.0
             self._prof_stale_max = 0
             self._prof_stale_sum = 0.0
             self._prof_stale_n = 0
+            self._prof_reset_stale_max = 0
+            self._prof_reset_stale_sum = 0.0
+            self._prof_reset_stale_n = 0
+            self._prof_resets = 0
 
         return batched_obs, total_reward, terminated, truncated, final_info
 
