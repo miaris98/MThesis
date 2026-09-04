@@ -7,9 +7,11 @@ Usage:
 import argparse
 import os
 import torch
+import torch.nn.functional as F
 
 from src.models.world_on_rails import WorldOnRailsPolicy
 from src.training.wor_trainer import WorldOnRailsTrainer
+from src.training.auto_batch_size import find_max_batch_size
 
 
 def parse_args():
@@ -34,6 +36,9 @@ def parse_args():
     parser.add_argument("--experiment_name", type=str, default="WoR_Offline_Training", help="MLflow experiment name")
     parser.add_argument("--use_mlflow", type=int, default=1, help="Enable MLflow tracking (1=True, 0=False)")
     parser.add_argument("--mlflow_port", type=int, default=10100, help="MLflow tracking server port")
+    parser.add_argument("--auto_batch_size", type=int, default=0, help="Probe the largest batch size that fits in available VRAM instead of using --batch_size directly (1=True, 0=False)")
+    parser.add_argument("--vram_headroom_mb", type=float, default=2048.0, help="VRAM (MB) to leave unused when --auto_batch_size is set, so other processes sharing the GPU (e.g. an online PPO/SAC trainer) still have room")
+    parser.add_argument("--auto_batch_size_max", type=int, default=512, help="Upper bound the auto batch-size search won't exceed")
     return parser.parse_args()
 
 
@@ -45,13 +50,48 @@ def main():
         # fastest conv kernels for that exact shape instead of using generic ones.
         torch.backends.cudnn.benchmark = True
 
+    if args.auto_batch_size:
+        # Probe with a throwaway model/optimizer of the same architecture - never the
+        # real one - so a few synthetic gradient steps here don't perturb the pretrained
+        # weights the real run is about to load.
+        def _model_factory():
+            return WorldOnRailsPolicy(backbone_name=args.backbone, pretrained=bool(args.pretrained),
+                                       freeze_backbone=bool(args.freeze_backbone))
+
+        def _optimizer_factory(m):
+            return torch.optim.AdamW(m.parameters(), lr=args.lr_heads, weight_decay=1e-4)
+
+        def _batch_factory(bs):
+            return {
+                "rgb": torch.rand(bs, 3, 256, 256, device=args.device),
+                "speed": torch.rand(bs, 1, device=args.device) * 30.0,
+                "command": torch.randint(0, 6, (bs,), device=args.device),
+                "target_q": torch.randn(bs, 9, device=args.device),
+                "target_waypoints": torch.randn(bs, 5, 2, device=args.device) * 5.0
+            }
+
+        def _loss_fn(model, batch):
+            out = model(batch["rgb"], batch["speed"], batch["command"])
+            loss_q = F.mse_loss(out["selected_rail_q"], batch["target_q"])
+            loss_wp_x = F.l1_loss(out["selected_waypoints"][..., 0], batch["target_waypoints"][..., 0])
+            loss_wp_y = F.l1_loss(out["selected_waypoints"][..., 1], batch["target_waypoints"][..., 1])
+            loss_wp = loss_wp_x + args.lateral_loss_weight * loss_wp_y
+            return args.q_loss_weight * loss_q + args.wp_loss_weight * loss_wp
+
+        args.batch_size = find_max_batch_size(
+            model_factory=_model_factory, optimizer_factory=_optimizer_factory,
+            batch_factory=_batch_factory, loss_fn=_loss_fn, device=args.device,
+            start_batch=min(8, args.batch_size), max_batch=args.auto_batch_size_max,
+            headroom_mb=args.vram_headroom_mb
+        )
+
     print("=" * 65)
     print(" 🚗 World on Rails (WoR) Distillation Training Pipeline")
     print(f" Backbone:        {args.backbone.upper()} (Pretrained: {bool(args.pretrained)})")
     if args.weights_path:
         print(f" CARLA Weights:   {args.weights_path}")
     print(f" Dataset Path:    {args.data_dir}")
-    print(f" Batch Size:      {args.batch_size} | Epochs: {args.epochs}")
+    print(f" Batch Size:      {args.batch_size}{' (auto)' if args.auto_batch_size else ''} | Epochs: {args.epochs}")
     print(f" Device:          {args.device.upper()}")
     print("=" * 65)
 
