@@ -112,14 +112,41 @@ def run_carla_evaluation(args, agent: WorldOnRailsAgent):
     actor_list = []
 
     try:
-        # 1. Spawn Ego Vehicle
+        # 1. Spawn Ego Vehicle. spawn_points[0] is a fixed point that can happen to sit
+        # too close to geometry on a given map/CARLA build - pick randomly among the
+        # first few candidates instead of hard-coding index 0.
+        import random
         ego_bp = blueprint_lib.filter("vehicle.tesla.model3")[0]
         ego_bp.set_attribute("role_name", "hero")
         spawn_points = world.get_map().get_spawn_points()
-        spawn_point = spawn_points[0] if spawn_points else carla.Transform()
+        spawn_point = random.choice(spawn_points[:10]) if spawn_points else carla.Transform()
         ego_vehicle = world.spawn_actor(ego_bp, spawn_point)
+        ego_vehicle.set_simulate_physics(True)
         actor_list.append(ego_vehicle)
         print(f"✓ Ego vehicle spawned at {spawn_point.location}")
+
+        # Collision sensor purely for diagnostics: a car stuck at ~0 km/h under full
+        # throttle for the whole run is far more likely to be wedged against geometry
+        # at spawn than a "bad" policy, since even a badly-trained policy drifts under
+        # sustained throttle - this makes that distinguishable from the driving log.
+        collision_log = {"count": 0, "first": None}
+        col_bp = blueprint_lib.find("sensor.other.collision")
+        col_sensor = world.spawn_actor(col_bp, carla.Transform(), attach_to=ego_vehicle)
+        actor_list.append(col_sensor)
+
+        def _on_collision(event):
+            collision_log["count"] += 1
+            if collision_log["first"] is None:
+                collision_log["first"] = event.other_actor.type_id
+        col_sensor.listen(_on_collision)
+
+        # Let the vehicle settle under gravity for a few ticks before the eval loop
+        # starts, so an interpenetrating spawn doesn't get mistaken for a bad policy.
+        for _ in range(10):
+            world.tick()
+        if collision_log["count"] > 0:
+            print(f"[WARNING] Ego vehicle collided with '{collision_log['first']}' during spawn settling "
+                  f"({collision_log['count']} contacts) - it may be wedged against geometry.")
 
         # 2. Spawn Front RGB Camera for Agent (256x256)
         cam_agent_bp = blueprint_lib.find("sensor.camera.rgb")
@@ -194,7 +221,13 @@ def run_carla_evaluation(args, agent: WorldOnRailsAgent):
                 video_writer.write(hud_frame)
 
             if step % 50 == 0:
-                print(f"  [Step {step:04d}/{args.max_steps:04d}] Speed: {speed_kmh:4.1f} km/h | Steer: {control.steer:+.2f} | Throttle: {control.throttle:.2f} | Brake: {control.brake:.2f}")
+                col_note = f" | Collisions: {collision_log['count']}" if collision_log["count"] else ""
+                print(f"  [Step {step:04d}/{args.max_steps:04d}] Speed: {speed_kmh:4.1f} km/h | Steer: {control.steer:+.2f} | Throttle: {control.throttle:.2f} | Brake: {control.brake:.2f}{col_note}")
+
+        if collision_log["count"] > 0:
+            print(f"[WARNING] {collision_log['count']} total collision contacts during the run "
+                  f"(first with '{collision_log['first']}') - low speed is likely a stuck/blocked "
+                  f"vehicle, not necessarily a bad policy.")
 
         if video_writer is not None:
             video_writer.release()
