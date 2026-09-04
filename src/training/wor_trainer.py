@@ -59,6 +59,7 @@ class WorldOnRailsTrainer:
         q_loss_weight: float = 0.0,
         lateral_loss_weight: float = 3.0,
         synthetic_samples: int = 0,
+        cache_decoded: bool = True,
         experiment_name: str = "WoR_Offline_Training",
         use_mlflow: bool = True,
         mlflow_port: int = 10100
@@ -109,7 +110,8 @@ class WorldOnRailsTrainer:
             batch_size=batch_size,
             num_workers=num_workers,
             is_train=True,
-            synthetic_samples=synthetic_samples
+            synthetic_samples=synthetic_samples,
+            cache_decoded=cache_decoded
         )
         if len(self.train_loader.dataset) == 0 or getattr(self.train_loader.dataset, "is_synthetic", False):
             print(f"[Warning] Training on SYNTHETIC data - no real frames were indexed under {data_dir}.")

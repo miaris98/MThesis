@@ -33,7 +33,8 @@ class WorldOnRailsDataset(Dataset):
         num_rails: int = 9,
         transform: Optional[Callable] = None,
         is_train: bool = True,
-        synthetic_samples: int = 0
+        synthetic_samples: int = 0,
+        cache_decoded: bool = True
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -42,6 +43,13 @@ class WorldOnRailsDataset(Dataset):
         self.transform = transform
         self.is_train = is_train
         self.synthetic_samples = synthetic_samples
+        # JPEG decode + resize is the same work every epoch for a frame that never
+        # changes, and it's what capped throughput at ~280-340 samples/sec regardless
+        # of batch size (batch size only changes how many already-decoded samples get
+        # grouped per GPU step - it can't speed up decoding itself). Caching each
+        # decoded+resized frame as a raw .npy next to its source .jpg pays that cost
+        # once instead of once per epoch; ~196KB/frame at 256x256x3 uint8.
+        self.cache_decoded = cache_decoded
 
         self.samples = []
         if synthetic_samples > 0:
@@ -148,17 +156,47 @@ class WorldOnRailsDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
+    def _load_rgb(self, rgb_path: str) -> np.ndarray:
+        """Loads one RGB frame at self.img_size, transparently caching the
+        decoded+resized array as a sibling .npy file so later epochs (or later runs
+        entirely) skip JPEG decode. Cache filename is keyed by img_size so switching
+        resolutions can't silently serve a stale-size array. Written via a temp file +
+        atomic rename so a worker process crashing mid-write can't leave a corrupt
+        cache entry for the next epoch to read.
+        """
+        h, w = self.img_size
+        cache_path = f"{rgb_path}.{h}x{w}.npy" if self.cache_decoded else None
+
+        if cache_path is not None and os.path.exists(cache_path):
+            try:
+                return np.load(cache_path)
+            except Exception:
+                pass  # Fall through and re-decode if the cache file is corrupt.
+
+        if os.path.exists(rgb_path):
+            img = Image.open(rgb_path).convert("RGB")
+            img = img.resize((w, h))
+            rgb = np.array(img, dtype=np.uint8)
+        else:
+            rgb = np.zeros((h, w, 3), dtype=np.uint8)
+
+        if cache_path is not None:
+            try:
+                # np.save appends ".npy" if the target doesn't already end with it, so
+                # the tmp name must end in .npy too or the rename below targets the
+                # wrong (unsuffixed) path.
+                tmp_path = f"{cache_path}.tmp{os.getpid()}.npy"
+                np.save(tmp_path, rgb)
+                os.replace(tmp_path, cache_path)
+            except Exception:
+                pass  # Caching is a pure optimization - never let it fail the sample.
+
+        return rgb
+
     def _load_pdm_lite_sample(self, item: Dict) -> Tuple[np.ndarray, float, int, np.ndarray]:
         """Loads one PDM-Lite-format frame's RGB image. speed/command/waypoints were
         already parsed once at index time in `_index_pdm_lite_route`."""
-        rgb_path = item["rgb_path"]
-        if os.path.exists(rgb_path):
-            img = Image.open(rgb_path).convert("RGB")
-            img = img.resize((self.img_size[1], self.img_size[0]))
-            rgb = np.array(img, dtype=np.uint8)
-        else:
-            rgb = np.zeros((self.img_size[0], self.img_size[1], 3), dtype=np.uint8)
-
+        rgb = self._load_rgb(item["rgb_path"])
         return rgb, item["speed"], item["command"], np.array(item["waypoints"], dtype=np.float32)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
@@ -175,12 +213,7 @@ class WorldOnRailsDataset(Dataset):
         else:
             item = self.samples[idx]
             rgb_path = item.get("rgb_path", os.path.join(item.get("route_dir", ""), "rgbs", f"{idx:05d}.jpg"))
-            if os.path.exists(rgb_path):
-                img = Image.open(rgb_path).convert("RGB")
-                img = img.resize((self.img_size[1], self.img_size[0]))
-                rgb = np.array(img, dtype=np.uint8)
-            else:
-                rgb = np.zeros((self.img_size[0], self.img_size[1], 3), dtype=np.uint8)
+            rgb = self._load_rgb(rgb_path)
 
             speed = float(item.get("speed", 0.0))
             command = int(item.get("command", item.get("cmd", 2)))
@@ -214,13 +247,15 @@ def create_wor_dataloader(
     batch_size: int = 32,
     num_workers: int = 4,
     is_train: bool = True,
-    synthetic_samples: int = 0
+    synthetic_samples: int = 0,
+    cache_decoded: bool = True
 ) -> DataLoader:
     """Creates a DataLoader for World on Rails training/validation."""
     dataset = WorldOnRailsDataset(
         data_dir=data_dir,
         is_train=is_train,
-        synthetic_samples=synthetic_samples
+        synthetic_samples=synthetic_samples,
+        cache_decoded=cache_decoded
     )
     return DataLoader(
         dataset,

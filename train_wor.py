@@ -25,8 +25,13 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=32, help="Mini-batch size")
     parser.add_argument("--lr_backbone", type=float, default=1e-4, help="Learning rate for vision backbone")
     parser.add_argument("--lr_heads", type=float, default=3e-4, help="Learning rate for Q-heads and controllers")
-    default_workers = 0 if os.name == "nt" else 4
+    # Scale with the machine instead of a flat 4: JPEG decode/resize throughput is
+    # what capped epoch time regardless of batch size (see auto_batch_size discussion),
+    # and more parallel workers is the cheap half of the fix. Leave a few cores free
+    # for the main process, CARLA (if co-running), and OS overhead.
+    default_workers = 0 if os.name == "nt" else max(4, (os.cpu_count() or 8) - 4)
     parser.add_argument("--num_workers", type=int, default=default_workers, help="DataLoader subprocess workers")
+    parser.add_argument("--cache_decoded", type=int, default=1, help="Cache each decoded+resized RGB frame as a sibling .npy so repeat epochs skip JPEG decode entirely (1=True, 0=False)")
     parser.add_argument("--weights_path", type=str, default=None, help="Path to CARLA-pretrained backbone weights (e.g., LAV, TransFuser++, WoR, or PCLA)")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device (cuda or cpu)")
     parser.add_argument("--synthetic_samples", type=int, default=0, help="Generate synthetic samples if real dataset is not yet downloaded")
@@ -114,6 +119,7 @@ def main():
         num_workers=args.num_workers,
         device=args.device,
         synthetic_samples=args.synthetic_samples,
+        cache_decoded=bool(args.cache_decoded),
         wp_loss_weight=args.wp_loss_weight,
         q_loss_weight=args.q_loss_weight,
         lateral_loss_weight=args.lateral_loss_weight,
