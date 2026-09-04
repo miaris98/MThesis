@@ -39,6 +39,11 @@ def parse_args():
 def main():
     args = parse_args()
 
+    if args.device == "cuda":
+        # Every batch is a fixed 256x256 image, so cuDNN can safely autotune the
+        # fastest conv kernels for that exact shape instead of using generic ones.
+        torch.backends.cudnn.benchmark = True
+
     print("=" * 65)
     print(" 🚗 World on Rails (WoR) Distillation Training Pipeline")
     print(f" Backbone:        {args.backbone.upper()} (Pretrained: {bool(args.pretrained)})")
