@@ -33,7 +33,22 @@ try:
 except ImportError:
     carla = None
 
+try:
+    from agents.navigation.global_route_planner import GlobalRoutePlanner
+except ImportError:
+    GlobalRoutePlanner = None
+
 from src.agents.wor_agent import WorldOnRailsAgent
+
+# Must match WorldOnRailsDataset.route_points / _subsample_route exactly - the model
+# was trained on a fixed-length, evenly-subsampled route, so eval has to feed it the
+# same shape or the route_mlp sees an out-of-distribution input.
+WOR_ROUTE_POINTS = 4
+# Number of upcoming global-route waypoints to carry into the ego frame before
+# subsampling. PDM-Lite's own route field spans well past the immediate vicinity, so
+# a short lookahead here would make _subsample_route degenerate to near-duplicate
+# points bunched right in front of the car.
+WOR_ROUTE_LOOKAHEAD = 20
 
 # The policy was trained on WorldOnRailsDataset._PDM_LITE_COMMAND_MAP, which remaps
 # carla_garage/scenario_runner's raw RoadOption ids (1=LEFT..6=CHANGELANERIGHT) to a
@@ -91,6 +106,63 @@ def draw_eval_hud(frame: np.ndarray, speed_kmh: float, steer: float, throttle: f
     return frame
 
 
+def _subsample_route(route, n=WOR_ROUTE_POINTS):
+    """Mirrors WorldOnRailsDataset._subsample_route exactly - same evenly-spaced
+    index selection and same pad-by-repeating-the-last-point behavior for a short
+    route (e.g. the last few meters before the destination)."""
+    if not route:
+        return [[0.0, 0.0] for _ in range(n)]
+    arr = np.asarray(route, dtype=np.float32)
+    if arr.ndim != 2 or arr.shape[0] == 0:
+        return [[0.0, 0.0] for _ in range(n)]
+    idx = np.linspace(0, arr.shape[0] - 1, n).round().astype(int)
+    return arr[idx, :2].tolist()
+
+
+def _build_global_route(world, origin_loc, sampling_resolution=2.0):
+    """Traces a route from origin to the farthest spawn point using CARLA's own
+    GlobalRoutePlanner (the same tool carla_garage/PDM-Lite used to author the
+    training routes), and returns it as a flat list of carla.Location waypoints."""
+    grp = GlobalRoutePlanner(world.get_map(), sampling_resolution)
+    spawn_points = world.get_map().get_spawn_points()
+    destination = max(spawn_points, key=lambda sp: sp.location.distance(origin_loc))
+    route = grp.trace_route(origin_loc, destination.location)
+    return [wp.transform.location for wp, _ in route]
+
+
+def _ego_frame_route(ego_vehicle, route_locations, last_idx):
+    """Projects the upcoming global-route waypoints into the vehicle's current local
+    frame, matching the ego_matrix convention _index_pdm_lite_route trains on:
+    inv(ego_world_matrix) @ world_point gives [x_forward, y_lateral] in meters.
+
+    Tracks progress with `last_idx` and only searches forward from it, so a route
+    that briefly loops near itself (a roundabout, a tight corner) can't make the
+    car's "nearest point" jump backward.
+    """
+    ego_tf = ego_vehicle.get_transform()
+    ego_loc = ego_tf.location
+    search_end = min(len(route_locations), last_idx + 50)
+    best_idx, best_dist = last_idx, float("inf")
+    for i in range(last_idx, search_end):
+        d = ego_loc.distance(route_locations[i])
+        if d < best_dist:
+            best_dist, best_idx = d, i
+
+    upcoming = route_locations[best_idx: best_idx + WOR_ROUTE_LOOKAHEAD]
+    if not upcoming and route_locations:
+        upcoming = [route_locations[-1]]
+
+    inv_matrix = np.array(ego_tf.get_inverse_matrix())
+    local_pts = []
+    for loc in upcoming:
+        world_pt = np.array([loc.x, loc.y, loc.z, 1.0])
+        local = inv_matrix @ world_pt
+        local_pts.append([float(local[0]), float(local[1])])
+
+    reached_end = best_idx >= len(route_locations) - 1
+    return _subsample_route(local_pts), best_idx, reached_end
+
+
 def run_carla_evaluation(args, agent: WorldOnRailsAgent):
     """Executes live evaluation episode in CARLA and records MP4 video."""
     client = carla.Client(args.host, args.port)
@@ -124,6 +196,25 @@ def run_carla_evaluation(args, agent: WorldOnRailsAgent):
         ego_vehicle.set_simulate_physics(True)
         actor_list.append(ego_vehicle)
         print(f"✓ Ego vehicle spawned at {spawn_point.location}")
+
+        # Global route plan the ego-frame `route` input is projected from every
+        # step - without this the policy gets a zero route (no navigation intent)
+        # and, since it was trained specifically to steer from this signal, drives
+        # straight through every junction regardless of checkpoint quality.
+        route_locations = []
+        route_idx = 0
+        if GlobalRoutePlanner is not None:
+            try:
+                route_locations = _build_global_route(world, spawn_point.location)
+                print(f"✓ Global route planned: {len(route_locations)} waypoints to "
+                      f"{route_locations[-1] if route_locations else 'n/a'}")
+            except Exception as e:
+                print(f"[WARNING] GlobalRoutePlanner failed ({e}) - falling back to a zero "
+                      f"route. The agent will have no navigation intent and will likely "
+                      f"drive straight through junctions.")
+        else:
+            print("[WARNING] agents.navigation.global_route_planner not importable - "
+                  "falling back to a zero route (no navigation intent).")
 
         # Collision sensor purely for diagnostics: a car stuck at ~0 km/h under full
         # throttle for the whole run is far more likely to be wedged against geometry
@@ -206,10 +297,18 @@ def run_carla_evaluation(args, agent: WorldOnRailsAgent):
             vel = ego_vehicle.get_velocity()
             speed_kmh = float(3.6 * np.sqrt(vel.x**2 + vel.y**2 + vel.z**2))
 
+            if route_locations:
+                route, route_idx, reached_end = _ego_frame_route(ego_vehicle, route_locations, route_idx)
+                if reached_end and step % 50 == 0:
+                    print(f"  [Step {step:04d}/{args.max_steps:04d}] Reached end of planned route.")
+            else:
+                route = [[0.0, 0.0] for _ in range(WOR_ROUTE_POINTS)]
+
             sensor_data = {
                 "rgb_front": (step, agent_rgb_buffer["data"]),
                 "speed": (step, speed_kmh / 3.6),
-                "command": WOR_LANEFOLLOW_COMMAND
+                "command": WOR_LANEFOLLOW_COMMAND,
+                "route": route
             }
 
             # Generate WoR Control
