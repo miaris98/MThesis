@@ -27,6 +27,18 @@ def print_gpu_process_usage(device_index: int = 0) -> None:
     memory) that torch.cuda's own allocator stats can't see, since those only
     describe THIS process's allocations. Best-effort: silently no-ops if
     nvidia-smi isn't available.
+
+    Does NOT claim to know whether a listed PID is alive or dead: nvidia-smi
+    talks to the driver at the host level and reports host-namespace PIDs,
+    which on a containerized GPU (vast.ai and similar) generally do not exist
+    in this container's own PID namespace at all - `kill -0 <pid>` fails with
+    "No such process" for those regardless of whether the process is actually
+    alive and well inside its own container. Treating that as proof of death
+    is exactly how a live, merely-Ctrl+Z-suspended training run got
+    misdiagnosed as an unrecoverable leak more than once. If you started the
+    process yourself, `jobs` + `kill -9 %N` (shell job control, not the PID
+    shown here) is the first thing to try - it targets the container-local
+    PID your shell actually owns.
     """
     try:
         out = subprocess.run(
@@ -38,12 +50,13 @@ def print_gpu_process_usage(device_index: int = 0) -> None:
         if not rows:
             print("[auto_batch_size] No other processes currently hold VRAM on this GPU.")
             return
-        print(f"[auto_batch_size] {len(rows)} process(es) already holding VRAM on GPU {device_index}:")
+        print(f"[auto_batch_size] {len(rows)} process(es) already holding VRAM on GPU {device_index} "
+              f"(PIDs are nvidia-smi's host-level view - if one of these is your own suspended run, "
+              f"use `jobs` + `kill -9 %N` instead of `kill -9 <pid>`, which will likely say "
+              f"'No such process' here regardless of whether it's actually alive):")
         for row in rows:
             pid, used_mb = [p.strip() for p in row.split(",")]
-            alive = subprocess.run(["kill", "-0", pid], capture_output=True).returncode == 0
-            tag = "" if alive else " (zombie CUDA context - process is dead, VRAM won't free on its own; needs an instance/container restart)"
-            print(f"    PID {pid}: {used_mb}MB{tag}")
+            print(f"    PID {pid}: {used_mb}MB")
     except Exception:
         pass
 
