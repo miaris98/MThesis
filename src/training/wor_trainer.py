@@ -36,6 +36,7 @@ class WorldOnRailsTrainer:
     #: stack so offline WoR runs are inspectable/comparable the same way).
     TELEMETRY_FIELDS = [
         "epoch", "num_batches", "wall_time_s", "epoch_time_sec", "samples_per_sec",
+        "data_wait_sec", "compute_sec",
         "total_loss", "q_loss", "wp_loss", "wp_ade_m", "wp_fde_m",
         "wp_lateral_error_m", "wp_longitudinal_error_m",
         "lr_backbone", "lr_heads", "grad_norm", "is_best",
@@ -64,7 +65,12 @@ class WorldOnRailsTrainer:
         use_mlflow: bool = True,
         mlflow_port: int = 10100
     ):
-        self.model = model.to(device)
+        # channels_last suits conv+AMP on tensor cores, and costs nothing to feed:
+        # frames arrive from the dataset as uint8 HWC, which permutes to NCHW with
+        # channels_last layout without a copy. Checkpoints are unaffected - memory
+        # format isn't part of state_dict - so eval can still load these weights into
+        # a contiguous model.
+        self.model = model.to(device, memory_format=torch.channels_last)
         self.data_dir = data_dir
         self.val_data_dir = val_data_dir
         self.save_dir = save_dir
@@ -151,14 +157,28 @@ class WorldOnRailsTrainer:
         grad_norm_accum = 0.0
         num_batches = 0
         num_samples = 0
+        # Split the epoch into "blocked waiting for the dataloader" vs "actually
+        # computing" so the next optimization targets whichever one dominates,
+        # instead of guessing (batch size was raised 8x once for no speedup at all,
+        # because the pipeline was data-bound the whole time).
+        data_wait = 0.0
+        compute_time = 0.0
         start_time = time.time()
+        t_batch_start = time.time()
 
         for batch_idx, batch in enumerate(self.train_loader):
-            rgb = batch["rgb"].to(self.device)
-            speed = batch["speed"].to(self.device)
-            command = batch["command"].to(self.device)
-            target_q = batch["target_q"].to(self.device)
-            target_wp = batch["target_waypoints"].to(self.device)
+            data_wait += time.time() - t_batch_start
+            t_compute_start = time.time()
+
+            # uint8 HWC -> float NCHW in [0,1], done on the GPU: a quarter of the
+            # PCIe traffic of sending float32, and the permute lands in channels_last
+            # without a copy since the source is already HWC.
+            rgb = batch["rgb"].to(self.device, non_blocking=True)
+            rgb = rgb.permute(0, 3, 1, 2).float().div_(255.0)
+            speed = batch["speed"].to(self.device, non_blocking=True)
+            command = batch["command"].to(self.device, non_blocking=True)
+            target_q = batch["target_q"].to(self.device, non_blocking=True)
+            target_wp = batch["target_waypoints"].to(self.device, non_blocking=True)
 
             self.optimizer.zero_grad()
 
@@ -213,6 +233,13 @@ class WorldOnRailsTrainer:
             num_batches += 1
             num_samples += rgb.shape[0]
 
+            # CUDA work is async, so the compute window has to be closed on a sync or
+            # its cost would silently land in the next iteration's data-wait bucket.
+            if self.device == "cuda":
+                torch.cuda.synchronize()
+            compute_time += time.time() - t_compute_start
+            t_batch_start = time.time()
+
         avg_loss = total_loss_accum / max(1, num_batches)
         avg_q_loss = q_loss_accum / max(1, num_batches)
         avg_wp_loss = wp_loss_accum / max(1, num_batches)
@@ -241,6 +268,8 @@ class WorldOnRailsTrainer:
             "lr_backbone": lr_b,
             "lr_heads": lr_h,
             "samples_per_sec": samples_per_sec,
+            "data_wait_sec": data_wait,
+            "compute_sec": compute_time,
             "time": elapsed
         }
 
@@ -262,13 +291,15 @@ class WorldOnRailsTrainer:
                 f"WP Loss: {metrics['wp_loss']:.4f} | "
                 f"ADE: {metrics['wp_ade_m']:.3f}m | FDE: {metrics['wp_fde_m']:.3f}m | "
                 f"Lat Err: {metrics['wp_lateral_error_m']:.3f}m | Lon Err: {metrics['wp_longitudinal_error_m']:.3f}m | "
-                f"Samples/s: {metrics['samples_per_sec']:.1f} | Time: {metrics['time']:.2f}s"
+                f"Samples/s: {metrics['samples_per_sec']:.1f} | Time: {metrics['time']:.2f}s "
+                f"(data {metrics['data_wait_sec']:.1f}s / compute {metrics['compute_sec']:.1f}s)"
             )
 
             hw = HardwareMonitor.get_metrics()
             for tag in ("total_loss", "q_loss", "wp_loss", "wp_ade_m", "wp_fde_m",
                         "wp_lateral_error_m", "wp_longitudinal_error_m",
-                        "grad_norm", "lr_backbone", "lr_heads", "samples_per_sec"):
+                        "grad_norm", "lr_backbone", "lr_heads", "samples_per_sec",
+                        "data_wait_sec", "compute_sec"):
                 self.logger.add_scalar(f"wor/{tag}", metrics[tag], epoch)
 
             self.csv_logger.log_step({
@@ -276,6 +307,8 @@ class WorldOnRailsTrainer:
                 "wall_time_s": round(time.time() - self.train_start_time, 2),
                 "epoch_time_sec": round(metrics["time"], 2),
                 "samples_per_sec": round(metrics["samples_per_sec"], 1),
+                "data_wait_sec": round(metrics["data_wait_sec"], 2),
+                "compute_sec": round(metrics["compute_sec"], 2),
                 "total_loss": round(metrics["total_loss"], 5),
                 "q_loss": round(metrics["q_loss"], 5),
                 "wp_loss": round(metrics["wp_loss"], 5),

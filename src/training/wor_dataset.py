@@ -220,13 +220,17 @@ class WorldOnRailsDataset(Dataset):
             target_q = np.array(item.get("q_values", np.zeros(self.num_rails)), dtype=np.float32)
             target_waypoints = np.array(item.get("waypoints", np.zeros((5, 2))), dtype=np.float32)
 
-        # Convert to PyTorch tensors (CHW RGB format normalized to [0, 1])
+        # RGB stays uint8 HWC here: converting to float32 CHW in the worker would
+        # quadruple both the CPU work and the bytes crossing PCIe (786KB vs 196KB per
+        # frame). The trainer does the permute/scale on the GPU instead, where it's
+        # nearly free - and HWC uint8 is already the channels_last layout the conv
+        # kernels want, so the permute costs no copy.
         try:
-            rgb_tensor = torch.as_tensor(rgb, dtype=torch.float32).permute(2, 0, 1) / 255.0
+            rgb_tensor = torch.as_tensor(np.ascontiguousarray(rgb), dtype=torch.uint8)
             target_q_tensor = torch.as_tensor(target_q, dtype=torch.float32)
             target_waypoints_tensor = torch.as_tensor(target_waypoints, dtype=torch.float32)
         except Exception:
-            rgb_tensor = torch.tensor(rgb.tolist(), dtype=torch.float32).permute(2, 0, 1) / 255.0
+            rgb_tensor = torch.tensor(rgb.tolist(), dtype=torch.uint8)
             target_q_tensor = torch.tensor(target_q.tolist(), dtype=torch.float32)
             target_waypoints_tensor = torch.tensor(target_waypoints.tolist(), dtype=torch.float32)
 
