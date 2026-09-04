@@ -193,7 +193,7 @@ retry_cmd "conda install ipykernel" conda install -y ipykernel
 python -m ipykernel install --user --name=carla_py38 --display-name "Python 3.8 (CARLA RL)"
 
 pip install --upgrade pip
-pip install "setuptools<80" gymnasium gym numpy pillow opencv-python tensorboard mlflow torch torchvision jupyterlab ipywidgets nvitop scipy matplotlib
+pip install "setuptools<80" gymnasium gym numpy pillow opencv-python tensorboard mlflow torch torchvision jupyterlab ipywidgets nvitop scipy matplotlib huggingface_hub
 
 echo -e "${YELLOW}--> Installing EasyCarla-RL directly into Python environment...${NC}"
 retry_cmd "EasyCarla-RL install" pip install git+https://github.com/silverwingsbot/EasyCarla-RL.git
@@ -239,7 +239,44 @@ if [ ! -f "$PRETRAINED_DIR/model_0030_0.pth" ]; then
     fi
 fi
 
-echo -e "${GREEN}✓ Python environment, EasyCarla-RL package, and CARLA pretrained vision weights configured.${NC}"
+# Auto-download a subset of the PDM-Lite expert-driving dataset (offline WoR training).
+# The full dataset (autonomousvision/PDM_Lite_Carla_LB2) is 100GB-1TB across 8 towns, so
+# only WOR_DATASET_TOWNS is pulled by default. Override e.g. WOR_DATASET_TOWNS="Town01,Town02"
+# or set WOR_DATASET_TOWNS="" to skip the download entirely.
+WOR_DATASET_TOWNS="${WOR_DATASET_TOWNS:-Town01}"
+WOR_DATASET_DIR="/workspace/dataset/wor_trajectories"
+if [ -n "$WOR_DATASET_TOWNS" ] && [ ! -d "$WOR_DATASET_DIR/$(echo "$WOR_DATASET_TOWNS" | cut -d',' -f1)" ]; then
+    echo -e "${YELLOW}--> Downloading PDM-Lite expert dataset (towns: $WOR_DATASET_TOWNS) for offline WoR training...${NC}"
+    mkdir -p "$WOR_DATASET_DIR"
+    python - "$WOR_DATASET_TOWNS" "$WOR_DATASET_DIR" <<'PYEOF' || echo -e "${RED}[WARNING] PDM-Lite dataset download failed - offline WoR training will fall back to --synthetic_samples.${NC}"
+import sys
+from huggingface_hub import snapshot_download
+
+towns = [t.strip() for t in sys.argv[1].split(",") if t.strip()]
+out_dir = sys.argv[2]
+patterns = [f"{town}/**" for town in towns]
+snapshot_download(
+    repo_id="autonomousvision/PDM_Lite_Carla_LB2",
+    repo_type="dataset",
+    local_dir=out_dir,
+    allow_patterns=patterns,
+)
+print(f"Downloaded towns {towns} to {out_dir}")
+PYEOF
+else
+    echo -e "${YELLOW}--> PDM-Lite dataset already present or download disabled (WOR_DATASET_TOWNS='$WOR_DATASET_TOWNS'), skipping.${NC}"
+fi
+
+# Auto-download the pretrained WoR policy checkpoint via PCLA's HF-hosted weights
+# (thesis scope: reuse the pretrained WoR baseline rather than training vision from scratch).
+PCLA_DIR="$PATCH_SCRIPT_DIR/Carla-utils/PCLA"
+if [ -d "$PCLA_DIR" ] && [ ! -d "$PCLA_DIR/pcla_agents/wor/wor_pretrained" ]; then
+    echo -e "${YELLOW}--> Downloading pretrained WoR checkpoint via PCLA (Hugging Face)...${NC}"
+    (cd "$PCLA_DIR" && python pcla_functions/download_weights.py --agents wor) || \
+        echo -e "${RED}[WARNING] Pretrained WoR checkpoint download failed.${NC}"
+fi
+
+echo -e "${GREEN}✓ Python environment, EasyCarla-RL package, CARLA pretrained vision weights, pretrained WoR checkpoint, and offline dataset configured.${NC}"
 
 # --- 5. Configure Environment Variables ---
 echo -e "\n${CYAN}[5/7] Configuring environment variables (~/.bashrc & Conda activate hook)...${NC}"

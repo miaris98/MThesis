@@ -28,6 +28,8 @@ def parse_args():
     parser.add_argument("--weights_path", type=str, default=None, help="Path to CARLA-pretrained backbone weights (e.g., LAV, TransFuser++, WoR, or PCLA)")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device (cuda or cpu)")
     parser.add_argument("--synthetic_samples", type=int, default=0, help="Generate synthetic samples if real dataset is not yet downloaded")
+    parser.add_argument("--wp_loss_weight", type=float, default=1.0, help="Weight of the waypoint imitation loss")
+    parser.add_argument("--q_loss_weight", type=float, default=0.0, help="Weight of the Q-value distillation loss (0 for datasets without precomputed Q-values, e.g. PDM-Lite)")
     return parser.parse_args()
 
 
@@ -62,7 +64,9 @@ def main():
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         device=args.device,
-        synthetic_samples=args.synthetic_samples
+        synthetic_samples=args.synthetic_samples,
+        wp_loss_weight=args.wp_loss_weight,
+        q_loss_weight=args.q_loss_weight
     )
 
     # 3. Launch Training Loop

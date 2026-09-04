@@ -42,6 +42,7 @@ class WorldOnRailsTrainer:
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         use_amp: bool = True,
         wp_loss_weight: float = 1.0,
+        q_loss_weight: float = 0.0,
         synthetic_samples: int = 0
     ):
         self.model = model.to(device)
@@ -51,6 +52,9 @@ class WorldOnRailsTrainer:
         self.device = device
         self.use_amp = use_amp and (device == "cuda")
         self.wp_loss_weight = wp_loss_weight
+        # Datasets without precomputed Q-values (e.g. PDM-Lite) leave target_q at
+        # zero, so q_loss_weight defaults to 0 to avoid supervising toward zero.
+        self.q_loss_weight = q_loss_weight
 
         os.makedirs(save_dir, exist_ok=True)
         self.telemetry_csv = os.path.join(save_dir, "wor_training_telemetry.csv")
@@ -126,7 +130,7 @@ class WorldOnRailsTrainer:
                 pred_wp = out["selected_waypoints"]
                 loss_wp = F.l1_loss(pred_wp, target_wp)
 
-                total_loss = loss_q + self.wp_loss_weight * loss_wp
+                total_loss = self.q_loss_weight * loss_q + self.wp_loss_weight * loss_wp
 
             if self.use_amp:
                 self.scaler.scale(total_loss).backward()
