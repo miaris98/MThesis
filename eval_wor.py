@@ -12,6 +12,7 @@ import os
 import sys
 import time
 import glob
+import subprocess
 import numpy as np
 import cv2
 import torch
@@ -33,6 +34,13 @@ except ImportError:
     carla = None
 
 from src.agents.wor_agent import WorldOnRailsAgent
+
+# The policy was trained on WorldOnRailsDataset._PDM_LITE_COMMAND_MAP, which remaps
+# carla_garage/scenario_runner's raw RoadOption ids (1=LEFT..6=CHANGELANERIGHT) to a
+# 0-indexed command space. "Just keep driving" is LANEFOLLOW (raw 4), which maps to
+# index 3 - NOT 2 (index 2 is STRAIGHT). Sending the wrong index here biases the
+# policy toward a turn it was never asked to make at this point in the route.
+WOR_LANEFOLLOW_COMMAND = 3
 
 
 def parse_args():
@@ -137,12 +145,15 @@ def run_carla_evaluation(args, agent: WorldOnRailsAgent):
         video_frame_buffer = {"data": None}
         cam_video.listen(lambda img: video_frame_buffer.update({"data": np.frombuffer(img.raw_data, dtype=np.uint8).reshape((720, 1280, 4))[:, :, :3]}))
 
-        # Initialize VideoWriter
+        # Initialize VideoWriter. cv2's mp4v codec isn't broadly browser/player
+        # compatible, so (matching record_eval_video.py) write raw mp4v frames first
+        # and re-encode to H.264 via ffmpeg once recording finishes.
         video_writer = None
+        raw_video_path = args.video_path.replace(".mp4", "_raw.mp4")
         if args.record_video:
             os.makedirs(os.path.dirname(os.path.abspath(args.video_path)), exist_ok=True)
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            video_writer = cv2.VideoWriter(args.video_path, fourcc, 20.0, (1280, 720))
+            video_writer = cv2.VideoWriter(raw_video_path, fourcc, 20.0, (1280, 720))
             print(f"📹 Recording evaluation video to: {args.video_path}")
 
         print(f"--> Running World on Rails evaluation for {args.max_steps} steps (~{args.max_steps/20:.1f}s)...")
@@ -161,7 +172,7 @@ def run_carla_evaluation(args, agent: WorldOnRailsAgent):
             sensor_data = {
                 "rgb_front": (step, agent_rgb_buffer["data"]),
                 "speed": (step, speed_kmh / 3.6),
-                "command": 2
+                "command": WOR_LANEFOLLOW_COMMAND
             }
 
             # Generate WoR Control
@@ -187,7 +198,17 @@ def run_carla_evaluation(args, agent: WorldOnRailsAgent):
 
         if video_writer is not None:
             video_writer.release()
-            print(f"✓ Video saved successfully: {args.video_path}")
+            print("✓ Raw video frames written. Finalizing H.264 MP4 conversion...")
+            if os.path.exists(raw_video_path):
+                try:
+                    cmd = ["ffmpeg", "-y", "-i", raw_video_path, "-vcodec", "libx264",
+                           "-pix_fmt", "yuv420p", "-movflags", "faststart", args.video_path]
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if os.path.exists(args.video_path):
+                        os.remove(raw_video_path)
+                        print(f"🎬 Successfully generated HD driving video: {args.video_path}")
+                except Exception as e:
+                    print(f"ffmpeg notice: {e}")
 
     finally:
         print("--> Cleaning up simulation actors...")
@@ -208,7 +229,7 @@ def run_standalone_test(agent: WorldOnRailsAgent):
     sensor_data = {
         "rgb_front": (0, dummy_rgb),
         "speed": (0, {"speed": 5.0}),
-        "command": (0, 2)
+        "command": (0, WOR_LANEFOLLOW_COMMAND)
     }
     control = agent.run_step(sensor_data)
     print(f"✓ Agent generated control successfully: {control}")

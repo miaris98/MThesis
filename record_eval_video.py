@@ -34,6 +34,12 @@ from src.envs.camera_easycarla_env import CameraEasyCarlaEnv
 from src.models.actor_critic import ActorCriticPPO
 from src.utils.evaluation_studio import draw_hud
 
+# WorldOnRailsDataset._PDM_LITE_COMMAND_MAP remaps carla_garage's raw RoadOption ids
+# (1=LEFT..6=CHANGELANERIGHT) to a 0-indexed command space for the policy. LANEFOLLOW
+# (raw 4) -> index 3, which is what "just keep driving" means to this policy - not 2
+# (that's STRAIGHT).
+WOR_LANEFOLLOW_COMMAND = 3
+
 
 def _wor_control_to_action(throttle: float, steer: float, brake: float) -> np.ndarray:
     """Map a WoR VehicleControl onto the env's tanh action space.
@@ -210,7 +216,7 @@ def record_eval_video(
                     control = agent.run_step({
                         "rgb_front": (step_in_ep, np.ascontiguousarray(model_rgb[:, 256:512, :])),
                         "speed": (step_in_ep, spd),
-                        "command": 2,
+                        "command": WOR_LANEFOLLOW_COMMAND,
                     })
                     if isinstance(control, dict):
                         raw_t, raw_s, raw_b = control["throttle"], control["steer"], control["brake"]
