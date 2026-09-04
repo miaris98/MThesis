@@ -331,11 +331,13 @@ class WorldOnRailsPolicy(nn.Module):
         num_commands: int = 6,
         state_dim: int = 64,
         grid_size: Tuple[int, int] = (16, 16),
-        num_rails: int = 9
+        num_rails: int = 9,
+        route_points: int = 4
     ):
         super().__init__()
         self.num_commands = num_commands
         self.num_rails = num_rails
+        self.route_points = route_points
 
         # 1. Pretrained Multi-view Vision Encoder
         self.encoder = PretrainedVisionEncoder(
@@ -345,15 +347,25 @@ class WorldOnRailsPolicy(nn.Module):
             weights_path=weights_path
         )
 
-        # 2. Command & Speed State Embedder
+        # 2. Command, Speed & Route State Embedder.
+        # The route encoder is what makes steering learnable at all: PDM-Lite leaves
+        # the command enum at LANEFOLLOW on every frame, so cmd_embed is a constant
+        # and image+speed alone cannot tell a left turn from a right one at a
+        # junction - the model then correctly predicts straight everywhere. The
+        # ego-frame route carries that intent (corr ~0.84 with the lateral target).
         self.cmd_embed = nn.Embedding(num_commands, 32)
         self.speed_mlp = nn.Sequential(
             nn.Linear(1, 32),
             nn.ReLU(inplace=True),
             nn.Linear(32, 32)
         )
+        self.route_mlp = nn.Sequential(
+            nn.Linear(route_points * 2, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, 32)
+        )
         self.state_proj = nn.Sequential(
-            nn.Linear(64, state_dim),
+            nn.Linear(96, state_dim),
             nn.ReLU(inplace=True)
         )
 
@@ -369,9 +381,19 @@ class WorldOnRailsPolicy(nn.Module):
         # 4. Controller
         self.controller = PIDController()
 
-    def embed_state(self, speed: torch.Tensor, command: torch.Tensor) -> torch.Tensor:
+    def embed_state(
+        self,
+        speed: torch.Tensor,
+        command: torch.Tensor,
+        route: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """
-        Embeds speed (B, 1) and discrete command (B, ) into a joint state embedding (B, state_dim).
+        Embeds speed (B, 1), discrete command (B, ) and the ego-frame route
+        (B, route_points, 2) into a joint state embedding (B, state_dim).
+
+        `route` is optional so callers that have no route planner still run, but they
+        get a zero route, which leaves the policy without navigation intent - it will
+        drive straight through junctions. Supply a real route wherever steering matters.
         """
         if command.ndim > 1:
             command = command.argmax(dim=-1)
@@ -379,14 +401,21 @@ class WorldOnRailsPolicy(nn.Module):
 
         c_emb = self.cmd_embed(command)
         s_emb = self.speed_mlp(speed.view(-1, 1).float())
-        state = torch.cat([c_emb, s_emb], dim=-1)
+
+        B = c_emb.shape[0]
+        if route is None:
+            route = torch.zeros(B, self.route_points, 2, device=c_emb.device, dtype=c_emb.dtype)
+        r_emb = self.route_mlp(route.reshape(B, -1).float())
+
+        state = torch.cat([c_emb, s_emb, r_emb], dim=-1)
         return self.state_proj(state)
 
     def forward(
         self,
         rgb: torch.Tensor,
         speed: torch.Tensor,
-        command: torch.Tensor
+        command: torch.Tensor,
+        route: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass.
@@ -405,8 +434,8 @@ class WorldOnRailsPolicy(nn.Module):
         # 1. Extract visual features
         feats = self.encoder(rgb)
 
-        # 2. Embed speed and command
-        state_emb = self.embed_state(speed, command)
+        # 2. Embed speed, command and route
+        state_emb = self.embed_state(speed, command, route)
 
         # 3. Predict Q-maps and waypoints
         q_map, rail_q, waypoints = self.q_head(feats, state_emb)
@@ -436,10 +465,16 @@ class WorldOnRailsPolicy(nn.Module):
         rgb: Union[np.ndarray, torch.Tensor],
         speed: Union[float, torch.Tensor],
         command: int = 2,
-        device: str = "cuda"
+        device: str = "cuda",
+        route: Optional[Union[np.ndarray, torch.Tensor]] = None
     ) -> Tuple[float, float, float]:
         """
         Generates (steer, throttle, brake) controls for direct CARLA execution.
+
+        `route` is the ego-frame planned route, (route_points, 2). Omitting it feeds
+        a zero route, which leaves the policy with no navigation intent and makes it
+        drive straight through junctions - so a caller that wants steering must
+        provide one.
         """
         self.eval()
         if isinstance(rgb, torch.Tensor):
@@ -468,7 +503,13 @@ class WorldOnRailsPolicy(nn.Module):
 
         cmd_tensor = torch.tensor([command], device=device, dtype=torch.long)
 
-        out = self.forward(rgb_tensor, speed_tensor, cmd_tensor)
+        route_tensor = None
+        if route is not None:
+            route_tensor = torch.as_tensor(np.asarray(route, dtype=np.float32), device=device)
+            if route_tensor.ndim == 2:
+                route_tensor = route_tensor.unsqueeze(0)
+
+        out = self.forward(rgb_tensor, speed_tensor, cmd_tensor, route_tensor)
         wps_tensor = out["selected_waypoints"][0].cpu()
         try:
             wps = wps_tensor.numpy()

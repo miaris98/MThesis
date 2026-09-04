@@ -114,12 +114,21 @@ class WorldOnRailsAgent:
         if isinstance(command, (tuple, list)):
             command = command[1] if len(command) > 1 else command[0]
 
-        # 4. Neural Network Forward Inference & PID Control
+        # 4. Ego-frame planned route: the policy's navigation intent. PDM-Lite's
+        # command enum is LANEFOLLOW on every training frame, so the route is what
+        # actually tells the policy which way to go at a junction. Without it the
+        # policy gets a zero route and drives straight regardless of the turn.
+        route = input_data.get("route")
+        if isinstance(route, (tuple, list)) and len(route) == 2 and not isinstance(route[0], (list, tuple, np.ndarray)):
+            route = route[1]  # (frame, data) sensor-style tuple
+
+        # 5. Neural Network Forward Inference & PID Control
         steer, throttle, brake = self.net.act(
             rgb=rgb_img,
             speed=speed_kmh,
             command=int(command),
-            device=self.device
+            device=self.device,
+            route=route
         )
 
         # 5. Return CARLA VehicleControl or Control Dict

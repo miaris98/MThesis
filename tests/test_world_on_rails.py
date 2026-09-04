@@ -114,6 +114,9 @@ def test_wor_dataset_and_trainer(tmp_path):
     # uint8 HWC: the float32/NCHW conversion happens on the GPU in the trainer.
     assert sample["rgb"].shape == (256, 256, 3)
     assert sample["rgb"].dtype == torch.uint8
+    # Ego-frame route: the policy's only working navigation input, since PDM-Lite
+    # leaves the command enum at LANEFOLLOW on every frame.
+    assert sample["route"].shape == (4, 2)
     assert sample["target_q"].shape == (9,)
     assert sample["target_waypoints"].shape == (5, 2)
 

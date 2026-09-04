@@ -34,7 +34,8 @@ class WorldOnRailsDataset(Dataset):
         transform: Optional[Callable] = None,
         is_train: bool = True,
         synthetic_samples: int = 0,
-        cache_decoded: bool = True
+        cache_decoded: bool = True,
+        route_points: int = 4
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -43,6 +44,14 @@ class WorldOnRailsDataset(Dataset):
         self.transform = transform
         self.is_train = is_train
         self.synthetic_samples = synthetic_samples
+        # How many points of the ego-frame planned route to expose as the policy's
+        # navigation input. PDM-Lite leaves the legacy `command` enum at LANEFOLLOW on
+        # every frame, so without this the policy has no way to know which way the
+        # route turns and correctly learns to drive straight. The full 20-point route
+        # correlates ~0.84 with the lateral target and starts to hand over the answer;
+        # a sparse subsample keeps this closer to the Leaderboard's sparse-goal
+        # convention, and this is a knob so the leakage can be ablated.
+        self.route_points = route_points
         # JPEG decode + resize is the same work every epoch for a frame that never
         # changes, and it's what capped throughput at ~280-340 samples/sec regardless
         # of batch size (batch size only changes how many already-decoded samples get
@@ -94,6 +103,21 @@ class WorldOnRailsDataset(Dataset):
     # (LEFT, RIGHT, STRAIGHT, LANEFOLLOW, CHANGELANELEFT, CHANGELANERIGHT).
     _PDM_LITE_COMMAND_MAP = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
 
+    def _subsample_route(self, route) -> List[List[float]]:
+        """Reduces the ego-frame planned route to `self.route_points` evenly spaced
+        points. Routes shorten near the end of an episode, so short ones are padded
+        by repeating the last point rather than dropped - a truncated route still
+        carries the turn direction.
+        """
+        n = self.route_points
+        if not route:
+            return [[0.0, 0.0] for _ in range(n)]
+        arr = np.asarray(route, dtype=np.float32)
+        if arr.ndim != 2 or arr.shape[0] == 0:
+            return [[0.0, 0.0] for _ in range(n)]
+        idx = np.linspace(0, arr.shape[0] - 1, n).round().astype(int)
+        return arr[idx, :2].tolist()
+
     def _index_pdm_lite_route(self, route_dir: str, measurements_dir: str, pred_len: int = 5):
         """Indexes one PDM-Lite-format route (carla_garage log layout).
 
@@ -121,7 +145,8 @@ class WorldOnRailsDataset(Dataset):
                 parsed[i] = {
                     "speed": float(meas.get("speed", 0.0)),
                     "command": self._PDM_LITE_COMMAND_MAP.get(raw_command, 3),
-                    "ego_matrix": np.array(meas["ego_matrix"], dtype=np.float64)
+                    "ego_matrix": np.array(meas["ego_matrix"], dtype=np.float64),
+                    "route": self._subsample_route(meas.get("route"))
                 }
             except Exception:
                 parsed[i] = None
@@ -150,6 +175,7 @@ class WorldOnRailsDataset(Dataset):
                 "rgb_path": rgb_path,
                 "speed": cur["speed"],
                 "command": cur["command"],
+                "route": cur["route"],
                 "waypoints": waypoints
             })
 
@@ -207,9 +233,11 @@ class WorldOnRailsDataset(Dataset):
             command = int(np.random.randint(0, 4))
             target_q = np.random.randn(self.num_rails).astype(np.float32)
             target_waypoints = np.random.randn(5, 2).astype(np.float32) * 5.0
+            route = np.random.randn(self.route_points, 2).astype(np.float32)
         elif self.samples[idx].get("format") == "pdm_lite":
             rgb, speed, command, target_waypoints = self._load_pdm_lite_sample(self.samples[idx])
             target_q = np.zeros(self.num_rails, dtype=np.float32)
+            route = np.array(self.samples[idx]["route"], dtype=np.float32)
         else:
             item = self.samples[idx]
             rgb_path = item.get("rgb_path", os.path.join(item.get("route_dir", ""), "rgbs", f"{idx:05d}.jpg"))
@@ -219,6 +247,7 @@ class WorldOnRailsDataset(Dataset):
             command = int(item.get("command", item.get("cmd", 2)))
             target_q = np.array(item.get("q_values", np.zeros(self.num_rails)), dtype=np.float32)
             target_waypoints = np.array(item.get("waypoints", np.zeros((5, 2))), dtype=np.float32)
+            route = np.array(item.get("route", np.zeros((self.route_points, 2))), dtype=np.float32)
 
         # RGB stays uint8 HWC here: converting to float32 CHW in the worker would
         # quadruple both the CPU work and the bytes crossing PCIe (786KB vs 196KB per
@@ -241,6 +270,7 @@ class WorldOnRailsDataset(Dataset):
             "rgb": rgb_tensor,
             "speed": speed_tensor,
             "command": command_tensor,
+            "route": torch.as_tensor(route, dtype=torch.float32),
             "target_q": target_q_tensor,
             "target_waypoints": target_waypoints_tensor
         }
@@ -252,14 +282,16 @@ def create_wor_dataloader(
     num_workers: int = 4,
     is_train: bool = True,
     synthetic_samples: int = 0,
-    cache_decoded: bool = True
+    cache_decoded: bool = True,
+    route_points: int = 4
 ) -> DataLoader:
     """Creates a DataLoader for World on Rails training/validation."""
     dataset = WorldOnRailsDataset(
         data_dir=data_dir,
         is_train=is_train,
         synthetic_samples=synthetic_samples,
-        cache_decoded=cache_decoded
+        cache_decoded=cache_decoded,
+        route_points=route_points
     )
     return DataLoader(
         dataset,

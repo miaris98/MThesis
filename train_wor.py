@@ -42,6 +42,7 @@ def parse_args():
     parser.add_argument("--experiment_name", type=str, default="WoR_Offline_Training", help="MLflow experiment name")
     parser.add_argument("--use_mlflow", type=int, default=1, help="Enable MLflow tracking (1=True, 0=False)")
     parser.add_argument("--mlflow_port", type=int, default=10100, help="MLflow tracking server port")
+    parser.add_argument("--route_points", type=int, default=4, help="How many ego-frame route points to condition the policy on. PDM-Lite's command enum is LANEFOLLOW on every frame, so this is the policy's only navigation input - without it the model cannot tell a left turn from a right one and learns to drive straight. Higher values leak more of the answer (the full 20-point route correlates ~0.84 with the lateral target); use this to ablate that")
     parser.add_argument("--compile_model", type=int, default=0, help="Wrap the policy in torch.compile - trades a one-off compilation on the first epoch for faster steps afterwards, so it only pays off over a long run (1=True, 0=False)")
     parser.add_argument("--kill_stale", type=int, default=1, help="On startup, terminate SUSPENDED train_wor.py processes still pinning VRAM (what Ctrl+Z leaves behind). Running instances are reported but never killed (1=True, 0=False)")
     parser.add_argument("--auto_batch_size", type=int, default=0, help="Probe the largest batch size that fits in available VRAM instead of using --batch_size directly (1=True, 0=False)")
@@ -70,7 +71,8 @@ def main():
         # weights the real run is about to load.
         def _model_factory():
             return WorldOnRailsPolicy(backbone_name=args.backbone, pretrained=bool(args.pretrained),
-                                       freeze_backbone=bool(args.freeze_backbone))
+                                       freeze_backbone=bool(args.freeze_backbone),
+                                       route_points=args.route_points)
 
         def _optimizer_factory(m):
             return torch.optim.AdamW(m.parameters(), lr=args.lr_heads, weight_decay=1e-4)
@@ -80,12 +82,13 @@ def main():
                 "rgb": torch.rand(bs, 3, 256, 256, device=args.device),
                 "speed": torch.rand(bs, 1, device=args.device) * 30.0,
                 "command": torch.randint(0, 6, (bs,), device=args.device),
+                "route": torch.randn(bs, args.route_points, 2, device=args.device),
                 "target_q": torch.randn(bs, 9, device=args.device),
                 "target_waypoints": torch.randn(bs, 5, 2, device=args.device) * 5.0
             }
 
         def _loss_fn(model, batch):
-            out = model(batch["rgb"], batch["speed"], batch["command"])
+            out = model(batch["rgb"], batch["speed"], batch["command"], batch["route"])
             loss_q = F.mse_loss(out["selected_rail_q"], batch["target_q"])
             loss_wp_x = F.l1_loss(out["selected_waypoints"][..., 0], batch["target_waypoints"][..., 0])
             loss_wp_y = F.l1_loss(out["selected_waypoints"][..., 1], batch["target_waypoints"][..., 1])
@@ -115,7 +118,8 @@ def main():
         backbone_name=args.backbone,
         pretrained=bool(args.pretrained),
         freeze_backbone=bool(args.freeze_backbone),
-        weights_path=args.weights_path
+        weights_path=args.weights_path,
+        route_points=args.route_points
     )
 
     # 2. Initialize Trainer
@@ -131,6 +135,7 @@ def main():
         synthetic_samples=args.synthetic_samples,
         cache_decoded=bool(args.cache_decoded),
         compile_model=bool(args.compile_model),
+        route_points=args.route_points,
         wp_loss_weight=args.wp_loss_weight,
         q_loss_weight=args.q_loss_weight,
         lateral_loss_weight=args.lateral_loss_weight,

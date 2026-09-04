@@ -62,6 +62,7 @@ class WorldOnRailsTrainer:
         synthetic_samples: int = 0,
         cache_decoded: bool = True,
         compile_model: bool = False,
+        route_points: int = 4,
         experiment_name: str = "WoR_Offline_Training",
         use_mlflow: bool = True,
         mlflow_port: int = 10100
@@ -118,7 +119,8 @@ class WorldOnRailsTrainer:
             num_workers=num_workers,
             is_train=True,
             synthetic_samples=synthetic_samples,
-            cache_decoded=cache_decoded
+            cache_decoded=cache_decoded,
+            route_points=route_points
         )
         if len(self.train_loader.dataset) == 0 or getattr(self.train_loader.dataset, "is_synthetic", False):
             print(f"[Warning] Training on SYNTHETIC data - no real frames were indexed under {data_dir}.")
@@ -194,13 +196,14 @@ class WorldOnRailsTrainer:
             rgb = rgb.permute(0, 3, 1, 2).float().div_(255.0)
             speed = batch["speed"].to(self.device, non_blocking=True)
             command = batch["command"].to(self.device, non_blocking=True)
+            route = batch["route"].to(self.device, non_blocking=True)
             target_q = batch["target_q"].to(self.device, non_blocking=True)
             target_wp = batch["target_waypoints"].to(self.device, non_blocking=True)
 
             self.optimizer.zero_grad()
 
             with autocast(enabled=self.use_amp):
-                out = self.model(rgb, speed, command)
+                out = self.model(rgb, speed, command, route)
 
                 # 1. Q-value distillation loss (MSE on selected rail Q-values)
                 pred_q = out["selected_rail_q"]
