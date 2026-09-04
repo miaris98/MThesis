@@ -62,6 +62,28 @@ def load_wor_model(
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
         state_dict = checkpoint.get("state_dict", checkpoint.get("model", checkpoint))
 
+        # Training with a frozen backbone writes split checkpoints: the unchanging
+        # vision weights land once in a sibling frozen_backbone.pth and the per-epoch
+        # files carry only the trained heads. Reunite them here so callers still get a
+        # complete model from a single path.
+        if isinstance(checkpoint, dict) and checkpoint.get("partial"):
+            frozen_path = os.path.join(
+                os.path.dirname(os.path.abspath(checkpoint_path)),
+                checkpoint.get("frozen_ref", "frozen_backbone.pth")
+            )
+            if os.path.exists(frozen_path):
+                frozen = torch.load(frozen_path, map_location="cpu")
+                frozen_sd = frozen.get("model", frozen)
+                state_dict = {**frozen_sd, **state_dict}
+                print(f"✓ Merged {len(frozen_sd)} frozen backbone tensors from: {frozen_path}")
+            else:
+                # Not fatal: the backbone falls back to whatever the model was built
+                # with (ImageNet, or --weights_path). Loud, because that silently
+                # changes which perception stack the policy heads sit on.
+                print(f"[Warning] Checkpoint is partial but {frozen_path} is missing - "
+                      f"the vision backbone will keep its freshly initialized weights, "
+                      f"which likely does NOT match what these heads were trained on.")
+
         clean_dict = {}
         for k, v in state_dict.items():
             clean_k = k

@@ -7,6 +7,7 @@ PPO/SAC trainers' logging stack).
 """
 from typing import Dict, Optional, Tuple
 import os
+import threading
 import time
 import torch
 import torch.nn as nn
@@ -27,6 +28,22 @@ except ImportError:
     from torch.amp import GradScaler, autocast
 
 
+def _to_cpu(obj):
+    """Recursively copies tensors in a state dict to CPU.
+
+    Needed before handing anything to the background checkpoint writer: AdamW's
+    exp_avg/exp_avg_sq buffers are updated in place on every subsequent step, so
+    serializing the live GPU tensors would race with the next epoch.
+    """
+    if torch.is_tensor(obj):
+        return obj.detach().to("cpu", copy=True)
+    if isinstance(obj, dict):
+        return {k: _to_cpu(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_to_cpu(v) for v in obj)
+    return obj
+
+
 class WorldOnRailsTrainer:
     """
     Trainer for World on Rails Policy Distillation.
@@ -39,7 +56,7 @@ class WorldOnRailsTrainer:
         "data_wait_sec", "compute_sec",
         "total_loss", "q_loss", "wp_loss", "wp_ade_m", "wp_fde_m",
         "wp_lateral_error_m", "wp_longitudinal_error_m",
-        "lr_backbone", "lr_heads", "grad_norm", "is_best",
+        "lr_backbone", "lr_heads", "grad_norm", "is_best", "save_sec",
         "gpu_mem_used_mb", "gpu_mem_pct", "sys_cpu_pct", "sys_ram_used_gb"
     ]
 
@@ -162,6 +179,48 @@ class WorldOnRailsTrainer:
                     print("--> torch.compile enabled (first epoch includes one-off compilation).")
                 except Exception as e:
                     print(f"[Warning] torch.compile failed ({e}) - running uncompiled.")
+
+        # 3. Checkpoint layout. A frozen backbone is ~92% of the parameters and is
+        # byte-for-byte identical in every epoch, so writing it out each time (twice
+        # over, since "latest" and "best" both fire) costs far more wall time than the
+        # epoch itself. Write it exactly once as frozen_backbone.pth and keep the
+        # per-epoch checkpoints to the heads that actually change.
+        self._frozen_keys = frozenset(
+            k for k in self.model.state_dict() if k.startswith("encoder.")
+        ) if getattr(model.encoder, "freeze_backbone", False) else frozenset()
+        self._save_thread: Optional[threading.Thread] = None
+
+    def _state_dict_cpu(self, keys=None) -> Dict[str, torch.Tensor]:
+        """Snapshots (a subset of) the model weights to CPU so a background thread can
+        serialize them while the next epoch is already mutating the live tensors."""
+        sd = self.model.state_dict()
+        keys = sd.keys() if keys is None else keys
+        return {k: sd[k].detach().to("cpu", copy=True) for k in keys}
+
+    def _await_save(self):
+        """Blocks until the previous epoch's checkpoint write has finished."""
+        if self._save_thread is not None:
+            self._save_thread.join()
+            self._save_thread = None
+
+    def _save_async(self, payloads):
+        """Writes checkpoints off the training critical path.
+
+        Tensors are snapshotted to CPU by the caller *before* the thread starts, so
+        serialization can safely overlap the next epoch's parameter updates. Only one
+        write is ever in flight - a slow disk throttles to one save per epoch rather
+        than piling up threads.
+        """
+        self._await_save()
+
+        def _write():
+            for payload, path in payloads:
+                tmp = path + ".tmp"
+                torch.save(payload, tmp)
+                os.replace(tmp, path)  # atomic: a killed run never leaves a half-file
+
+        self._save_thread = threading.Thread(target=_write, daemon=False)
+        self._save_thread.start()
 
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         """Runs one full training epoch."""
@@ -299,10 +358,47 @@ class WorldOnRailsTrainer:
         scheduler = CosineAnnealingLR(self.optimizer, T_max=num_epochs, eta_min=1e-6)
         best_loss = float("inf")
 
+        # The frozen backbone never changes, so it ships once. Per-epoch checkpoints
+        # reference it by name and carry only the trained heads.
+        if self._frozen_keys:
+            frozen_path = os.path.join(self.save_dir, "frozen_backbone.pth")
+            torch.save({"model": self._state_dict_cpu(self._frozen_keys)}, frozen_path)
+            n_frozen, n_total = len(self._frozen_keys), len(self.model.state_dict())
+            print(f"--> Wrote frozen backbone once ({n_frozen}/{n_total} tensors) to {frozen_path};"
+                  f" per-epoch checkpoints carry only the {n_total - n_frozen} trained head tensors.")
+
         for epoch in range(1, num_epochs + 1):
             metrics = self.train_epoch(epoch)
             scheduler.step()
             is_best = metrics["total_loss"] < best_loss
+
+            # Checkpointing. One CPU snapshot of the trained heads is shared by every
+            # file written this epoch, and the serialization itself runs in a thread,
+            # so save_sec below measures only the snapshot - the disk write overlaps
+            # the next epoch.
+            save_start = time.time()
+            trainable = self._state_dict_cpu(
+                [k for k in self.model.state_dict() if k not in self._frozen_keys]
+            )
+            # dict(metrics): the writer thread pickles this while the main thread is
+            # still adding save_sec to the live dict below.
+            common = {"epoch": epoch, "model": trainable, "metrics": dict(metrics),
+                      "partial": bool(self._frozen_keys), "frozen_ref": "frozen_backbone.pth"}
+            payloads = [(dict(common), os.path.join(self.save_dir, "latest_model.pth"))]
+
+            if is_best:
+                best_loss = metrics["total_loss"]
+                payloads.append((dict(common), os.path.join(self.save_dir, "best_model.pth")))
+
+            # Optimizer state is only needed to resume, and for AdamW it is twice the
+            # size of the weights it tracks - so it rides along with the periodic
+            # snapshots rather than being rewritten every epoch.
+            if epoch % save_freq == 0 or epoch == num_epochs:
+                payloads[0][0]["optimizer"] = _to_cpu(self.optimizer.state_dict())
+                payloads.append((dict(common), os.path.join(self.save_dir, f"model_epoch_{epoch:03d}.pth")))
+
+            self._save_async(payloads)
+            metrics["save_sec"] = time.time() - save_start
 
             print(
                 f"[Epoch {epoch:03d}/{num_epochs:03d}] "
@@ -312,14 +408,15 @@ class WorldOnRailsTrainer:
                 f"ADE: {metrics['wp_ade_m']:.3f}m | FDE: {metrics['wp_fde_m']:.3f}m | "
                 f"Lat Err: {metrics['wp_lateral_error_m']:.3f}m | Lon Err: {metrics['wp_longitudinal_error_m']:.3f}m | "
                 f"Samples/s: {metrics['samples_per_sec']:.1f} | Time: {metrics['time']:.2f}s "
-                f"(data {metrics['data_wait_sec']:.1f}s / compute {metrics['compute_sec']:.1f}s)"
+                f"(data {metrics['data_wait_sec']:.1f}s / compute {metrics['compute_sec']:.1f}s"
+                f" / save {metrics['save_sec']:.2f}s){' ★ best' if is_best else ''}"
             )
 
             hw = HardwareMonitor.get_metrics()
             for tag in ("total_loss", "q_loss", "wp_loss", "wp_ade_m", "wp_fde_m",
                         "wp_lateral_error_m", "wp_longitudinal_error_m",
                         "grad_norm", "lr_backbone", "lr_heads", "samples_per_sec",
-                        "data_wait_sec", "compute_sec"):
+                        "data_wait_sec", "compute_sec", "save_sec"):
                 self.logger.add_scalar(f"wor/{tag}", metrics[tag], epoch)
 
             self.csv_logger.log_step({
@@ -329,6 +426,7 @@ class WorldOnRailsTrainer:
                 "samples_per_sec": round(metrics["samples_per_sec"], 1),
                 "data_wait_sec": round(metrics["data_wait_sec"], 2),
                 "compute_sec": round(metrics["compute_sec"], 2),
+                "save_sec": round(metrics["save_sec"], 2),
                 "total_loss": round(metrics["total_loss"], 5),
                 "q_loss": round(metrics["q_loss"], 5),
                 "wp_loss": round(metrics["wp_loss"], 5),
@@ -345,30 +443,7 @@ class WorldOnRailsTrainer:
             })
             self.csv_logger.flush()
 
-            # Save latest checkpoint
-            torch.save({
-                "epoch": epoch,
-                "model": self.model.state_dict(),
-                "optimizer": self.optimizer.state_dict(),
-                "metrics": metrics
-            }, os.path.join(self.save_dir, "latest_model.pth"))
-
-            # Save best checkpoint
-            if metrics["total_loss"] < best_loss:
-                best_loss = metrics["total_loss"]
-                torch.save({
-                    "epoch": epoch,
-                    "model": self.model.state_dict(),
-                    "metrics": metrics
-                }, os.path.join(self.save_dir, "best_model.pth"))
-                print(f"★ Saved new best model checkpoint (Loss: {best_loss:.4f})")
-
-            if epoch % save_freq == 0:
-                torch.save({
-                    "epoch": epoch,
-                    "model": self.model.state_dict(),
-                }, os.path.join(self.save_dir, f"model_epoch_{epoch:03d}.pth"))
-
+        self._await_save()
         self.csv_logger.close()
         if os.path.exists(self.csv_logger.filepath):
             self.logger.log_artifact(self.csv_logger.filepath)
