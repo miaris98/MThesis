@@ -87,6 +87,28 @@ def main():
         print(f"    their mean |lateral| : {np.abs(lat_final[turning]).mean():.3f}m")
         print(f"    their mean |longitudinal| : {np.abs(lon_final[turning]).mean():.3f}m")
 
+    # Per-command breakdown. The policy has a separate output slice per command
+    # (selected_waypoints = waypoints[batch, cmd_idx]), so LEFT samples only ever
+    # train the LEFT slice. That slice should therefore learn its own command's mean
+    # lateral offset almost for free - no vision required. If a command's samples
+    # have a large mean lateral yet the model still predicts ~0 for them, the command
+    # conditioning is not doing its job and that's a bug, not a data problem.
+    cmd_names = {0: "LEFT", 1: "RIGHT", 2: "STRAIGHT", 3: "LANEFOLLOW",
+                 4: "CHANGELANELEFT", 5: "CHANGELANERIGHT"}
+    cmds = np.array([s["command"] for s in ds.samples if s.get("format") == "pdm_lite"])
+    print("\n--- Per-command breakdown (each trains its own output slice) ---")
+    print(f"{'command':<18}{'count':>7}{'share':>8}{'mean lat':>11}{'mean |lat|':>12}"
+          f"{'MAE if predict 0':>19}")
+    for c in sorted(set(cmds.tolist())):
+        m = cmds == c
+        c_lat = lat[m]
+        print(f"{cmd_names.get(c, f'cmd{c}'):<18}{m.sum():>7}{m.mean() * 100:>7.1f}%"
+              f"{c_lat.mean():>+11.3f}{np.abs(c_lat).mean():>12.3f}"
+              f"{np.abs(c_lat).mean():>19.4f}")
+    print("\n    A command whose 'mean lat' is far from 0 is one the model could fit with")
+    print("    the command embedding alone. If every command's mean sits near 0, then the")
+    print("    turns cancel out within each command and only vision can disambiguate them.")
+
 
 if __name__ == "__main__":
     main()
