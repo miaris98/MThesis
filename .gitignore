@@ -5,3 +5,5 @@ metrics.csv
 eval_video.mp4
 training_telemetry.csv
 training_telemetry_n3.csv
+eval_video_100k.mp4
+ppo_carla_latest.pth
