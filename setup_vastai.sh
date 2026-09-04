@@ -263,6 +263,14 @@ snapshot_download(
 )
 print(f"Downloaded towns {towns} to {out_dir}")
 PYEOF
+    # snapshot_download only fetches the raw *.zip route archives - extract them so
+    # wor_dataset.py finds actual measurements/rgb folders instead of silently falling
+    # back to synthetic data.
+    echo -e "${YELLOW}--> Extracting downloaded PDM-Lite route archives...${NC}"
+    find "$WOR_DATASET_DIR" -name "*.zip" | while read -r zip_path; do
+        unzip -q -o "$zip_path" -d "$(dirname "$zip_path")" && rm -f "$zip_path"
+    done
+    echo -e "${GREEN}✓ PDM-Lite dataset extracted.${NC}"
 else
     echo -e "${YELLOW}--> PDM-Lite dataset already present or download disabled (WOR_DATASET_TOWNS='$WOR_DATASET_TOWNS'), skipping.${NC}"
 fi

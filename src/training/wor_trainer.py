@@ -2,12 +2,12 @@
 
 Trains the sensorimotor vision policy to predict optimal Q-values and waypoints
 using differential learning rates, PyTorch AMP (Automatic Mixed Precision),
-and telemetry tracking.
+and telemetry tracking (MLflow + TensorBoard + per-epoch CSV, matching the
+PPO/SAC trainers' logging stack).
 """
 from typing import Dict, Optional, Tuple
 import os
 import time
-import csv
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,6 +16,9 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from src.models.world_on_rails.wor_policy import WorldOnRailsPolicy
 from src.training.wor_dataset import create_wor_dataloader
+from src.logging.csv_logger import CSVTelemetryLogger
+from src.logging.experiment_logger import ExperimentLogger
+from src.logging.hardware_monitor import HardwareMonitor
 
 
 try:
@@ -28,6 +31,16 @@ class WorldOnRailsTrainer:
     """
     Trainer for World on Rails Policy Distillation.
     """
+
+    #: Per-epoch telemetry schema (mirrors the PPO/SAC trainers' CSV+MLflow+TensorBoard
+    #: stack so offline WoR runs are inspectable/comparable the same way).
+    TELEMETRY_FIELDS = [
+        "epoch", "num_batches", "wall_time_s", "epoch_time_sec", "samples_per_sec",
+        "total_loss", "q_loss", "wp_loss", "wp_ade_m", "wp_fde_m",
+        "lr_backbone", "lr_heads", "grad_norm", "is_best",
+        "gpu_mem_used_mb", "gpu_mem_pct", "sys_cpu_pct", "sys_ram_used_gb"
+    ]
+
     def __init__(
         self,
         model: WorldOnRailsPolicy,
@@ -43,7 +56,10 @@ class WorldOnRailsTrainer:
         use_amp: bool = True,
         wp_loss_weight: float = 1.0,
         q_loss_weight: float = 0.0,
-        synthetic_samples: int = 0
+        synthetic_samples: int = 0,
+        experiment_name: str = "WoR_Offline_Training",
+        use_mlflow: bool = True,
+        mlflow_port: int = 10100
     ):
         self.model = model.to(device)
         self.data_dir = data_dir
@@ -55,10 +71,25 @@ class WorldOnRailsTrainer:
         # Datasets without precomputed Q-values (e.g. PDM-Lite) leave target_q at
         # zero, so q_loss_weight defaults to 0 to avoid supervising toward zero.
         self.q_loss_weight = q_loss_weight
+        self.train_start_time = time.time()
 
         os.makedirs(save_dir, exist_ok=True)
-        self.telemetry_csv = os.path.join(save_dir, "wor_training_telemetry.csv")
-        self._init_csv()
+
+        # MLflow + TensorBoard (same unified logger the PPO/SAC trainers use).
+        self.logger = ExperimentLogger(
+            save_dir, checkpoint_dir=save_dir,
+            experiment_name=experiment_name, use_mlflow=use_mlflow, mlflow_port=mlflow_port
+        )
+        self.logger.log_params({
+            "data_dir": data_dir, "backbone": model.encoder.backbone_name,
+            "lr_backbone": lr_backbone, "lr_heads": lr_heads, "batch_size": batch_size,
+            "wp_loss_weight": wp_loss_weight, "q_loss_weight": q_loss_weight
+        })
+
+        # Per-epoch CSV telemetry.
+        self.csv_logger = CSVTelemetryLogger(
+            os.path.join(save_dir, "wor_training_telemetry.csv"), fieldnames=self.TELEMETRY_FIELDS
+        )
 
         # 1. DataLoaders
         self.train_loader = create_wor_dataloader(
@@ -68,6 +99,8 @@ class WorldOnRailsTrainer:
             is_train=True,
             synthetic_samples=synthetic_samples
         )
+        if len(self.train_loader.dataset) == 0 or getattr(self.train_loader.dataset, "is_synthetic", False):
+            print(f"[Warning] Training on SYNTHETIC data - no real frames were indexed under {data_dir}.")
 
         # 2. Parameter Groups with Differential Learning Rate
         backbone_params = []
@@ -91,23 +124,17 @@ class WorldOnRailsTrainer:
         except Exception:
             self.scaler = GradScaler()
 
-    def _init_csv(self):
-        """Initializes CSV telemetry header."""
-        if not os.path.exists(self.telemetry_csv):
-            with open(self.telemetry_csv, "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    "epoch", "step", "total_loss", "q_loss", "wp_loss",
-                    "lr_backbone", "lr_heads", "time_sec"
-                ])
-
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         """Runs one full training epoch."""
         self.model.train()
         total_loss_accum = 0.0
         q_loss_accum = 0.0
         wp_loss_accum = 0.0
+        ade_accum = 0.0
+        fde_accum = 0.0
+        grad_norm_accum = 0.0
         num_batches = 0
+        num_samples = 0
         start_time = time.time()
 
         for batch_idx, batch in enumerate(self.train_loader):
@@ -121,7 +148,7 @@ class WorldOnRailsTrainer:
 
             with autocast(enabled=self.use_amp):
                 out = self.model(rgb, speed, command)
-                
+
                 # 1. Q-value distillation loss (MSE on selected rail Q-values)
                 pred_q = out["selected_rail_q"]
                 loss_q = F.mse_loss(pred_q, target_q)
@@ -135,40 +162,54 @@ class WorldOnRailsTrainer:
             if self.use_amp:
                 self.scaler.scale(total_loss).backward()
                 self.scaler.unscale_(self.optimizer)
-                nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
+                grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
                 total_loss.backward()
-                nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
+                grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
                 self.optimizer.step()
+
+            # Average/Final Displacement Error (meters) - interpretable trajectory-quality
+            # metrics on top of the raw L1 waypoint loss.
+            with torch.no_grad():
+                per_point_dist = torch.norm(pred_wp.float() - target_wp.float(), dim=-1)  # (B, 5)
+                ade = per_point_dist.mean().item()
+                fde = per_point_dist[:, -1].mean().item()
 
             total_loss_accum += total_loss.item()
             q_loss_accum += loss_q.item()
             wp_loss_accum += loss_wp.item()
+            ade_accum += ade
+            fde_accum += fde
+            grad_norm_accum += float(grad_norm)
             num_batches += 1
+            num_samples += rgb.shape[0]
 
         avg_loss = total_loss_accum / max(1, num_batches)
         avg_q_loss = q_loss_accum / max(1, num_batches)
         avg_wp_loss = wp_loss_accum / max(1, num_batches)
+        avg_ade = ade_accum / max(1, num_batches)
+        avg_fde = fde_accum / max(1, num_batches)
+        avg_grad_norm = grad_norm_accum / max(1, num_batches)
         elapsed = time.time() - start_time
+        samples_per_sec = num_samples / max(1e-6, elapsed)
 
         lr_b = self.optimizer.param_groups[0]["lr"]
         lr_h = self.optimizer.param_groups[1]["lr"]
 
-        # Log telemetry to CSV
-        with open(self.telemetry_csv, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                epoch, num_batches, f"{avg_loss:.5f}", f"{avg_q_loss:.5f}",
-                f"{avg_wp_loss:.5f}", f"{lr_b:.2e}", f"{lr_h:.2e}", f"{elapsed:.2f}"
-            ])
-
         return {
             "epoch": epoch,
+            "num_batches": num_batches,
             "total_loss": avg_loss,
             "q_loss": avg_q_loss,
             "wp_loss": avg_wp_loss,
+            "wp_ade_m": avg_ade,
+            "wp_fde_m": avg_fde,
+            "grad_norm": avg_grad_norm,
+            "lr_backbone": lr_b,
+            "lr_heads": lr_h,
+            "samples_per_sec": samples_per_sec,
             "time": elapsed
         }
 
@@ -181,14 +222,40 @@ class WorldOnRailsTrainer:
         for epoch in range(1, num_epochs + 1):
             metrics = self.train_epoch(epoch)
             scheduler.step()
+            is_best = metrics["total_loss"] < best_loss
 
             print(
                 f"[Epoch {epoch:03d}/{num_epochs:03d}] "
                 f"Total Loss: {metrics['total_loss']:.4f} | "
                 f"Q Loss: {metrics['q_loss']:.4f} | "
                 f"WP Loss: {metrics['wp_loss']:.4f} | "
-                f"Time: {metrics['time']:.2f}s"
+                f"ADE: {metrics['wp_ade_m']:.3f}m | FDE: {metrics['wp_fde_m']:.3f}m | "
+                f"Samples/s: {metrics['samples_per_sec']:.1f} | Time: {metrics['time']:.2f}s"
             )
+
+            hw = HardwareMonitor.get_metrics()
+            for tag in ("total_loss", "q_loss", "wp_loss", "wp_ade_m", "wp_fde_m",
+                        "grad_norm", "lr_backbone", "lr_heads", "samples_per_sec"):
+                self.logger.add_scalar(f"wor/{tag}", metrics[tag], epoch)
+
+            self.csv_logger.log_step({
+                "epoch": epoch, "num_batches": metrics["num_batches"],
+                "wall_time_s": round(time.time() - self.train_start_time, 2),
+                "epoch_time_sec": round(metrics["time"], 2),
+                "samples_per_sec": round(metrics["samples_per_sec"], 1),
+                "total_loss": round(metrics["total_loss"], 5),
+                "q_loss": round(metrics["q_loss"], 5),
+                "wp_loss": round(metrics["wp_loss"], 5),
+                "wp_ade_m": round(metrics["wp_ade_m"], 4),
+                "wp_fde_m": round(metrics["wp_fde_m"], 4),
+                "lr_backbone": f"{metrics['lr_backbone']:.2e}",
+                "lr_heads": f"{metrics['lr_heads']:.2e}",
+                "grad_norm": round(metrics["grad_norm"], 4),
+                "is_best": is_best,
+                "gpu_mem_used_mb": hw["gpu_mem_used_mb"], "gpu_mem_pct": hw["gpu_mem_pct"],
+                "sys_cpu_pct": hw["sys_cpu_pct"], "sys_ram_used_gb": hw["sys_ram_used_gb"]
+            })
+            self.csv_logger.flush()
 
             # Save latest checkpoint
             torch.save({
@@ -214,4 +281,8 @@ class WorldOnRailsTrainer:
                     "model": self.model.state_dict(),
                 }, os.path.join(self.save_dir, f"model_epoch_{epoch:03d}.pth"))
 
+        self.csv_logger.close()
+        if os.path.exists(self.csv_logger.filepath):
+            self.logger.log_artifact(self.csv_logger.filepath)
+        self.logger.close()
         print(f"✓ World on Rails Training completed! Checkpoints saved to: {self.save_dir}")
