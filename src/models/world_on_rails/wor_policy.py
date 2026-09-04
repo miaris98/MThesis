@@ -23,11 +23,15 @@ class PretrainedVisionEncoder(nn.Module):
         self,
         backbone_name: str = "resnet34",
         pretrained: bool = True,
-        freeze_backbone: bool = False,
+        freeze_backbone: bool = True,
         weights_path: Optional[str] = None
     ):
         super().__init__()
         self.backbone_name = backbone_name.lower()
+        # Frozen by default: this project trains the driving policy on top of a
+        # pretrained perception stack and treats training the vision model itself as
+        # out of scope (the PPO/SAC path in config/training_config.py already
+        # defaults the same way).
         self.freeze_backbone = freeze_backbone
 
         if "resnet18" in self.backbone_name:
@@ -63,6 +67,18 @@ class PretrainedVisionEncoder(nn.Module):
         if self.freeze_backbone:
             for param in self.parameters():
                 param.requires_grad = False
+
+    def train(self, mode: bool = True):
+        """Keeps a frozen backbone in eval mode.
+
+        requires_grad=False and torch.no_grad() stop the *weights* changing, but
+        BatchNorm still updates running_mean/running_var on every forward pass while
+        in train mode. A "frozen" backbone would therefore keep drifting its
+        normalization statistics toward the training data - which both contradicts
+        using a fixed pretrained perception stack and makes its features
+        non-deterministic across epochs.
+        """
+        return super().train(False) if self.freeze_backbone else super().train(mode)
 
     def _load_custom_weights(self, path: str):
         """Loads domain-specific CARLA weights (e.g., LAV, TransFuser++, WoR, TCP, Roach, or PCLA)."""
@@ -310,7 +326,7 @@ class WorldOnRailsPolicy(nn.Module):
         self,
         backbone_name: str = "resnet34",
         pretrained: bool = True,
-        freeze_backbone: bool = False,
+        freeze_backbone: bool = True,
         weights_path: Optional[str] = None,
         num_commands: int = 6,
         state_dim: int = 64,

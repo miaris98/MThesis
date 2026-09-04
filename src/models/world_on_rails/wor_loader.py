@@ -45,7 +45,7 @@ def load_wor_model(
     checkpoint_path: Optional[str] = None,
     backbone_name: str = "resnet34",
     pretrained_backbone: bool = True,
-    freeze_backbone: bool = False,
+    freeze_backbone: bool = True,
     device: Union[str, torch.device] = "cpu"
 ) -> WorldOnRailsPolicy:
     """

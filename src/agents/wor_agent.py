@@ -34,7 +34,7 @@ class WorldOnRailsAgent:
             checkpoint_path=checkpoint_path if checkpoint_path else None,
             backbone_name=backbone_name,
             pretrained_backbone=pretrained_backbone,
-            freeze_backbone=False,
+            freeze_backbone=True,
             device=self.device
         )
         self.net.eval()

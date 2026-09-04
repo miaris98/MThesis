@@ -21,7 +21,7 @@ def parse_args():
     parser.add_argument("--save_dir", type=str, default="checkpoints/wor_resnet34", help="Directory to save model checkpoints")
     parser.add_argument("--backbone", type=str, default="resnet34", choices=["resnet18", "resnet34", "resnet50"], help="Vision backbone architecture")
     parser.add_argument("--pretrained", type=int, default=1, help="Use ImageNet pretrained weights (1=True, 0=False)")
-    parser.add_argument("--freeze_backbone", type=int, default=0, help="Freeze backbone weights during training (1=True, 0=False)")
+    parser.add_argument("--freeze_backbone", type=int, default=1, help="Freeze the pretrained vision backbone so only the policy heads train (1=True, 0=False). On by default: training the vision model is out of scope here, and fine-tuning it is also the bulk of the compute cost")
     parser.add_argument("--epochs", type=int, default=50, help="Total number of training epochs")
     parser.add_argument("--batch_size", type=int, default=32, help="Mini-batch size")
     parser.add_argument("--lr_backbone", type=float, default=1e-4, help="Learning rate for vision backbone")
@@ -102,6 +102,7 @@ def main():
     print("=" * 65)
     print(" 🚗 World on Rails (WoR) Distillation Training Pipeline")
     print(f" Backbone:        {args.backbone.upper()} (Pretrained: {bool(args.pretrained)})")
+    print(f" Training:        {'policy heads only - vision backbone FROZEN' if args.freeze_backbone else 'policy heads + vision backbone (fine-tuning vision!)'}")
     if args.weights_path:
         print(f" CARLA Weights:   {args.weights_path}")
     print(f" Dataset Path:    {args.data_dir}")
