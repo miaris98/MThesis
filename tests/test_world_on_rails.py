@@ -156,7 +156,7 @@ def test_wor_agent():
         "command": 2
     }
     control = agent.run_step(dummy_input)
-    assert "steer" in control or hasattr(control, "steer")
+    assert hasattr(control, "steer") or (isinstance(control, dict) and "steer" in control)
     agent.destroy()
 
 
