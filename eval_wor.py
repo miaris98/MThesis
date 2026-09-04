@@ -157,8 +157,15 @@ def run_carla_evaluation(args, agent: WorldOnRailsAgent):
         cam_agent = world.spawn_actor(cam_agent_bp, cam_agent_transform, attach_to=ego_vehicle)
         actor_list.append(cam_agent)
 
+        # CARLA raw_data is BGRA (see src/envs/camera_sensor.py) - reorder to true RGB
+        # via the [2, 1, 0] channel swap, not a plain [:, :, :3] alpha-drop, which would
+        # silently leave the image in BGR order. The policy was trained on PIL-loaded
+        # (true RGB) frames, so feeding it BGR here means every eval run sees the world
+        # through red/blue-swapped colors relative to training - sky-as-red, cars painted
+        # in complementary colors, etc. - which is very plausibly part of why steering
+        # looked so degenerate.
         agent_rgb_buffer = {"data": None}
-        cam_agent.listen(lambda img: agent_rgb_buffer.update({"data": np.frombuffer(img.raw_data, dtype=np.uint8).reshape((256, 256, 4))[:, :, :3]}))
+        cam_agent.listen(lambda img: agent_rgb_buffer.update({"data": np.frombuffer(img.raw_data, dtype=np.uint8).reshape((256, 256, 4))[:, :, [2, 1, 0]]}))
 
         # 3. Spawn Third-Person Video Recording Camera (1280x720)
         cam_video_bp = blueprint_lib.find("sensor.camera.rgb")
@@ -169,6 +176,9 @@ def run_carla_evaluation(args, agent: WorldOnRailsAgent):
         cam_video = world.spawn_actor(cam_video_bp, cam_video_transform, attach_to=ego_vehicle)
         actor_list.append(cam_video)
 
+        # Same BGRA raw buffer as the agent camera - keep it in native BGR order here
+        # (drop alpha only) since that's exactly what cv2.VideoWriter/cv2.imshow expect,
+        # instead of converting to RGB and then back to BGR for no reason.
         video_frame_buffer = {"data": None}
         cam_video.listen(lambda img: video_frame_buffer.update({"data": np.frombuffer(img.raw_data, dtype=np.uint8).reshape((720, 1280, 4))[:, :, :3]}))
 
@@ -206,11 +216,13 @@ def run_carla_evaluation(args, agent: WorldOnRailsAgent):
             control = agent.run_step(sensor_data)
             ego_vehicle.apply_control(control)
 
-            # Record Video Frame with HUD
+            # Record Video Frame with HUD. video_frame_buffer is already BGR (raw CARLA
+            # buffer with alpha dropped) - it was previously run through
+            # cv2.COLOR_RGB2BGR as if it were RGB, which re-swaps an already-BGR frame's
+            # R/B channels and produced the reverted colors seen in the recorded video.
             if video_writer is not None and video_frame_buffer["data"] is not None:
-                bgr_frame = cv2.cvtColor(video_frame_buffer["data"], cv2.COLOR_RGB2BGR)
                 hud_frame = draw_eval_hud(
-                    frame=bgr_frame,
+                    frame=video_frame_buffer["data"].copy(),
                     speed_kmh=speed_kmh,
                     steer=control.steer,
                     throttle=control.throttle,

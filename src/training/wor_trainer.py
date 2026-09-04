@@ -37,6 +37,7 @@ class WorldOnRailsTrainer:
     TELEMETRY_FIELDS = [
         "epoch", "num_batches", "wall_time_s", "epoch_time_sec", "samples_per_sec",
         "total_loss", "q_loss", "wp_loss", "wp_ade_m", "wp_fde_m",
+        "wp_lateral_error_m", "wp_longitudinal_error_m",
         "lr_backbone", "lr_heads", "grad_norm", "is_best",
         "gpu_mem_used_mb", "gpu_mem_pct", "sys_cpu_pct", "sys_ram_used_gb"
     ]
@@ -56,6 +57,7 @@ class WorldOnRailsTrainer:
         use_amp: bool = True,
         wp_loss_weight: float = 1.0,
         q_loss_weight: float = 0.0,
+        lateral_loss_weight: float = 3.0,
         synthetic_samples: int = 0,
         experiment_name: str = "WoR_Offline_Training",
         use_mlflow: bool = True,
@@ -71,6 +73,15 @@ class WorldOnRailsTrainer:
         # Datasets without precomputed Q-values (e.g. PDM-Lite) leave target_q at
         # zero, so q_loss_weight defaults to 0 to avoid supervising toward zero.
         self.q_loss_weight = q_loss_weight
+        # Waypoints are (x_forward, y_lateral). Forward displacement is typically
+        # several meters per waypoint while lateral offset - the ONLY component the
+        # PID controller's steering comes from (PIDController.control_from_waypoints
+        # reads aim_point[1]) - is often under a meter. A flat L1 loss over both axes
+        # lets the large-magnitude x term dominate the gradient, so the network can
+        # minimize loss mostly by nailing forward distance while barely fitting y -
+        # producing a policy that accelerates fine but steers close to zero. Weight
+        # the lateral term up to correct for that scale mismatch.
+        self.lateral_loss_weight = lateral_loss_weight
         self.train_start_time = time.time()
 
         os.makedirs(save_dir, exist_ok=True)
@@ -83,7 +94,8 @@ class WorldOnRailsTrainer:
         self.logger.log_params({
             "data_dir": data_dir, "backbone": model.encoder.backbone_name,
             "lr_backbone": lr_backbone, "lr_heads": lr_heads, "batch_size": batch_size,
-            "wp_loss_weight": wp_loss_weight, "q_loss_weight": q_loss_weight
+            "wp_loss_weight": wp_loss_weight, "q_loss_weight": q_loss_weight,
+            "lateral_loss_weight": lateral_loss_weight
         })
 
         # Per-epoch CSV telemetry.
@@ -132,6 +144,8 @@ class WorldOnRailsTrainer:
         wp_loss_accum = 0.0
         ade_accum = 0.0
         fde_accum = 0.0
+        lateral_err_accum = 0.0
+        longitudinal_err_accum = 0.0
         grad_norm_accum = 0.0
         num_batches = 0
         num_samples = 0
@@ -153,9 +167,13 @@ class WorldOnRailsTrainer:
                 pred_q = out["selected_rail_q"]
                 loss_q = F.mse_loss(pred_q, target_q)
 
-                # 2. Waypoint imitation loss
+                # 2. Waypoint imitation loss, split per-axis so the lateral (steering)
+                # component can be weighted independently of the larger-magnitude
+                # forward component (see lateral_loss_weight in __init__).
                 pred_wp = out["selected_waypoints"]
-                loss_wp = F.l1_loss(pred_wp, target_wp)
+                loss_wp_x = F.l1_loss(pred_wp[..., 0], target_wp[..., 0])
+                loss_wp_y = F.l1_loss(pred_wp[..., 1], target_wp[..., 1])
+                loss_wp = loss_wp_x + self.lateral_loss_weight * loss_wp_y
 
                 total_loss = self.q_loss_weight * loss_q + self.wp_loss_weight * loss_wp
 
@@ -171,17 +189,24 @@ class WorldOnRailsTrainer:
                 self.optimizer.step()
 
             # Average/Final Displacement Error (meters) - interpretable trajectory-quality
-            # metrics on top of the raw L1 waypoint loss.
+            # metrics on top of the raw L1 waypoint loss. Also track the unweighted
+            # per-axis error directly so a lateral/longitudinal imbalance (the
+            # near-zero-steering failure mode) is visible in telemetry even though the
+            # loss above weights the axes unevenly on purpose.
             with torch.no_grad():
                 per_point_dist = torch.norm(pred_wp.float() - target_wp.float(), dim=-1)  # (B, 5)
                 ade = per_point_dist.mean().item()
                 fde = per_point_dist[:, -1].mean().item()
+                lateral_err = loss_wp_y.item()
+                longitudinal_err = loss_wp_x.item()
 
             total_loss_accum += total_loss.item()
             q_loss_accum += loss_q.item()
             wp_loss_accum += loss_wp.item()
             ade_accum += ade
             fde_accum += fde
+            lateral_err_accum += lateral_err
+            longitudinal_err_accum += longitudinal_err
             grad_norm_accum += float(grad_norm)
             num_batches += 1
             num_samples += rgb.shape[0]
@@ -191,6 +216,8 @@ class WorldOnRailsTrainer:
         avg_wp_loss = wp_loss_accum / max(1, num_batches)
         avg_ade = ade_accum / max(1, num_batches)
         avg_fde = fde_accum / max(1, num_batches)
+        avg_lateral_err = lateral_err_accum / max(1, num_batches)
+        avg_longitudinal_err = longitudinal_err_accum / max(1, num_batches)
         avg_grad_norm = grad_norm_accum / max(1, num_batches)
         elapsed = time.time() - start_time
         samples_per_sec = num_samples / max(1e-6, elapsed)
@@ -206,6 +233,8 @@ class WorldOnRailsTrainer:
             "wp_loss": avg_wp_loss,
             "wp_ade_m": avg_ade,
             "wp_fde_m": avg_fde,
+            "wp_lateral_error_m": avg_lateral_err,
+            "wp_longitudinal_error_m": avg_longitudinal_err,
             "grad_norm": avg_grad_norm,
             "lr_backbone": lr_b,
             "lr_heads": lr_h,
@@ -230,11 +259,13 @@ class WorldOnRailsTrainer:
                 f"Q Loss: {metrics['q_loss']:.4f} | "
                 f"WP Loss: {metrics['wp_loss']:.4f} | "
                 f"ADE: {metrics['wp_ade_m']:.3f}m | FDE: {metrics['wp_fde_m']:.3f}m | "
+                f"Lat Err: {metrics['wp_lateral_error_m']:.3f}m | Lon Err: {metrics['wp_longitudinal_error_m']:.3f}m | "
                 f"Samples/s: {metrics['samples_per_sec']:.1f} | Time: {metrics['time']:.2f}s"
             )
 
             hw = HardwareMonitor.get_metrics()
             for tag in ("total_loss", "q_loss", "wp_loss", "wp_ade_m", "wp_fde_m",
+                        "wp_lateral_error_m", "wp_longitudinal_error_m",
                         "grad_norm", "lr_backbone", "lr_heads", "samples_per_sec"):
                 self.logger.add_scalar(f"wor/{tag}", metrics[tag], epoch)
 
@@ -248,6 +279,8 @@ class WorldOnRailsTrainer:
                 "wp_loss": round(metrics["wp_loss"], 5),
                 "wp_ade_m": round(metrics["wp_ade_m"], 4),
                 "wp_fde_m": round(metrics["wp_fde_m"], 4),
+                "wp_lateral_error_m": round(metrics["wp_lateral_error_m"], 4),
+                "wp_longitudinal_error_m": round(metrics["wp_longitudinal_error_m"], 4),
                 "lr_backbone": f"{metrics['lr_backbone']:.2e}",
                 "lr_heads": f"{metrics['lr_heads']:.2e}",
                 "grad_norm": round(metrics["grad_norm"], 4),

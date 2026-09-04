@@ -30,6 +30,7 @@ def parse_args():
     parser.add_argument("--synthetic_samples", type=int, default=0, help="Generate synthetic samples if real dataset is not yet downloaded")
     parser.add_argument("--wp_loss_weight", type=float, default=1.0, help="Weight of the waypoint imitation loss")
     parser.add_argument("--q_loss_weight", type=float, default=0.0, help="Weight of the Q-value distillation loss (0 for datasets without precomputed Q-values, e.g. PDM-Lite)")
+    parser.add_argument("--lateral_loss_weight", type=float, default=3.0, help="Extra weight on the lateral (y) waypoint error relative to longitudinal (x) - lateral offset is what the PID controller steers from, but is typically much smaller in magnitude than forward distance, so a flat L1 loss underfits it")
     parser.add_argument("--experiment_name", type=str, default="WoR_Offline_Training", help="MLflow experiment name")
     parser.add_argument("--use_mlflow", type=int, default=1, help="Enable MLflow tracking (1=True, 0=False)")
     parser.add_argument("--mlflow_port", type=int, default=10100, help="MLflow tracking server port")
@@ -75,6 +76,7 @@ def main():
         synthetic_samples=args.synthetic_samples,
         wp_loss_weight=args.wp_loss_weight,
         q_loss_weight=args.q_loss_weight,
+        lateral_loss_weight=args.lateral_loss_weight,
         experiment_name=args.experiment_name,
         use_mlflow=bool(args.use_mlflow),
         mlflow_port=args.mlflow_port
