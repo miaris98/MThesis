@@ -82,12 +82,21 @@ class WorldOnRailsDataset(Dataset):
             self.is_synthetic = True
             self.samples = list(range(20))
 
+    # carla_garage's raw command ids -> the WoR policy's 6-way command space
+    # (LEFT, RIGHT, STRAIGHT, LANEFOLLOW, CHANGELANELEFT, CHANGELANERIGHT).
+    _PDM_LITE_COMMAND_MAP = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
+
     def _index_pdm_lite_route(self, route_dir: str, measurements_dir: str, pred_len: int = 5):
         """Indexes one PDM-Lite-format route (carla_garage log layout).
 
-        Each frame's waypoint target is derived from the ego poses of the next
-        `pred_len` frames, transformed into the current frame's coordinate system
-        (same approach as PlanT's dataset.py). No Q-values are available here.
+        Every measurement file is gzip-decompressed exactly once, here, rather than
+        from __getitem__ - which would otherwise re-open up to `pred_len + 1` gzip
+        files per sample on every single epoch (the dominant cost of an offline
+        training run - see the "36/218 vision backbone parameters matched" episode
+        with GPU util stuck at 17%). Waypoint targets are derived from the ego poses
+        of the next `pred_len` frames, transformed into the current frame's
+        coordinate system (same approach as PlanT's dataset.py). No Q-values are
+        available here.
         """
         meas_files = sorted(glob.glob(os.path.join(measurements_dir, "*.json.gz")))
         rgb_dir = os.path.join(route_dir, "rgb")
@@ -95,30 +104,53 @@ class WorldOnRailsDataset(Dataset):
         if num_frames < pred_len + 6:
             return
 
+        parsed = [None] * num_frames
+        for i, meas_path in enumerate(meas_files):
+            try:
+                with gzip.open(meas_path, "rt") as f:
+                    meas = json.load(f)
+                raw_command = int(meas.get("command", meas.get("next_command", 4)))
+                parsed[i] = {
+                    "speed": float(meas.get("speed", 0.0)),
+                    "command": self._PDM_LITE_COMMAND_MAP.get(raw_command, 3),
+                    "ego_matrix": np.array(meas["ego_matrix"], dtype=np.float64)
+                }
+            except Exception:
+                parsed[i] = None
+
         for i in range(5, num_frames - pred_len - 2):
+            cur = parsed[i]
+            if cur is None:
+                continue
             frame_id = os.path.basename(meas_files[i]).split(".")[0]
             rgb_path = os.path.join(rgb_dir, f"{frame_id}.jpg")
             if not os.path.exists(rgb_path):
                 rgb_path = os.path.join(rgb_dir, f"{frame_id}.png")
 
+            ref_inv = np.linalg.inv(cur["ego_matrix"])
+            waypoints = []
+            for j in range(i + 1, i + 1 + pred_len):
+                fut = parsed[j] if j < num_frames else None
+                if fut is not None:
+                    rel = ref_inv @ fut["ego_matrix"]
+                    waypoints.append([float(rel[0, 3]), float(rel[1, 3])])
+                else:
+                    waypoints.append(waypoints[-1] if waypoints else [0.0, 0.0])
+
             self.samples.append({
                 "format": "pdm_lite",
                 "rgb_path": rgb_path,
-                "meas_path": meas_files[i],
-                "future_meas_paths": meas_files[i + 1:i + 1 + pred_len],
-                "route_dir": route_dir
+                "speed": cur["speed"],
+                "command": cur["command"],
+                "waypoints": waypoints
             })
 
     def __len__(self) -> int:
         return len(self.samples)
 
-    # carla_garage's raw command ids -> the WoR policy's 6-way command space
-    # (LEFT, RIGHT, STRAIGHT, LANEFOLLOW, CHANGELANELEFT, CHANGELANERIGHT).
-    _PDM_LITE_COMMAND_MAP = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
-
     def _load_pdm_lite_sample(self, item: Dict) -> Tuple[np.ndarray, float, int, np.ndarray]:
-        """Loads one PDM-Lite-format frame: RGB image, speed, command, and
-        waypoints derived from the ego-frame-relative future trajectory."""
+        """Loads one PDM-Lite-format frame's RGB image. speed/command/waypoints were
+        already parsed once at index time in `_index_pdm_lite_route`."""
         rgb_path = item["rgb_path"]
         if os.path.exists(rgb_path):
             img = Image.open(rgb_path).convert("RGB")
@@ -127,30 +159,7 @@ class WorldOnRailsDataset(Dataset):
         else:
             rgb = np.zeros((self.img_size[0], self.img_size[1], 3), dtype=np.uint8)
 
-        with gzip.open(item["meas_path"], "rt") as f:
-            meas = json.load(f)
-        speed = float(meas.get("speed", 0.0))
-        raw_command = int(meas.get("command", meas.get("next_command", 4)))
-        command = self._PDM_LITE_COMMAND_MAP.get(raw_command, 3)
-
-        ref_matrix = np.array(meas["ego_matrix"], dtype=np.float64)
-        ref_inv = np.linalg.inv(ref_matrix)
-
-        waypoints = []
-        for fut_path in item["future_meas_paths"]:
-            try:
-                with gzip.open(fut_path, "rt") as f:
-                    fut_meas = json.load(f)
-                fut_matrix = np.array(fut_meas["ego_matrix"], dtype=np.float64)
-                rel = ref_inv @ fut_matrix
-                waypoints.append([rel[0, 3], rel[1, 3]])
-            except Exception:
-                waypoints.append([0.0, 0.0])
-
-        while len(waypoints) < 5:
-            waypoints.append(waypoints[-1] if waypoints else [0.0, 0.0])
-
-        return rgb, speed, command, np.array(waypoints[:5], dtype=np.float32)
+        return rgb, item["speed"], item["command"], np.array(item["waypoints"], dtype=np.float32)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         if self.is_synthetic:
@@ -219,5 +228,7 @@ def create_wor_dataloader(
         shuffle=is_train,
         num_workers=num_workers,
         pin_memory=True,
-        drop_last=is_train
+        drop_last=is_train,
+        persistent_workers=num_workers > 0,
+        prefetch_factor=4 if num_workers > 0 else None
     )
