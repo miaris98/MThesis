@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from src.models.world_on_rails import WorldOnRailsPolicy
 from src.training.wor_trainer import WorldOnRailsTrainer
 from src.training.auto_batch_size import find_max_batch_size
+from src.training.gpu_cleanup import cleanup_stale_processes
 
 
 def parse_args():
@@ -41,6 +42,7 @@ def parse_args():
     parser.add_argument("--experiment_name", type=str, default="WoR_Offline_Training", help="MLflow experiment name")
     parser.add_argument("--use_mlflow", type=int, default=1, help="Enable MLflow tracking (1=True, 0=False)")
     parser.add_argument("--mlflow_port", type=int, default=10100, help="MLflow tracking server port")
+    parser.add_argument("--kill_stale", type=int, default=1, help="On startup, terminate SUSPENDED train_wor.py processes still pinning VRAM (what Ctrl+Z leaves behind). Running instances are reported but never killed (1=True, 0=False)")
     parser.add_argument("--auto_batch_size", type=int, default=0, help="Probe the largest batch size that fits in available VRAM instead of using --batch_size directly (1=True, 0=False)")
     parser.add_argument("--vram_headroom_mb", type=float, default=2048.0, help="VRAM (MB) to leave unused when --auto_batch_size is set, so other processes sharing the GPU (e.g. an online PPO/SAC trainer) still have room")
     parser.add_argument("--auto_batch_size_max", type=int, default=512, help="Upper bound the auto batch-size search won't exceed")
@@ -54,6 +56,12 @@ def main():
         # Every batch is a fixed 256x256 image, so cuDNN can safely autotune the
         # fastest conv kernels for that exact shape instead of using generic ones.
         torch.backends.cudnn.benchmark = True
+
+    # Reclaim VRAM from a previous run left suspended by Ctrl+Z before measuring
+    # what's free - otherwise the batch-size probe budgets against a GPU that a
+    # dormant, abandoned process is still holding most of.
+    if args.kill_stale and args.device == "cuda":
+        cleanup_stale_processes("train_wor.py")
 
     if args.auto_batch_size:
         # Probe with a throwaway model/optimizer of the same architecture - never the
