@@ -42,6 +42,7 @@ def parse_args():
     parser.add_argument("--experiment_name", type=str, default="WoR_Offline_Training", help="MLflow experiment name")
     parser.add_argument("--use_mlflow", type=int, default=1, help="Enable MLflow tracking (1=True, 0=False)")
     parser.add_argument("--mlflow_port", type=int, default=10100, help="MLflow tracking server port")
+    parser.add_argument("--compile_model", type=int, default=0, help="Wrap the policy in torch.compile - trades a one-off compilation on the first epoch for faster steps afterwards, so it only pays off over a long run (1=True, 0=False)")
     parser.add_argument("--kill_stale", type=int, default=1, help="On startup, terminate SUSPENDED train_wor.py processes still pinning VRAM (what Ctrl+Z leaves behind). Running instances are reported but never killed (1=True, 0=False)")
     parser.add_argument("--auto_batch_size", type=int, default=0, help="Probe the largest batch size that fits in available VRAM instead of using --batch_size directly (1=True, 0=False)")
     parser.add_argument("--vram_headroom_mb", type=float, default=2048.0, help="VRAM (MB) to leave unused when --auto_batch_size is set, so other processes sharing the GPU (e.g. an online PPO/SAC trainer) still have room")
@@ -128,6 +129,7 @@ def main():
         device=args.device,
         synthetic_samples=args.synthetic_samples,
         cache_decoded=bool(args.cache_decoded),
+        compile_model=bool(args.compile_model),
         wp_loss_weight=args.wp_loss_weight,
         q_loss_weight=args.q_loss_weight,
         lateral_loss_weight=args.lateral_loss_weight,

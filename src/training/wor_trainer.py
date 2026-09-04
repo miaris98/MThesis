@@ -61,6 +61,7 @@ class WorldOnRailsTrainer:
         lateral_loss_weight: float = 3.0,
         synthetic_samples: int = 0,
         cache_decoded: bool = True,
+        compile_model: bool = False,
         experiment_name: str = "WoR_Offline_Training",
         use_mlflow: bool = True,
         mlflow_port: int = 10100
@@ -143,6 +144,22 @@ class WorldOnRailsTrainer:
             self.scaler = GradScaler(enabled=self.use_amp)
         except Exception:
             self.scaler = GradScaler()
+
+        # Compiled last, after the optimizer already holds references to the real
+        # parameters - torch.compile wraps the module without copying params, so the
+        # optimizer stays correct. Checkpoints stay loadable too: compiling adds an
+        # "_orig_mod." prefix to state_dict keys, which wor_loader already strips.
+        # Costs a one-off graph compile on the first epoch, so it only pays off over
+        # a long run.
+        if compile_model:
+            if not hasattr(torch, "compile"):
+                print("[Warning] torch.compile unavailable on this torch version - running uncompiled.")
+            else:
+                try:
+                    self.model = torch.compile(self.model)
+                    print("--> torch.compile enabled (first epoch includes one-off compilation).")
+                except Exception as e:
+                    print(f"[Warning] torch.compile failed ({e}) - running uncompiled.")
 
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         """Runs one full training epoch."""
