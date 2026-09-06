@@ -9,3 +9,12 @@ eval_video_100k.mp4
 ppo_carla_latest.pth
 wor_eval_video.mp4
 wor_training_telemetry.csv
+wor_training_telemetry_qwen100.csv
+challenges/
+
+# Experiment output. Normally lands on the external disk (E:\MThesis_EXP) or
+# /workspace on vast.ai, but src/config/paths.py falls back to ./experiments
+# when neither is present - never commit any of it.
+experiments/
+mlruns/
+runs/

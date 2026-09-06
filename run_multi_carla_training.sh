@@ -247,8 +247,11 @@ else
     fuser -k ${MLFLOW_PORT}/tcp 2>/dev/null || true
     sleep 1
     echo "--> 📊 Launching persistent MLflow UI server on port ${MLFLOW_PORT}..."
+    # MLflow >= 3.16 refuses a filesystem backend store unless this is set, and
+    # /workspace/MThesis/mlruns is exactly that. Without it the server dies on
+    # startup after any mlflow upgrade. Same opt-out as ExperimentLogger.
     tmux new-session -d -s mlflow_server \
-        "$PYTHON_BIN -m mlflow ui --host 0.0.0.0 --port ${MLFLOW_PORT} --backend-store-uri /workspace/MThesis/mlruns > /workspace/mlflow_server.log 2>&1"
+        "MLFLOW_ALLOW_FILE_STORE=true $PYTHON_BIN -m mlflow ui --host 0.0.0.0 --port ${MLFLOW_PORT} --backend-store-uri /workspace/MThesis/mlruns > /workspace/mlflow_server.log 2>&1"
     
     # Wait until MLflow server is responding
     for i in $(seq 1 15); do

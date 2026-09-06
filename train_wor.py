@@ -9,6 +9,7 @@ import os
 import torch
 import torch.nn.functional as F
 
+from src.config import paths
 from src.models.world_on_rails import WorldOnRailsPolicy, QwenWorldOnRailsPolicy
 from src.training.wor_trainer import WorldOnRailsTrainer
 from src.training.auto_batch_size import find_max_batch_size
@@ -18,7 +19,8 @@ from src.training.gpu_cleanup import cleanup_stale_processes
 def parse_args():
     parser = argparse.ArgumentParser(description="Train World on Rails (WoR) Sensorimotor Driving Policy")
     parser.add_argument("--data_dir", type=str, default="dataset/wor_trajectories", help="Path to offline CARLA dataset logs")
-    parser.add_argument("--save_dir", type=str, default="checkpoints/wor_resnet34", help="Directory to save model checkpoints")
+    parser.add_argument("--save_dir", type=str, default=str(paths.checkpoints_dir() / "wor_resnet34"),
+                        help="Directory to save model checkpoints, TensorBoard events and telemetry. Defaults under the machine's experiment root (external disk locally, /workspace on vast.ai) - see src/config/paths.py")
     parser.add_argument("--backbone", type=str, default="resnet34", choices=["resnet18", "resnet34", "resnet50"], help="Vision backbone architecture")
     parser.add_argument("--policy_arch", type=str, default="cnn", choices=["cnn", "qwen100m", "qwen500m", "qwen900m"], help="Decision-head architecture on top of the frozen vision encoder: 'cnn' is the original WoR SpatialQHead (conv+MLP); 'qwen*' swaps it for a Qwen-style self-attention transformer trunk (see qwen_wor_policy.py), sized 100M/500M/900M params, still predicting waypoints for the same PIDController")
     parser.add_argument("--pretrained", type=int, default=1, help="Use ImageNet pretrained weights (1=True, 0=False)")

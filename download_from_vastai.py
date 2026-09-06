@@ -18,6 +18,9 @@ import argparse
 import subprocess
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from src.config import paths
+
 
 DEFAULT_REMOTE_PATHS = {
     "telemetry": "/workspace/runs/training_telemetry.csv",
@@ -73,7 +76,9 @@ def main():
     parser.add_argument("--ssh-cmd", type=str, help="Full SSH command string from Vast.ai console (e.g. 'ssh -p 12345 root@ssh5.vast.ai')")
     parser.add_argument("-p", "--port", type=str, help="SSH Port (e.g. 12345)")
     parser.add_argument("-H", "--host", type=str, help="SSH Host or user@host (e.g. root@ssh5.vast.ai)")
-    parser.add_argument("--dest", type=str, default=str(Path(__file__).parent.resolve()), help="Local destination directory (default: repo root)")
+    parser.add_argument("--dest", type=str, default=str(paths.exp_root()),
+                        help="Local destination directory (default: the experiment root - the external "
+                             "disk when it is mounted; see src/config/paths.py)")
     parser.add_argument("--telemetry-only", action="store_true", help="Download only training_telemetry.csv")
     parser.add_argument("--checkpoints-only", action="store_true", help="Download only checkpoint weights & state")
     parser.add_argument("--video-only", action="store_true", help="Download only evaluation video")

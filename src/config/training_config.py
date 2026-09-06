@@ -1,8 +1,10 @@
 """Training configuration dataclasses and command-line argument parser."""
 import os
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List
+
+from src.config import paths
 
 
 @dataclass
@@ -53,8 +55,8 @@ class TrainingConfig:
     early_stopping_window: int = 10
     target_reward: Optional[float] = None
 
-    log_dir: str = "/workspace/runs"
-    checkpoint_dir: str = "/workspace/checkpoints"
+    log_dir: str = field(default_factory=lambda: str(paths.runs_dir()))
+    checkpoint_dir: str = field(default_factory=lambda: str(paths.checkpoints_dir()))
     resume: bool = False
     
     num_vehicles: int = 3
@@ -128,8 +130,8 @@ class TrainingConfig:
         parser.add_argument("--early-stopping-window", type=int, default=10, help="Window size for moving average reward")
         parser.add_argument("--target-reward", type=float, default=None, help="Target reward threshold for immediate success stop")
 
-        parser.add_argument("--log-dir", type=str, default="/workspace/runs")
-        parser.add_argument("--checkpoint-dir", type=str, default="/workspace/checkpoints")
+        parser.add_argument("--log-dir", type=str, default=str(paths.runs_dir()))
+        parser.add_argument("--checkpoint-dir", type=str, default=str(paths.checkpoints_dir()))
         parser.add_argument("--resume", action="store_true", default=False)
         parser.add_argument("--num-vehicles", type=int, default=3)
         parser.add_argument("--num-walkers", type=int, default=10)

@@ -3,10 +3,17 @@ param (
     [string]$SshCmd = "",
     [string]$Port = "",
     [string]$HostName = "",
+    [string]$Dest = $env:MTHESIS_EXP_ROOT,
     [switch]$TelemetryOnly,
     [switch]$CheckpointsOnly,
     [switch]$All
 )
+
+# Match the Python tooling: artifacts belong on the external disk, not in the repo.
+# Falls back to the repo root when the disk is not mounted. See src/config/paths.py.
+if (-not $Dest -or $Dest -eq "") {
+    if (Test-Path "E:\") { $Dest = "E:\MThesis_EXP" } else { $Dest = $PSScriptRoot }
+}
 
 Write-Host "==============================================================" -ForegroundColor Cyan
 Write-Host "   📥 Vast.ai -> Local PC Artifact Downloader (PowerShell)    " -ForegroundColor Cyan
@@ -28,8 +35,8 @@ if (-not $Port -or -not $HostName) {
     exit 1
 }
 
-$destRuns = Join-Path $PSScriptRoot "runs"
-$destCheckpoints = Join-Path $PSScriptRoot "checkpoints"
+$destRuns = Join-Path $Dest "runs"
+$destCheckpoints = Join-Path $Dest "checkpoints"
 New-Item -ItemType Directory -Force -Path $destRuns | Out-Null
 New-Item -ItemType Directory -Force -Path $destCheckpoints | Out-Null
 
@@ -50,4 +57,4 @@ if ($CheckpointsOnly -or $All -or (-not $TelemetryOnly)) {
     scp -P $Port "${HostName}:/workspace/checkpoints/train_state.json" "$destCheckpoints\train_state.json"
 }
 
-Write-Host "`n✓ Finished downloading to $PSScriptRoot!" -ForegroundColor Cyan
+Write-Host "`n✓ Finished downloading to $Dest!" -ForegroundColor Cyan

@@ -22,6 +22,8 @@ except Exception:
 from typing import Optional, Any
 from torch.utils.tensorboard import SummaryWriter
 
+from src.config import paths
+
 
 class ExperimentLogger:
     """
@@ -46,17 +48,35 @@ class ExperimentLogger:
         
         if use_mlflow:
             try:
+                # MLflow >= 3.16 puts the filesystem tracking backend in maintenance
+                # mode and raises unless this opt-out is set. Every store this project
+                # uses is a file store (the external disk locally, /workspace/MThesis
+                # /mlruns on the instance), so opt in explicitly rather than silently
+                # losing all tracking the next time mlflow is upgraded. Set before the
+                # import so the spawned UI subprocess inherits it too.
+                os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
                 import mlflow
 
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 port_in_use = (sock.connect_ex(('127.0.0.1', mlflow_port)) == 0)
                 sock.close()
 
+                # One resolved store for the whole stack: /workspace/MThesis/mlruns on
+                # vast.ai, the external disk on this PC (see src/config/paths.py).
+                # Previously the auto-launched UI was pointed at a path derived from
+                # log_dir while the client fell through to ./mlruns in the CWD, so the
+                # dashboard served an empty store. Both now use store_dir.
+                store_dir = paths.mlruns_dir()
+                store_dir.mkdir(parents=True, exist_ok=True)
+                self.store_dir = store_dir
+                store_uri = paths.path_to_uri(store_dir)
+
                 if not port_in_use:
                     print(f"--> Auto-launching MLflow UI tracking server on port {mlflow_port}...")
+                    print(f"    Backend store: {store_dir}")
                     subprocess.Popen(
                         [sys.executable, "-m", "mlflow", "ui", "--host", "0.0.0.0", "--port", str(mlflow_port),
-                         "--backend-store-uri", os.path.join(os.path.dirname(os.path.abspath(log_dir)), "mlruns")],
+                         "--backend-store-uri", store_uri],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                         start_new_session=True
@@ -64,8 +84,13 @@ class ExperimentLogger:
                     time.sleep(2)
 
                 self.mlflow = mlflow
+                # An already-running server owns its own backend store, so talk to it
+                # over HTTP; otherwise write the file store directly, which keeps
+                # logging alive even if the UI process dies mid-run.
                 if port_in_use:
                     self.mlflow.set_tracking_uri(f"http://127.0.0.1:{mlflow_port}")
+                else:
+                    self.mlflow.set_tracking_uri(store_uri)
                 self.mlflow.set_experiment(experiment_name)
 
                 saved_run_id = None
@@ -116,6 +141,7 @@ class ExperimentLogger:
                     print(f"  👉 \033[1;32mlink to mlflow :     {self.cf_url}\033[0m")
                 else:
                     print(f"✓ MLflow Tracking Active | Experiment: '{experiment_name}' | Run ID: {self.run_id} (Port {mlflow_port})")
+                    print(f"  📁 Store: {getattr(self, 'store_dir', '?')}")
             except Exception as e:
                 print(f"--> MLflow import/init note ({e}). Logging to TensorBoard at {log_dir}")
                 self.use_mlflow = False
