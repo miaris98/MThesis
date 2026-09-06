@@ -179,6 +179,17 @@ fi
 # Install nvitop globally if pip exists
 pip install nvitop 2>/dev/null || true
 
+# Newer conda (24.x+) refuses to touch the default channels non-interactively until
+# their Terms of Service are accepted, aborting `conda create` below with
+# CondaToSNonInteractiveError - and since this script runs under `set -e`, that
+# silently skips every remaining step (5-7: repo deps, CARLA server launch, etc.)
+# without the failure looking related to conda at all. Accept up front so a fresh
+# host doesn't need a manual fixup.
+if command -v conda &>/dev/null; then
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main 2>/dev/null || true
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r 2>/dev/null || true
+fi
+
 if conda env list 2>/dev/null | grep -q "carla_py38"; then
     echo -e "${GREEN}✓ Conda environment 'carla_py38' already exists.${NC}"
 else
