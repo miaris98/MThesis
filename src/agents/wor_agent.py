@@ -21,11 +21,13 @@ class WorldOnRailsAgent:
         model_type: str = "wor_nc",
         backbone_name: str = "resnet34",
         pretrained_backbone: bool = True,
-        device: str = "cuda" if torch.cuda.is_available() else "cpu"
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        policy_arch: str = "cnn",
+        route_points: int = 4
     ):
         self.device = device
         self.model_type = model_type
-        
+
         # Load or download pretrained weights
         if checkpoint_path is None:
             checkpoint_path = download_pretrained_weights(model_type=model_type)
@@ -35,7 +37,9 @@ class WorldOnRailsAgent:
             backbone_name=backbone_name,
             pretrained_backbone=pretrained_backbone,
             freeze_backbone=True,
-            device=self.device
+            device=self.device,
+            policy_arch=policy_arch,
+            route_points=route_points
         )
         self.net.eval()
         self.step_counter = 0

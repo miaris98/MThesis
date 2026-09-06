@@ -5,6 +5,7 @@ import torch
 
 from src.models.world_on_rails import (
     WorldOnRailsPolicy,
+    QwenWorldOnRailsPolicy,
     WorldModel,
     RailsDynamicProgramming,
     PIDController,
@@ -50,6 +51,69 @@ def test_wor_policy_forward_and_act():
     assert -1.0 <= steer <= 1.0
     assert 0.0 <= throttle <= 1.0
     assert 0.0 <= brake <= 1.0
+
+
+def test_qwen_wor_policy_forward_and_act():
+    """Tests QwenWorldOnRailsPolicy (Qwen transformer decision head, offline WoR
+    variant) forward pass, act(), and that its trunk lands in the ~100M param range,
+    same as the PPO-side QwenDecisionTransformer at the same model_size."""
+    policy = QwenWorldOnRailsPolicy(
+        backbone_name="resnet18",
+        pretrained=False,
+        freeze_backbone=False,
+        model_size="100m"
+    )
+    policy.eval()
+
+    trunk_params = sum(p.numel() for p in policy.trunk.parameters())
+    assert 90_000_000 < trunk_params < 120_000_000
+
+    B = 2
+    dummy_rgb = torch.randn(B, 3, 256, 256)
+    dummy_speed = torch.tensor([[10.0], [20.0]])
+    dummy_cmd = torch.tensor([1, 2])
+    dummy_route = torch.randn(B, 4, 2)
+
+    out = policy(dummy_rgb, dummy_speed, dummy_cmd, dummy_route)
+
+    assert "rail_q" in out
+    assert "waypoints" in out
+    assert "selected_waypoints" in out
+    assert out["rail_q"].shape == (B, 6, 9)
+    assert out["waypoints"].shape == (B, 6, 5, 2)
+    assert out["selected_waypoints"].shape == (B, 5, 2)
+
+    steer, throttle, brake = policy.act(
+        rgb=np.zeros((256, 256, 3), dtype=np.uint8),
+        speed=15.0,
+        command=2,
+        device="cpu",
+        route=np.zeros((4, 2), dtype=np.float32)
+    )
+    assert -1.0 <= steer <= 1.0
+    assert 0.0 <= throttle <= 1.0
+    assert 0.0 <= brake <= 1.0
+
+
+def test_qwen_wor_dataset_and_trainer(tmp_path):
+    """Confirms QwenWorldOnRailsPolicy is a drop-in for WorldOnRailsTrainer - same
+    forward(rgb, speed, command, route) -> dict contract as the CNN-headed policy,
+    so the offline distillation pipeline trains it with zero trainer changes."""
+    policy = QwenWorldOnRailsPolicy(backbone_name="resnet18", pretrained=False, model_size="100m")
+    trainer = WorldOnRailsTrainer(
+        model=policy,
+        data_dir=str(tmp_path / "fake_data"),
+        save_dir=str(tmp_path / "checkpoints"),
+        batch_size=4,
+        num_workers=0,
+        device="cpu",
+        synthetic_samples=8
+    )
+
+    metrics = trainer.train_epoch(epoch=1)
+    assert "total_loss" in metrics
+    assert "wp_loss" in metrics
+    assert metrics["total_loss"] > 0
 
 
 def test_carla_pretrained_backbone_loading(tmp_path):

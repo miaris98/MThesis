@@ -9,7 +9,7 @@ import os
 import torch
 import torch.nn.functional as F
 
-from src.models.world_on_rails import WorldOnRailsPolicy
+from src.models.world_on_rails import WorldOnRailsPolicy, QwenWorldOnRailsPolicy
 from src.training.wor_trainer import WorldOnRailsTrainer
 from src.training.auto_batch_size import find_max_batch_size
 from src.training.gpu_cleanup import cleanup_stale_processes
@@ -20,6 +20,7 @@ def parse_args():
     parser.add_argument("--data_dir", type=str, default="dataset/wor_trajectories", help="Path to offline CARLA dataset logs")
     parser.add_argument("--save_dir", type=str, default="checkpoints/wor_resnet34", help="Directory to save model checkpoints")
     parser.add_argument("--backbone", type=str, default="resnet34", choices=["resnet18", "resnet34", "resnet50"], help="Vision backbone architecture")
+    parser.add_argument("--policy_arch", type=str, default="cnn", choices=["cnn", "qwen100m", "qwen500m", "qwen900m"], help="Decision-head architecture on top of the frozen vision encoder: 'cnn' is the original WoR SpatialQHead (conv+MLP); 'qwen*' swaps it for a Qwen-style self-attention transformer trunk (see qwen_wor_policy.py), sized 100M/500M/900M params, still predicting waypoints for the same PIDController")
     parser.add_argument("--pretrained", type=int, default=1, help="Use ImageNet pretrained weights (1=True, 0=False)")
     parser.add_argument("--freeze_backbone", type=int, default=1, help="Freeze the pretrained vision backbone so only the policy heads train (1=True, 0=False). On by default: training the vision model is out of scope here, and fine-tuning it is also the bulk of the compute cost")
     parser.add_argument("--epochs", type=int, default=50, help="Total number of training epochs")
@@ -70,9 +71,14 @@ def main():
         # real one - so a few synthetic gradient steps here don't perturb the pretrained
         # weights the real run is about to load.
         def _model_factory():
-            return WorldOnRailsPolicy(backbone_name=args.backbone, pretrained=bool(args.pretrained),
-                                       freeze_backbone=bool(args.freeze_backbone),
-                                       route_points=args.route_points)
+            if args.policy_arch == "cnn":
+                return WorldOnRailsPolicy(backbone_name=args.backbone, pretrained=bool(args.pretrained),
+                                           freeze_backbone=bool(args.freeze_backbone),
+                                           route_points=args.route_points)
+            return QwenWorldOnRailsPolicy(backbone_name=args.backbone, pretrained=bool(args.pretrained),
+                                           freeze_backbone=bool(args.freeze_backbone),
+                                           route_points=args.route_points,
+                                           model_size=args.policy_arch.replace("qwen", ""))
 
         def _optimizer_factory(m):
             return torch.optim.AdamW(m.parameters(), lr=args.lr_heads, weight_decay=1e-4)
@@ -104,6 +110,7 @@ def main():
 
     print("=" * 65)
     print(" 🚗 World on Rails (WoR) Distillation Training Pipeline")
+    print(f" Policy Head:     {args.policy_arch.upper()}")
     print(f" Backbone:        {args.backbone.upper()} (Pretrained: {bool(args.pretrained)})")
     print(f" Training:        {'policy heads only - vision backbone FROZEN' if args.freeze_backbone else 'policy heads + vision backbone (fine-tuning vision!)'}")
     if args.weights_path:
@@ -114,13 +121,23 @@ def main():
     print("=" * 65)
 
     # 1. Initialize World on Rails Policy Network
-    policy = WorldOnRailsPolicy(
-        backbone_name=args.backbone,
-        pretrained=bool(args.pretrained),
-        freeze_backbone=bool(args.freeze_backbone),
-        weights_path=args.weights_path,
-        route_points=args.route_points
-    )
+    if args.policy_arch == "cnn":
+        policy = WorldOnRailsPolicy(
+            backbone_name=args.backbone,
+            pretrained=bool(args.pretrained),
+            freeze_backbone=bool(args.freeze_backbone),
+            weights_path=args.weights_path,
+            route_points=args.route_points
+        )
+    else:
+        policy = QwenWorldOnRailsPolicy(
+            backbone_name=args.backbone,
+            pretrained=bool(args.pretrained),
+            freeze_backbone=bool(args.freeze_backbone),
+            weights_path=args.weights_path,
+            route_points=args.route_points,
+            model_size=args.policy_arch.replace("qwen", "")
+        )
 
     # 2. Initialize Trainer
     trainer = WorldOnRailsTrainer(

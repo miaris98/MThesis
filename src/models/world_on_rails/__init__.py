@@ -5,6 +5,10 @@ from src.models.world_on_rails.wor_policy import (
     SpatialQHead,
     PIDController
 )
+from src.models.world_on_rails.qwen_wor_policy import (
+    QwenWorldOnRailsPolicy,
+    QwenWaypointTransformer
+)
 from src.models.world_on_rails.world_model import (
     WorldModel,
     RailsDynamicProgramming
@@ -19,6 +23,8 @@ __all__ = [
     "PretrainedVisionEncoder",
     "SpatialQHead",
     "PIDController",
+    "QwenWorldOnRailsPolicy",
+    "QwenWaypointTransformer",
     "WorldModel",
     "RailsDynamicProgramming",
     "load_wor_model",

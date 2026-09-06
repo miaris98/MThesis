@@ -93,7 +93,14 @@ class PretrainedVisionEncoder(nn.Module):
         prefixes = [
             "image_encoder.", "encoder.image_encoder.", "encoder.backbone.", "encoder.",
             "backbone.", "perception.", "bev_planner.", "rgb_encoder.", "camera_encoder.",
-            "bev_encoder.", "model.", "net.", "policy.encoder."
+            "bev_encoder.", "model.", "net.", "policy.encoder.",
+            # The original WoR paper's own CameraModel (pcla_agents/wor/rails/models/
+            # main_model.py) names its ResNet34 backbone "backbone_wide" - its
+            # checkpoints are otherwise a plain torchvision-style ResNet, so this
+            # prefix alone is enough for a near-full match (unlike RegNet-backboned
+            # sources like TransFuser++/garage_2, which can only ever partially match
+            # regardless of prefix stripping since the layers themselves differ).
+            "backbone_wide.", "image_model.backbone_wide."
         ]
 
         filtered = {}

@@ -13,6 +13,7 @@ import sys
 import time
 import glob
 import subprocess
+from typing import Optional
 import numpy as np
 import cv2
 import torch
@@ -57,12 +58,16 @@ WOR_ROUTE_LOOKAHEAD = 20
 # policy toward a turn it was never asked to make at this point in the route.
 WOR_LANEFOLLOW_COMMAND = 3
 
+# Display names for the same 0-indexed command space, purely for the HUD.
+WOR_COMMAND_NAMES = ["LEFT", "RIGHT", "STRAIGHT", "LANEFOLLOW", "CHANGE LANE LEFT", "CHANGE LANE RIGHT"]
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate World on Rails Agent and Record Video in CARLA")
     parser.add_argument("--checkpoint", type=str, default="/workspace/checkpoints/wor_10k/best_model.pth", help="Path to custom model checkpoint (.pth)")
     parser.add_argument("--model_type", type=str, default="wor_nc", choices=["wor_nc", "wor_lb"], help="Pretrained PCLA model variant")
     parser.add_argument("--backbone", type=str, default="resnet34", help="Backbone architecture (resnet18/34/50)")
+    parser.add_argument("--policy_arch", type=str, default="cnn", choices=["cnn", "qwen100m", "qwen500m", "qwen900m"], help="Decision-head architecture the checkpoint was trained with - must match train_wor.py's --policy_arch for this checkpoint")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="CARLA host IP")
     parser.add_argument("--port", type=int, default=2000, help="CARLA world port")
     parser.add_argument("--town", type=str, default="Town01", help="CARLA map/town")
@@ -76,22 +81,45 @@ def parse_args():
     return parser.parse_args()
 
 
-def draw_eval_hud(frame: np.ndarray, speed_kmh: float, steer: float, throttle: float, brake: float, step: int, max_steps: int) -> np.ndarray:
-    """Draws telemetry HUD overlay on evaluation video frames."""
+def draw_eval_hud(
+    frame: np.ndarray,
+    speed_kmh: float,
+    target_speed_kmh: float,
+    steer: float,
+    throttle: float,
+    brake: float,
+    step: int,
+    max_steps: int,
+    command_name: str,
+    route_progress_pct: Optional[float],
+    collisions: int,
+    elapsed_s: float
+) -> np.ndarray:
+    """Draws telemetry + policy-control HUD overlay on evaluation video frames."""
     h, w, _ = frame.shape
     overlay = frame.copy()
 
-    # Semi-transparent top and bottom banner
-    cv2.rectangle(overlay, (0, 0), (w, 55), (20, 20, 20), -1)
+    # Semi-transparent top and bottom banners (top banner taller to fit the second row)
+    cv2.rectangle(overlay, (0, 0), (w, 80), (20, 20, 20), -1)
     cv2.rectangle(overlay, (0, h - 50), (w, h), (20, 20, 20), -1)
     alpha = 0.65
     frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
 
-    # Telemetry text
-    title_text = f"World on Rails (WoR) Evaluation | Step: {step:04d}/{max_steps:04d}"
-    cv2.putText(frame, title_text, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 255), 2, cv2.LINE_AA)
+    # Row 1: run identity + progress
+    title_text = f"World on Rails (WoR) Evaluation | Step: {step:04d}/{max_steps:04d} | t={elapsed_s:5.1f}s"
+    cv2.putText(frame, title_text, (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
 
-    speed_text = f"Speed: {speed_kmh:4.1f} km/h"
+    progress_text = f"Route: {route_progress_pct:5.1f}%" if route_progress_pct is not None else "Route: n/a"
+    col_color = (0, 60, 255) if collisions > 0 else (200, 200, 200)
+    status_text = f"{progress_text}  |  Collisions: {collisions}"
+    cv2.putText(frame, status_text, (20, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.65, col_color, 2, cv2.LINE_AA)
+
+    # Row 2: high-level navigation command driving the policy this step
+    cmd_text = f"Command: {command_name}"
+    cv2.putText(frame, cmd_text, (w - 380, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 200, 0), 2, cv2.LINE_AA)
+
+    # Bottom banner: speed (actual vs. target) + policy control outputs
+    speed_text = f"Speed: {speed_kmh:4.1f} / {target_speed_kmh:4.1f} km/h"
     cv2.putText(frame, speed_text, (20, h - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
 
     # Control telemetry gauges
@@ -320,14 +348,20 @@ def run_carla_evaluation(args, agent: WorldOnRailsAgent):
             # cv2.COLOR_RGB2BGR as if it were RGB, which re-swaps an already-BGR frame's
             # R/B channels and produced the reverted colors seen in the recorded video.
             if video_writer is not None and video_frame_buffer["data"] is not None:
+                progress_pct = (100.0 * route_idx / (len(route_locations) - 1)) if len(route_locations) > 1 else None
                 hud_frame = draw_eval_hud(
                     frame=video_frame_buffer["data"].copy(),
                     speed_kmh=speed_kmh,
+                    target_speed_kmh=agent.net.controller.target_speed,
                     steer=control.steer,
                     throttle=control.throttle,
                     brake=control.brake,
                     step=step,
-                    max_steps=args.max_steps
+                    max_steps=args.max_steps,
+                    command_name=WOR_COMMAND_NAMES[WOR_LANEFOLLOW_COMMAND],
+                    route_progress_pct=progress_pct,
+                    collisions=collision_log["count"],
+                    elapsed_s=step / 20.0
                 )
                 video_writer.write(hud_frame)
 
@@ -395,7 +429,8 @@ def main():
         checkpoint_path=args.checkpoint if os.path.exists(args.checkpoint) else None,
         model_type=args.model_type,
         backbone_name=args.backbone,
-        device=args.device
+        device=args.device,
+        policy_arch=args.policy_arch
     )
 
     # 2. Try connecting to CARLA

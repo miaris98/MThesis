@@ -5,23 +5,33 @@ and custom trained checkpoints with automatic state dict prefix stripping.
 """
 from typing import Optional, Union
 import os
-import urllib.request
 import torch
 import torch.nn as nn
 
 from src.models.world_on_rails.wor_policy import WorldOnRailsPolicy
+from src.models.world_on_rails.qwen_wor_policy import QwenWorldOnRailsPolicy
 
 
-# Public URLs or Zenodo links for pre-trained weights
-PCLA_WEIGHT_URLS = {
-    "wor_nc": "https://github.com/MasoudJTehrani/PCLA/releases/download/v1.0/wor_nc.pth",
-    "wor_lb": "https://github.com/MasoudJTehrani/PCLA/releases/download/v1.0/wor_lb.pth"
+# The actual pretrained-WoR checkpoints live in the MasoudJTehrani/PCLA HuggingFace
+# *dataset* repo (not a GitHub release - that v1.0/wor_nc.pth URL 404s, there was never
+# a release with per-agent files). agents.json in the vendored Carla-utils/PCLA points
+# "wor"/"nc" and "wor"/"lb" at these exact filenames.
+PCLA_HF_REPO = "MasoudJTehrani/PCLA"
+PCLA_HF_WEIGHT_FILES = {
+    "wor_nc": "wor_pretrained/nocrash_weights/main_model_16.th",
+    "wor_lb": "wor_pretrained/leaderboard_weights/main_model_10.th"
 }
 
 
 def download_pretrained_weights(model_type: str = "wor_nc", save_dir: str = "weights") -> str:
     """
-    Downloads pretrained WoR weights if not present locally.
+    Downloads the pretrained WoR checkpoint if not present locally. This is the
+    original WoR paper's own CARLA-domain-pretrained CameraModel (backbone_wide =
+    resnet34), fetched from its HuggingFace dataset repo - use this instead of
+    chasing other CARLA-pretrained sources, since its ResNet34 is layer-for-layer
+    the same torchvision-style architecture PretrainedVisionEncoder uses (unlike
+    e.g. TransFuser++/garage_2 checkpoints, which use a RegNet backbone and can
+    only ever partially key-match this project's ResNet encoder).
     """
     os.makedirs(save_dir, exist_ok=True)
     target_path = os.path.join(save_dir, f"{model_type}.pth")
@@ -29,16 +39,35 @@ def download_pretrained_weights(model_type: str = "wor_nc", save_dir: str = "wei
         print(f"✓ Found existing pretrained weights at: {target_path}")
         return target_path
 
-    url = PCLA_WEIGHT_URLS.get(model_type)
-    if url:
-        print(f"--> Downloading pretrained {model_type} weights from {url}...")
-        try:
-            urllib.request.urlretrieve(url, target_path)
-            print(f"✓ Downloaded weights to: {target_path}")
-            return target_path
-        except Exception as e:
-            print(f"[Warning] Could not download from {url}: {e}. Initializing model with ImageNet backbone.")
-    return ""
+    hf_filename = PCLA_HF_WEIGHT_FILES.get(model_type)
+    if not hf_filename:
+        print(f"[Warning] No known HuggingFace weight file for model_type='{model_type}'. "
+              f"Initializing model with ImageNet backbone.")
+        return ""
+
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        print("[Warning] huggingface_hub is not installed (pip install huggingface_hub) - "
+              "cannot download pretrained WoR weights. Initializing model with ImageNet backbone.")
+        return ""
+
+    print(f"--> Downloading pretrained {model_type} weights from "
+          f"hf://datasets/{PCLA_HF_REPO}/{hf_filename}...")
+    try:
+        downloaded_path = hf_hub_download(
+            repo_id=PCLA_HF_REPO, repo_type="dataset", filename=hf_filename
+        )
+        # hf_hub_download returns a path inside the HF cache - copy it into save_dir
+        # so callers (and --weights_path) get the stable, predictable path they expect.
+        import shutil
+        shutil.copy(downloaded_path, target_path)
+        print(f"✓ Downloaded weights to: {target_path}")
+        return target_path
+    except Exception as e:
+        print(f"[Warning] Could not download {hf_filename} from {PCLA_HF_REPO}: {e}. "
+              f"Initializing model with ImageNet backbone.")
+        return ""
 
 
 def load_wor_model(
@@ -46,16 +75,32 @@ def load_wor_model(
     backbone_name: str = "resnet34",
     pretrained_backbone: bool = True,
     freeze_backbone: bool = True,
-    device: Union[str, torch.device] = "cpu"
-) -> WorldOnRailsPolicy:
+    device: Union[str, torch.device] = "cpu",
+    policy_arch: str = "cnn",
+    route_points: int = 4
+) -> Union[WorldOnRailsPolicy, QwenWorldOnRailsPolicy]:
     """
-    Instantiates and loads a World on Rails policy model.
+    Instantiates and loads a World on Rails policy model. `policy_arch` selects the
+    decision head: "cnn" is the original SpatialQHead, "qwen100m"/"qwen500m"/"qwen900m"
+    is the Qwen transformer trunk (see qwen_wor_policy.py) - both share the same
+    checkpoint format (a WorldOnRailsTrainer run against either produces a state_dict
+    keyed the same way, "encoder." for the frozen backbone), so this only needs to
+    pick which class to instantiate before loading.
     """
-    model = WorldOnRailsPolicy(
-        backbone_name=backbone_name,
-        pretrained=pretrained_backbone,
-        freeze_backbone=freeze_backbone
-    )
+    if policy_arch == "cnn":
+        model = WorldOnRailsPolicy(
+            backbone_name=backbone_name,
+            pretrained=pretrained_backbone,
+            freeze_backbone=freeze_backbone
+        )
+    else:
+        model = QwenWorldOnRailsPolicy(
+            backbone_name=backbone_name,
+            pretrained=pretrained_backbone,
+            freeze_backbone=freeze_backbone,
+            route_points=route_points,
+            model_size=policy_arch.replace("qwen", "")
+        )
 
     if checkpoint_path and os.path.exists(checkpoint_path):
         print(f"--> Loading World on Rails model weights from: {checkpoint_path}")
