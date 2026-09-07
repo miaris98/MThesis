@@ -19,7 +19,7 @@ import glob
 import numpy as np
 from PIL import Image
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset
 
 
 class WorldOnRailsDataset(Dataset):
@@ -276,6 +276,25 @@ class WorldOnRailsDataset(Dataset):
         }
 
 
+def _wrap_loader(dataset, batch_size: int, num_workers: int, is_train: bool) -> DataLoader:
+    kwargs = dict(
+        batch_size=batch_size,
+        shuffle=is_train,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=is_train,
+        persistent_workers=num_workers > 0
+    )
+    # Only pass prefetch_factor in the multiprocessing case. Torch accepted an
+    # explicit None here from 2.0 onward, but older versions reject it outright
+    # ("prefetch_factor option could only be specified in multiprocessing"), which
+    # made num_workers=0 - the default on Windows, and what the tests use - fail
+    # before a single batch was read.
+    if num_workers > 0:
+        kwargs["prefetch_factor"] = 4
+    return DataLoader(dataset, **kwargs)
+
+
 def create_wor_dataloader(
     data_dir: str,
     batch_size: int = 32,
@@ -293,13 +312,81 @@ def create_wor_dataloader(
         cache_decoded=cache_decoded,
         route_points=route_points
     )
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=is_train,
-        num_workers=num_workers,
-        pin_memory=True,
-        drop_last=is_train,
-        persistent_workers=num_workers > 0,
-        prefetch_factor=4 if num_workers > 0 else None
+    return _wrap_loader(dataset, batch_size, num_workers, is_train)
+
+
+
+def create_wor_train_val_dataloaders(
+    data_dir: str,
+    batch_size: int = 32,
+    num_workers: int = 4,
+    synthetic_samples: int = 0,
+    cache_decoded: bool = True,
+    route_points: int = 4,
+    val_data_dir: Optional[str] = None,
+    val_split: float = 0.0,
+    split_seed: int = 0
+) -> Tuple[DataLoader, Optional[DataLoader]]:
+    """Creates the training loader and, when asked for, a held-out validation loader.
+
+    A separate `val_data_dir` is preferred when one exists, because a random split of
+    `data_dir` divides *frames*, not routes - consecutive frames of the same route are
+    near-duplicates, so a frame-level split leaks and reports an optimistic number.
+    The split is offered anyway because no validation at all is strictly worse: the
+    trainer previously selected its "best" checkpoint on training loss, which cannot
+    distinguish a model that generalises from one that has memorised.
+
+    Routes are kept intact where the layout exposes them (PDM-Lite samples carry their
+    source `rgb_path`, whose parent directory identifies the route), so the split falls
+    on route boundaries rather than frame boundaries whenever that information exists.
+    """
+    train_ds = WorldOnRailsDataset(
+        data_dir=data_dir, is_train=True, synthetic_samples=synthetic_samples,
+        cache_decoded=cache_decoded, route_points=route_points
     )
+
+    if val_data_dir:
+        val_ds = WorldOnRailsDataset(
+            data_dir=val_data_dir, is_train=False, synthetic_samples=0,
+            cache_decoded=cache_decoded, route_points=route_points
+        )
+        return (_wrap_loader(train_ds, batch_size, num_workers, True),
+                _wrap_loader(val_ds, batch_size, num_workers, False))
+
+    n = len(train_ds)
+    if val_split <= 0.0 or n < 4:
+        return _wrap_loader(train_ds, batch_size, num_workers, True), None
+
+    # Group frames by their source route so the split cannot put frame k in train and
+    # frame k+1 in validation. Falls back to a per-frame split if no grouping key is
+    # recoverable from the sample records.
+    groups: Dict[str, List[int]] = {}
+    for i, s in enumerate(train_ds.samples):
+        key = ""
+        if isinstance(s, dict):
+            key = os.path.dirname(os.path.dirname(s.get("rgb_path", ""))) or s.get("route_dir", "")
+        groups.setdefault(key or str(i), []).append(i)
+
+    rng = np.random.RandomState(split_seed)
+    keys = sorted(groups)
+    rng.shuffle(keys)
+
+    target = int(round(n * val_split))
+    val_idx: List[int] = []
+    for k in keys:
+        if len(val_idx) >= target:
+            break
+        val_idx.extend(groups[k])
+    val_set = set(val_idx)
+    train_idx = [i for i in range(n) if i not in val_set]
+
+    if not val_idx or not train_idx:
+        return _wrap_loader(train_ds, batch_size, num_workers, True), None
+
+    print(f"--> Validation split: {len(train_idx)} train / {len(val_idx)} val frames "
+          f"across {len(keys)} route group(s), seed {split_seed}."
+          + ("" if len(keys) > 1 else "  [Warning] Only one group found - this is a"
+             " frame-level split and will read optimistically."))
+
+    return (_wrap_loader(Subset(train_ds, train_idx), batch_size, num_workers, True),
+            _wrap_loader(Subset(train_ds, val_idx), batch_size, num_workers, False))

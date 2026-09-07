@@ -31,15 +31,32 @@ _MODEL_SIZES = {
 class QwenWaypointTransformer(nn.Module):
     """Qwen transformer trunk that turns (vision, speed, route, command) tokens into
     per-command waypoint trajectories and rail Q-values, mirroring SpatialQHead's
-    outputs but via self-attention over a short token sequence instead of a conv head."""
+    outputs but via self-attention over a short token sequence instead of a conv head.
+
+    `num_vision_tokens` is how many vision tokens the trunk is sized for. With the
+    encoder's 8x8 feature map fed through as 64 tokens the sequence is 68 long; with
+    the legacy globally-pooled single vector it is 5. See QwenWorldOnRailsPolicy's
+    `vision_grid` for why that difference dominates everything else in this module.
+    """
 
     def __init__(self, embed_dim: int, depth: int, num_heads: int, ffn_dim: int,
-                 num_commands: int = 6, num_rails: int = 9):
+                 num_commands: int = 6, num_rails: int = 9, num_vision_tokens: int = 64):
         super().__init__()
         self.num_commands = num_commands
         self.num_rails = num_rails
+        self.num_vision_tokens = num_vision_tokens
 
         self.policy_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+
+        # Attention is permutation-invariant and this module has no causal mask, so
+        # without these the trunk cannot tell the speed token from the route token
+        # from the command token by position - it can only hope speed_proj/route_proj/
+        # cmd_embed happen to land in separable subspaces. `vision_pos` gives each
+        # cell of the feature grid a distinct identity (which is what makes spatial
+        # reasoning possible at all), and `type_embed` marks the four non-grid roles.
+        self.vision_pos = nn.Parameter(torch.zeros(1, num_vision_tokens, embed_dim))
+        self.type_embed = nn.Parameter(torch.zeros(1, 4, embed_dim))  # policy, speed, route, cmd
+
         self.blocks = nn.ModuleList([
             QwenTransformerBlock(dim=embed_dim, num_heads=num_heads, ffn_dim=ffn_dim)
             for _ in range(depth)
@@ -57,21 +74,40 @@ class QwenWaypointTransformer(nn.Module):
             nn.Linear(128, num_commands * num_rails)
         )
         nn.init.trunc_normal_(self.policy_token, std=0.02)
+        nn.init.trunc_normal_(self.vision_pos, std=0.02)
+        nn.init.trunc_normal_(self.type_embed, std=0.02)
 
     def forward(self, vision_tok: torch.Tensor, speed_tok: torch.Tensor,
                 route_tok: torch.Tensor, cmd_tok: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        B = vision_tok.shape[0]
-        p_tok = self.policy_token.expand(B, -1, -1)
-        tokens = torch.cat([p_tok, vision_tok, speed_tok, route_tok, cmd_tok], dim=1)
+        """`vision_tok` is (B, N, D) with N >= 1 - one token per retained feature-map
+        cell, or a single token in the legacy globally-pooled configuration."""
+        B, N, _ = vision_tok.shape
+        if N > self.vision_pos.shape[1]:
+            raise ValueError(
+                f"Trunk was built for at most {self.vision_pos.shape[1]} vision tokens "
+                f"but received {N}. Rebuild the policy with a matching vision_grid."
+            )
 
-        with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=vision_tok.is_cuda):
-            for block in self.blocks:
-                tokens = block(tokens)
-            tokens = self.final_norm(tokens)
-            policy_repr = tokens[:, 0]
+        p_tok = self.policy_token.expand(B, -1, -1) + self.type_embed[:, 0:1]
+        v_tok = vision_tok + self.vision_pos[:, :N]
+        s_tok = speed_tok + self.type_embed[:, 1:2]
+        r_tok = route_tok + self.type_embed[:, 2:3]
+        c_tok = cmd_tok + self.type_embed[:, 3:4]
 
-            waypoints = self.waypoint_head(policy_repr).float().view(B, self.num_commands, 5, 2)
-            rail_q = self.rail_head(policy_repr).float().view(B, self.num_commands, self.num_rails)
+        tokens = torch.cat([p_tok, v_tok, s_tok, r_tok, c_tok], dim=1)
+
+        # No autocast is opened here. This module used to force float16 whenever the
+        # input was on CUDA, which overrode the caller's choice (WorldOnRailsTrainer's
+        # use_amp=False still ran the trunk in half precision) and applied fp16 to
+        # act() at evaluation time, where precision matters more than throughput.
+        # The ambient autocast context now governs, as it does for every other module.
+        for block in self.blocks:
+            tokens = block(tokens)
+        tokens = self.final_norm(tokens)
+        policy_repr = tokens[:, 0]
+
+        waypoints = self.waypoint_head(policy_repr).float().view(B, self.num_commands, 5, 2)
+        rail_q = self.rail_head(policy_repr).float().view(B, self.num_commands, self.num_rails)
 
         return waypoints, rail_q
 
@@ -92,12 +128,23 @@ class QwenWorldOnRailsPolicy(nn.Module):
         num_commands: int = 6,
         num_rails: int = 9,
         route_points: int = 4,
-        model_size: str = "100m"
+        model_size: str = "100m",
+        vision_grid: int = 8
     ):
         super().__init__()
         self.num_commands = num_commands
         self.num_rails = num_rails
         self.route_points = route_points
+        # Side length of the vision token grid. The encoder emits a (B, C, 8, 8) map
+        # for the 256x256 input; `vision_grid=8` forwards every cell as its own token,
+        # 4 pools it to 4x4 first, and 0 restores the original single globally-averaged
+        # token. That last setting is what the first Qwen runs used, and it is the
+        # single largest handicap in them: AdaptiveAvgPool2d((1,1)) makes the gradient
+        # of the output with respect to every one of the 64 cells *identical*, so the
+        # trunk is exactly blind to where anything is in the frame, while the CNN's
+        # SpatialQHead convolves state into all 64 cells before pooling. It is kept
+        # only so the ablation can be run.
+        self.vision_grid = int(vision_grid)
 
         # Same frozen pretrained vision encoder as WorldOnRailsPolicy - training a
         # vision model stays out of scope, and --weights_path (e.g. the CARLA-domain
@@ -112,7 +159,12 @@ class QwenWorldOnRailsPolicy(nn.Module):
         cfg = _MODEL_SIZES.get(str(model_size).lower(), _MODEL_SIZES["100m"])
         self.embed_dim = cfg["embed_dim"]
 
-        self.vision_pool = nn.AdaptiveAvgPool2d((1, 1))
+        # vision_grid=0 keeps the legacy 1x1 global average; any other value pools the
+        # encoder map to that side length (a no-op when it already matches).
+        self.num_vision_tokens = 1 if self.vision_grid <= 0 else self.vision_grid ** 2
+        self.vision_pool = nn.AdaptiveAvgPool2d(
+            (1, 1) if self.vision_grid <= 0 else (self.vision_grid, self.vision_grid)
+        )
         self.vision_proj = nn.Linear(self.encoder.out_channels, self.embed_dim)
         self.speed_proj = nn.Linear(1, self.embed_dim)
         self.cmd_embed = nn.Embedding(num_commands, self.embed_dim)
@@ -120,22 +172,29 @@ class QwenWorldOnRailsPolicy(nn.Module):
 
         self.trunk = QwenWaypointTransformer(
             embed_dim=self.embed_dim, depth=cfg["depth"], num_heads=cfg["num_heads"],
-            ffn_dim=cfg["ffn_dim"], num_commands=num_commands, num_rails=num_rails
+            ffn_dim=cfg["ffn_dim"], num_commands=num_commands, num_rails=num_rails,
+            num_vision_tokens=self.num_vision_tokens
         )
 
         self.controller = PIDController()
 
         trunk_params = sum(p.numel() for p in self.trunk.parameters())
+        seq_len = self.num_vision_tokens + 4
         print(f"✓ Qwen-{str(model_size).upper()} WoR Decision Transformer initialized! "
-              f"Trainable trunk parameters: {trunk_params:,} ({trunk_params / 1e6:.1f}M)")
+              f"Trainable trunk parameters: {trunk_params:,} ({trunk_params / 1e6:.1f}M) | "
+              f"sequence: {self.num_vision_tokens} vision + 4 state = {seq_len} tokens"
+              f"{' (GLOBALLY POOLED - spatially blind ablation)' if self.vision_grid <= 0 else ''}")
 
     def _tokenize_state(
         self, feats: torch.Tensor, speed: torch.Tensor, command: torch.Tensor, route: Optional[torch.Tensor]
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         B = feats.shape[0]
 
-        vis = self.vision_pool(feats).flatten(1)
-        vision_tok = self.vision_proj(vis).unsqueeze(1)
+        # (B, C, H, W) -> (B, N, C) -> (B, N, embed_dim), one token per retained cell.
+        # N is 1 in the legacy globally-pooled configuration, so the rest of the
+        # pipeline is shape-identical either way.
+        vis = self.vision_pool(feats).flatten(2).transpose(1, 2)
+        vision_tok = self.vision_proj(vis)
 
         speed_tok = self.speed_proj(speed.view(-1, 1).float()).unsqueeze(1)
 

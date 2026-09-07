@@ -77,7 +77,9 @@ def load_wor_model(
     freeze_backbone: bool = True,
     device: Union[str, torch.device] = "cpu",
     policy_arch: str = "cnn",
-    route_points: int = 4
+    route_points: int = 4,
+    vision_grid: Optional[int] = None,
+    pool_vision: Optional[bool] = None
 ) -> Union[WorldOnRailsPolicy, QwenWorldOnRailsPolicy]:
     """
     Instantiates and loads a World on Rails policy model. `policy_arch` selects the
@@ -86,12 +88,40 @@ def load_wor_model(
     checkpoint format (a WorldOnRailsTrainer run against either produces a state_dict
     keyed the same way, "encoder." for the frozen backbone), so this only needs to
     pick which class to instantiate before loading.
+
+    `vision_grid` and `pool_vision` are read from the checkpoint's own `config` block
+    when it has one, so a checkpoint evaluates under the geometry it was trained
+    under without the caller having to remember it. Passing either explicitly
+    overrides that, and a conflict is reported rather than silently resolved: a Qwen
+    policy trained on one globally-pooled vision token and evaluated on a 64-token
+    grid loads without error under strict=False and drives on untrained positional
+    embeddings.
     """
+    ckpt_cfg = {}
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        try:
+            ckpt_cfg = torch.load(checkpoint_path, map_location="cpu").get("config", {}) or {}
+        except Exception:
+            ckpt_cfg = {}
+
+    def _resolve(name, explicit, default):
+        stored = ckpt_cfg.get(name)
+        if explicit is not None:
+            if stored is not None and stored != explicit:
+                print(f"[Warning] {name}={explicit} was requested but this checkpoint was trained "
+                      f"with {name}={stored}. Using the requested value; predictions will be "
+                      f"meaningless unless you know why they differ.")
+            return explicit
+        if stored is not None:
+            return stored
+        return default
+
     if policy_arch == "cnn":
         model = WorldOnRailsPolicy(
             backbone_name=backbone_name,
             pretrained=pretrained_backbone,
-            freeze_backbone=freeze_backbone
+            freeze_backbone=freeze_backbone,
+            pool_vision=bool(_resolve("pool_vision", pool_vision, False))
         )
     else:
         model = QwenWorldOnRailsPolicy(
@@ -99,13 +129,18 @@ def load_wor_model(
             pretrained=pretrained_backbone,
             freeze_backbone=freeze_backbone,
             route_points=route_points,
-            model_size=policy_arch.replace("qwen", "")
+            model_size=policy_arch.replace("qwen", ""),
+            vision_grid=int(_resolve("vision_grid", vision_grid, 8))
         )
 
     if checkpoint_path and os.path.exists(checkpoint_path):
         print(f"--> Loading World on Rails model weights from: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
         state_dict = checkpoint.get("state_dict", checkpoint.get("model", checkpoint))
+        if not ckpt_cfg:
+            print("[Warning] This checkpoint predates config-stamped checkpoints, so its vision "
+                  "geometry is unknown. Qwen checkpoints trained before that change used "
+                  "vision_grid=0 (a single globally-pooled vision token); pass it explicitly.")
 
         # Training with a frozen backbone writes split checkpoints: the unchanging
         # vision weights land once in a sibling frozen_backbone.pth and the per-epoch
@@ -139,6 +174,14 @@ def load_wor_model(
 
         missing, unexpected = model.load_state_dict(clean_dict, strict=False)
         print(f"✓ Loaded weights into WorldOnRailsPolicy (Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)})")
+        # strict=False turns an architecture mismatch into a partial load that runs
+        # and produces plausible-looking numbers. Name the offending keys - a short
+        # list is nearly always a real mismatch worth acting on, not noise.
+        for label, keys in (("Missing (left at fresh init)", missing), ("Unexpected (ignored)", unexpected)):
+            if 0 < len(keys) <= 12:
+                print(f"    {label}: {', '.join(keys)}")
+            elif len(keys) > 12:
+                print(f"    {label}: {len(keys)} keys, e.g. {', '.join(list(keys)[:5])} ...")
     else:
         print(f"--> Initialized WorldOnRailsPolicy with {backbone_name.upper()} (ImageNet Pretrained: {pretrained_backbone})")
 

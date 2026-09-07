@@ -46,6 +46,14 @@ def parse_args():
     parser.add_argument("--use_mlflow", type=int, default=1, help="Enable MLflow tracking (1=True, 0=False)")
     parser.add_argument("--mlflow_port", type=int, default=10100, help="MLflow tracking server port")
     parser.add_argument("--route_points", type=int, default=4, help="How many ego-frame route points to condition the policy on. PDM-Lite's command enum is LANEFOLLOW on every frame, so this is the policy's only navigation input - without it the model cannot tell a left turn from a right one and learns to drive straight. Higher values leak more of the answer (the full 20-point route correlates ~0.84 with the lateral target); use this to ablate that")
+    parser.add_argument("--vision_grid", type=int, default=8, help="Qwen heads only. Side length of the vision token grid handed to the transformer: 8 forwards all 64 cells of the encoder's 8x8 feature map as separate tokens (68-token sequence), 4 pools to 4x4 first (20 tokens), and 0 restores the original single globally-averaged vision token (5 tokens). 0 is the configuration the first Qwen runs used and is spatially blind by construction - AdaptiveAvgPool2d((1,1)) gives every cell an identical gradient - so it exists only as an ablation. Costs wall time: the trunk's compute scales with sequence length, so 8 is roughly an order of magnitude slower per epoch than 0")
+    parser.add_argument("--pool_vision", type=int, default=0, help="CNN head only. Collapses the encoder feature map to 1x1 before SpatialQHead, giving the CNN the same spatially-blind input as --vision_grid 0. The matching ablation on the CNN side: without it, a CNN-beats-transformer result confounds architecture family with the fact that only one head was shown where things are in the frame (1=True, 0=False)")
+    parser.add_argument("--grad_clip", type=float, default=5.0, help="Global gradient-norm clip threshold. The 5.0 default was set against the CNN head, whose epoch-mean gradient norm drops below it around epoch 17; the 106M Qwen trunk stayed above it on all 50 epochs of its first run, so the two were not being given comparable effective step sizes")
+    parser.add_argument("--warmup_frac", type=float, default=0.05, help="Fraction of total optimizer steps spent linearly warming the learning rate up before cosine decay begins. 0 reproduces the previous schedule (full LR from batch 1), which a conv head tolerates and a 12-layer pre-norm transformer generally does not")
+    parser.add_argument("--decay_gates_and_norms", type=int, default=0, help="Apply AdamW weight decay to gates, norm gains, embeddings and learned tokens as well as weight matrices (1=True, 0=False). The old behaviour, kept for reproducibility. It decays the transformer's 24 alpha residual gates toward zero, i.e. penalizes the model for letting each block contribute at all")
+    parser.add_argument("--val_data_dir", type=str, default=None, help="Separate held-out dataset directory. Preferred over --val_split, which divides frames rather than routes")
+    parser.add_argument("--val_split", type=float, default=0.05, help="Fraction of --data_dir held out for validation when --val_data_dir is not given, split on route boundaries where the layout exposes them. 0 disables validation entirely, which also means 'best' is selected on training loss")
+    parser.add_argument("--split_seed", type=int, default=0, help="Seed for the deterministic train/validation split")
     parser.add_argument("--compile_model", type=int, default=0, help="Wrap the policy in torch.compile - trades a one-off compilation on the first epoch for faster steps afterwards, so it only pays off over a long run (1=True, 0=False)")
     parser.add_argument("--kill_stale", type=int, default=1, help="On startup, terminate SUSPENDED train_wor.py processes still pinning VRAM (what Ctrl+Z leaves behind). Running instances are reported but never killed (1=True, 0=False)")
     parser.add_argument("--auto_batch_size", type=int, default=0, help="Probe the largest batch size that fits in available VRAM instead of using --batch_size directly (1=True, 0=False)")
@@ -76,11 +84,13 @@ def main():
             if args.policy_arch == "cnn":
                 return WorldOnRailsPolicy(backbone_name=args.backbone, pretrained=bool(args.pretrained),
                                            freeze_backbone=bool(args.freeze_backbone),
-                                           route_points=args.route_points)
+                                           route_points=args.route_points,
+                                           pool_vision=bool(args.pool_vision))
             return QwenWorldOnRailsPolicy(backbone_name=args.backbone, pretrained=bool(args.pretrained),
                                            freeze_backbone=bool(args.freeze_backbone),
                                            route_points=args.route_points,
-                                           model_size=args.policy_arch.replace("qwen", ""))
+                                           model_size=args.policy_arch.replace("qwen", ""),
+                                           vision_grid=args.vision_grid)
 
         def _optimizer_factory(m):
             return torch.optim.AdamW(m.parameters(), lr=args.lr_heads, weight_decay=1e-4)
@@ -113,6 +123,15 @@ def main():
     print("=" * 65)
     print(" 🚗 World on Rails (WoR) Distillation Training Pipeline")
     print(f" Policy Head:     {args.policy_arch.upper()}")
+    if args.policy_arch == "cnn":
+        print(f" Vision input:    {'1x1 GLOBALLY POOLED (spatially blind ablation)' if args.pool_vision else '8x8 spatial feature map'}")
+    else:
+        n_tok = 1 if args.vision_grid <= 0 else args.vision_grid ** 2
+        print(f" Vision input:    {n_tok} token(s) + 4 state = {n_tok + 4}-token sequence"
+              f"{'  [GLOBALLY POOLED - spatially blind ablation]' if args.vision_grid <= 0 else ''}")
+    print(f" Optimizer:       clip {args.grad_clip} | warmup {args.warmup_frac:.0%} of steps | "
+          f"decay on gates/norms: {bool(args.decay_gates_and_norms)}")
+    print(f" Validation:      {args.val_data_dir or (f'{args.val_split:.0%} split of --data_dir' if args.val_split > 0 else 'NONE (best selected on train loss)')}")
     print(f" Backbone:        {args.backbone.upper()} (Pretrained: {bool(args.pretrained)})")
     print(f" Training:        {'policy heads only - vision backbone FROZEN' if args.freeze_backbone else 'policy heads + vision backbone (fine-tuning vision!)'}")
     if args.weights_path:
@@ -129,7 +148,8 @@ def main():
             pretrained=bool(args.pretrained),
             freeze_backbone=bool(args.freeze_backbone),
             weights_path=args.weights_path,
-            route_points=args.route_points
+            route_points=args.route_points,
+            pool_vision=bool(args.pool_vision)
         )
     else:
         policy = QwenWorldOnRailsPolicy(
@@ -138,13 +158,20 @@ def main():
             freeze_backbone=bool(args.freeze_backbone),
             weights_path=args.weights_path,
             route_points=args.route_points,
-            model_size=args.policy_arch.replace("qwen", "")
+            model_size=args.policy_arch.replace("qwen", ""),
+            vision_grid=args.vision_grid
         )
 
     # 2. Initialize Trainer
     trainer = WorldOnRailsTrainer(
         model=policy,
         data_dir=args.data_dir,
+        val_data_dir=args.val_data_dir,
+        val_split=args.val_split,
+        split_seed=args.split_seed,
+        grad_clip=args.grad_clip,
+        warmup_frac=args.warmup_frac,
+        decay_gates_and_norms=bool(args.decay_gates_and_norms),
         save_dir=args.save_dir,
         lr_backbone=args.lr_backbone,
         lr_heads=args.lr_heads,

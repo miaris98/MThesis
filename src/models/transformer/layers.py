@@ -12,8 +12,18 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        variance = x.pow(2).mean(-1, keepdim=True)
-        return x * torch.rsqrt(variance + self.eps) * self.weight
+        # The variance is computed in fp32 and only the normalized result is cast back,
+        # matching the reference LLaMA/Qwen implementations. Under fp16 autocast the
+        # naive version squares activations in half precision: the sum over `dim`
+        # elements reaches fp16's 65504 ceiling at activation magnitudes well inside
+        # the range an alpha-gated residual stream reaches after a dozen blocks, and
+        # the resulting inf/NaN silently costs an optimizer step (the AMP GradScaler
+        # skips it) rather than raising.
+        dtype = x.dtype
+        x_fp32 = x.float()
+        variance = x_fp32.pow(2).mean(-1, keepdim=True)
+        normed = x_fp32 * torch.rsqrt(variance + self.eps)
+        return normed.to(dtype) * self.weight
 
 
 class SwiGLU(nn.Module):

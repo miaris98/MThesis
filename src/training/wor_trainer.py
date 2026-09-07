@@ -4,44 +4,31 @@ Trains the sensorimotor vision policy to predict optimal Q-values and waypoints
 using differential learning rates, PyTorch AMP (Automatic Mixed Precision),
 and telemetry tracking (MLflow + TensorBoard + per-epoch CSV, matching the
 PPO/SAC trainers' logging stack).
+
+The objective and the held-out pass live in src/training/wor_eval.py; the optimizer
+groups and LR schedule live in src/training/wor_optim.py.
 """
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
+import math
 import os
-import threading
 import time
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import LambdaLR
 
 from src.models.world_on_rails.wor_policy import WorldOnRailsPolicy
-from src.training.wor_dataset import create_wor_dataloader
+from src.training.wor_dataset import create_wor_train_val_dataloaders
+from src.training.wor_eval import run_validation, to_device_batch, waypoint_losses
+from src.training.wor_checkpoint import CheckpointWriter, to_cpu
+from src.training.wor_optim import build_optimizer, build_warmup_cosine_scheduler
 from src.logging.csv_logger import CSVTelemetryLogger
 from src.logging.experiment_logger import ExperimentLogger
 from src.logging.hardware_monitor import HardwareMonitor
-
 
 try:
     from torch.cuda.amp import GradScaler, autocast
 except ImportError:
     from torch.amp import GradScaler, autocast
-
-
-def _to_cpu(obj):
-    """Recursively copies tensors in a state dict to CPU.
-
-    Needed before handing anything to the background checkpoint writer: AdamW's
-    exp_avg/exp_avg_sq buffers are updated in place on every subsequent step, so
-    serializing the live GPU tensors would race with the next epoch.
-    """
-    if torch.is_tensor(obj):
-        return obj.detach().to("cpu", copy=True)
-    if isinstance(obj, dict):
-        return {k: _to_cpu(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return type(obj)(_to_cpu(v) for v in obj)
-    return obj
 
 
 class WorldOnRailsTrainer:
@@ -56,7 +43,19 @@ class WorldOnRailsTrainer:
         "data_wait_sec", "compute_sec",
         "total_loss", "q_loss", "wp_loss", "wp_ade_m", "wp_fde_m",
         "wp_lateral_error_m", "wp_longitudinal_error_m",
-        "lr_backbone", "lr_heads", "grad_norm", "is_best", "save_sec",
+        # Held-out metrics, blank when no validation set is configured. Training loss
+        # alone cannot tell a model that generalises from one that has memorised, and
+        # `is_best` used to be selected on it.
+        "val_loss", "val_wp_ade_m", "val_wp_fde_m",
+        "val_wp_lateral_error_m", "val_wp_longitudinal_error_m", "val_time_sec",
+        "lr_backbone", "lr_heads", "grad_norm",
+        # grad_norm is a mean over finite batches only. A single non-finite batch used
+        # to poison the whole epoch's mean to inf, which is what made the periodic
+        # `inf` rows in the first telemetry files unreadable. The AMP GradScaler
+        # deliberately produces those (it overshoots the loss scale, skips the step and
+        # backs off), so their *count* is the useful signal, not their magnitude.
+        "nonfinite_grad_batches", "clipped_grad_batches", "grad_clip",
+        "is_best", "save_sec",
         "gpu_mem_used_mb", "gpu_mem_pct", "sys_cpu_pct", "sys_ram_used_gb"
     ]
 
@@ -80,6 +79,11 @@ class WorldOnRailsTrainer:
         cache_decoded: bool = True,
         compile_model: bool = False,
         route_points: int = 4,
+        grad_clip: float = 5.0,
+        warmup_frac: float = 0.05,
+        decay_gates_and_norms: bool = False,
+        val_split: float = 0.0,
+        split_seed: int = 0,
         experiment_name: str = "WoR_Offline_Training",
         use_mlflow: bool = True,
         mlflow_port: int = 10100
@@ -108,6 +112,25 @@ class WorldOnRailsTrainer:
         # producing a policy that accelerates fine but steers close to zero. Weight
         # the lateral term up to correct for that scale mismatch.
         self.lateral_loss_weight = lateral_loss_weight
+        # Global-norm clip threshold. The default of 5.0 was chosen against the CNN
+        # head, whose epoch-mean gradient norm falls under it around epoch 17 and so
+        # spends the back half of a run unclipped. The 106M-parameter Qwen trunk sat
+        # above it on every single epoch of a 50-epoch run, i.e. its updates were
+        # scaled down throughout while its competitor's were not - an asymmetry that
+        # belongs to the threshold, not to either architecture. Expose it so the two
+        # can be given comparable effective step sizes.
+        self.grad_clip = grad_clip
+        self.warmup_frac = warmup_frac
+        self.scheduler = None
+        # Architecture geometry that a checkpoint cannot be reconstructed from by
+        # shape alone, recorded so load_wor_model rebuilds it rather than guessing.
+        self.model_config = {
+            "backbone": model.encoder.backbone_name,
+            "route_points": getattr(model, "route_points", route_points),
+            "vision_grid": getattr(model, "vision_grid", None),
+            "pool_vision": getattr(model, "pool_vision", None),
+            "num_vision_tokens": getattr(model, "num_vision_tokens", None)
+        }
         self.train_start_time = time.time()
 
         os.makedirs(save_dir, exist_ok=True)
@@ -121,7 +144,12 @@ class WorldOnRailsTrainer:
             "data_dir": data_dir, "backbone": model.encoder.backbone_name,
             "lr_backbone": lr_backbone, "lr_heads": lr_heads, "batch_size": batch_size,
             "wp_loss_weight": wp_loss_weight, "q_loss_weight": q_loss_weight,
-            "lateral_loss_weight": lateral_loss_weight
+            "lateral_loss_weight": lateral_loss_weight,
+            "grad_clip": grad_clip, "warmup_frac": warmup_frac,
+            "decay_gates_and_norms": decay_gates_and_norms,
+            "val_split": val_split, "val_data_dir": val_data_dir or "",
+            "vision_grid": getattr(model, "vision_grid", ""),
+            "pool_vision": getattr(model, "pool_vision", "")
         })
 
         # Per-epoch CSV telemetry.
@@ -130,35 +158,30 @@ class WorldOnRailsTrainer:
         )
 
         # 1. DataLoaders
-        self.train_loader = create_wor_dataloader(
+        self.train_loader, self.val_loader = create_wor_train_val_dataloaders(
             data_dir=data_dir,
             batch_size=batch_size,
             num_workers=num_workers,
-            is_train=True,
             synthetic_samples=synthetic_samples,
             cache_decoded=cache_decoded,
-            route_points=route_points
+            route_points=route_points,
+            val_data_dir=val_data_dir,
+            val_split=val_split,
+            split_seed=split_seed
         )
-        if len(self.train_loader.dataset) == 0 or getattr(self.train_loader.dataset, "is_synthetic", False):
+        base_ds = getattr(self.train_loader.dataset, "dataset", self.train_loader.dataset)
+        if len(self.train_loader.dataset) == 0 or getattr(base_ds, "is_synthetic", False):
             print(f"[Warning] Training on SYNTHETIC data - no real frames were indexed under {data_dir}.")
+        if self.val_loader is None:
+            print("[Warning] No validation set: 'best' will be selected on TRAINING loss, "
+                  "which cannot detect overfitting. Pass --val_split or --val_data_dir.")
 
-        # 2. Parameter Groups with Differential Learning Rate
-        backbone_params = []
-        head_params = []
-        for name, param in self.model.named_parameters():
-            if not param.requires_grad:
-                continue
-            if "encoder" in name:
-                backbone_params.append(param)
-            else:
-                head_params.append(param)
-
-        param_groups = [
-            {"params": backbone_params, "lr": lr_backbone},
-            {"params": head_params, "lr": lr_heads}
-        ]
-
-        self.optimizer = AdamW(param_groups, weight_decay=weight_decay)
+        # 2. Optimizer: differential LR for backbone vs heads, and a no-decay group for
+        # gates, norms, embeddings and learned tokens. See src/training/wor_optim.py.
+        self.lr_heads = lr_heads
+        self.optimizer = build_optimizer(
+            self.model, lr_backbone, lr_heads, weight_decay, decay_gates_and_norms
+        )
         try:
             self.scaler = GradScaler(enabled=self.use_amp)
         except Exception:
@@ -180,47 +203,11 @@ class WorldOnRailsTrainer:
                 except Exception as e:
                     print(f"[Warning] torch.compile failed ({e}) - running uncompiled.")
 
-        # 3. Checkpoint layout. A frozen backbone is ~92% of the parameters and is
-        # byte-for-byte identical in every epoch, so writing it out each time (twice
-        # over, since "latest" and "best" both fire) costs far more wall time than the
-        # epoch itself. Write it exactly once as frozen_backbone.pth and keep the
-        # per-epoch checkpoints to the heads that actually change.
-        self._frozen_keys = frozenset(
-            k for k in self.model.state_dict() if k.startswith("encoder.")
-        ) if getattr(model.encoder, "freeze_backbone", False) else frozenset()
-        self._save_thread: Optional[threading.Thread] = None
-
-    def _state_dict_cpu(self, keys=None) -> Dict[str, torch.Tensor]:
-        """Snapshots (a subset of) the model weights to CPU so a background thread can
-        serialize them while the next epoch is already mutating the live tensors."""
-        sd = self.model.state_dict()
-        keys = sd.keys() if keys is None else keys
-        return {k: sd[k].detach().to("cpu", copy=True) for k in keys}
-
-    def _await_save(self):
-        """Blocks until the previous epoch's checkpoint write has finished."""
-        if self._save_thread is not None:
-            self._save_thread.join()
-            self._save_thread = None
-
-    def _save_async(self, payloads):
-        """Writes checkpoints off the training critical path.
-
-        Tensors are snapshotted to CPU by the caller *before* the thread starts, so
-        serialization can safely overlap the next epoch's parameter updates. Only one
-        write is ever in flight - a slow disk throttles to one save per epoch rather
-        than piling up threads.
-        """
-        self._await_save()
-
-        def _write():
-            for payload, path in payloads:
-                tmp = path + ".tmp"
-                torch.save(payload, tmp)
-                os.replace(tmp, path)  # atomic: a killed run never leaves a half-file
-
-        self._save_thread = threading.Thread(target=_write, daemon=False)
-        self._save_thread.start()
+        # 3. Checkpoints - see src/training/wor_checkpoint.py for the frozen-backbone
+        # split and the snapshot-before-thread rule.
+        self.ckpt = CheckpointWriter(
+            self.model, save_dir, bool(getattr(model.encoder, "freeze_backbone", False))
+        )
 
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         """Runs one full training epoch."""
@@ -233,6 +220,9 @@ class WorldOnRailsTrainer:
         lateral_err_accum = 0.0
         longitudinal_err_accum = 0.0
         grad_norm_accum = 0.0
+        grad_norm_batches = 0
+        nonfinite_batches = 0
+        clipped_batches = 0
         num_batches = 0
         num_samples = 0
         # Split the epoch into "blocked waiting for the dataloader" vs "actually
@@ -248,67 +238,62 @@ class WorldOnRailsTrainer:
             data_wait += time.time() - t_batch_start
             t_compute_start = time.time()
 
-            # uint8 HWC -> float NCHW in [0,1], done on the GPU: a quarter of the
-            # PCIe traffic of sending float32, and the permute lands in channels_last
-            # without a copy since the source is already HWC.
-            rgb = batch["rgb"].to(self.device, non_blocking=True)
-            rgb = rgb.permute(0, 3, 1, 2).float().div_(255.0)
-            speed = batch["speed"].to(self.device, non_blocking=True)
-            command = batch["command"].to(self.device, non_blocking=True)
-            route = batch["route"].to(self.device, non_blocking=True)
-            target_q = batch["target_q"].to(self.device, non_blocking=True)
-            target_wp = batch["target_waypoints"].to(self.device, non_blocking=True)
+            rgb, speed, command, route, target_q, target_wp = to_device_batch(batch, self.device)
 
             self.optimizer.zero_grad()
 
+            # One shared definition of the objective for training and validation - see
+            # src/training/wor_eval.py.
             with autocast(enabled=self.use_amp):
                 out = self.model(rgb, speed, command, route)
-
-                # 1. Q-value distillation loss (MSE on selected rail Q-values)
-                pred_q = out["selected_rail_q"]
-                loss_q = F.mse_loss(pred_q, target_q)
-
-                # 2. Waypoint imitation loss, split per-axis so the lateral (steering)
-                # component can be weighted independently of the larger-magnitude
-                # forward component (see lateral_loss_weight in __init__).
-                pred_wp = out["selected_waypoints"]
-                loss_wp_x = F.l1_loss(pred_wp[..., 0], target_wp[..., 0])
-                loss_wp_y = F.l1_loss(pred_wp[..., 1], target_wp[..., 1])
-                loss_wp = loss_wp_x + self.lateral_loss_weight * loss_wp_y
-
-                total_loss = self.q_loss_weight * loss_q + self.wp_loss_weight * loss_wp
+                losses = waypoint_losses(
+                    out, target_wp, target_q,
+                    self.wp_loss_weight, self.q_loss_weight, self.lateral_loss_weight
+                )
+                total_loss = losses["total"]
 
             if self.use_amp:
                 self.scaler.scale(total_loss).backward()
                 self.scaler.unscale_(self.optimizer)
-                grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
+                grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.grad_clip)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
                 total_loss.backward()
-                grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
+                grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.grad_clip)
                 self.optimizer.step()
 
-            # Average/Final Displacement Error (meters) - interpretable trajectory-quality
-            # metrics on top of the raw L1 waypoint loss. Also track the unweighted
-            # per-axis error directly so a lateral/longitudinal imbalance (the
-            # near-zero-steering failure mode) is visible in telemetry even though the
-            # loss above weights the axes unevenly on purpose.
-            with torch.no_grad():
-                per_point_dist = torch.norm(pred_wp.float() - target_wp.float(), dim=-1)  # (B, 5)
-                ade = per_point_dist.mean().item()
-                fde = per_point_dist[:, -1].mean().item()
-                lateral_err = loss_wp_y.item()
-                longitudinal_err = loss_wp_x.item()
+            # The LR schedule advances per optimizer step, not per epoch, because
+            # warmup over ~5% of a 50-epoch run is 2.5 epochs - far too coarse to
+            # resolve at epoch granularity, and warmup is exactly the phase a deep
+            # pre-norm transformer is most sensitive to.
+            if self.scheduler is not None:
+                self.scheduler.step()
 
+            gn = float(grad_norm)
+            if math.isfinite(gn):
+                grad_norm_accum += gn
+                grad_norm_batches += 1
+                if gn > self.grad_clip:
+                    clipped_batches += 1
+            else:
+                # Under AMP this is routine: the GradScaler raises its scale every
+                # growth_interval (2000) steps until the gradients overflow, then skips
+                # the step and halves it. Counted rather than averaged, because a single
+                # inf makes the epoch mean inf and destroys the column.
+                nonfinite_batches += 1
+
+            # ADE/FDE are interpretable trajectory-quality metrics on top of the raw L1
+            # waypoint loss; the unweighted per-axis errors are tracked separately so a
+            # lateral/longitudinal imbalance (the near-zero-steering failure mode) stays
+            # visible even though the loss weights the axes unevenly on purpose.
             total_loss_accum += total_loss.item()
-            q_loss_accum += loss_q.item()
-            wp_loss_accum += loss_wp.item()
-            ade_accum += ade
-            fde_accum += fde
-            lateral_err_accum += lateral_err
-            longitudinal_err_accum += longitudinal_err
-            grad_norm_accum += float(grad_norm)
+            q_loss_accum += losses["q"].item()
+            wp_loss_accum += losses["wp"].item()
+            ade_accum += losses["ade"].item()
+            fde_accum += losses["fde"].item()
+            lateral_err_accum += losses["lateral"].item()
+            longitudinal_err_accum += losses["longitudinal"].item()
             num_batches += 1
             num_samples += rgb.shape[0]
 
@@ -326,7 +311,7 @@ class WorldOnRailsTrainer:
         avg_fde = fde_accum / max(1, num_batches)
         avg_lateral_err = lateral_err_accum / max(1, num_batches)
         avg_longitudinal_err = longitudinal_err_accum / max(1, num_batches)
-        avg_grad_norm = grad_norm_accum / max(1, num_batches)
+        avg_grad_norm = grad_norm_accum / max(1, grad_norm_batches)
         elapsed = time.time() - start_time
         samples_per_sec = num_samples / max(1e-6, elapsed)
 
@@ -344,6 +329,9 @@ class WorldOnRailsTrainer:
             "wp_lateral_error_m": avg_lateral_err,
             "wp_longitudinal_error_m": avg_longitudinal_err,
             "grad_norm": avg_grad_norm,
+            "nonfinite_grad_batches": nonfinite_batches,
+            "clipped_grad_batches": clipped_batches,
+            "grad_clip": self.grad_clip,
             "lr_backbone": lr_b,
             "lr_heads": lr_h,
             "samples_per_sec": samples_per_sec,
@@ -352,54 +340,71 @@ class WorldOnRailsTrainer:
             "time": elapsed
         }
 
+    def validate(self) -> Dict[str, float]:
+        """Held-out evaluation; empty dict when no validation loader is configured."""
+        return run_validation(
+            self.model, self.val_loader, self.device, autocast, self.use_amp,
+            self.wp_loss_weight, self.q_loss_weight, self.lateral_loss_weight
+        )
+
+    def _build_scheduler(self, num_epochs: int) -> LambdaLR:
+        return build_warmup_cosine_scheduler(
+            self.optimizer, num_epochs, len(self.train_loader),
+            warmup_frac=self.warmup_frac, peak_lr=self.lr_heads
+        )
+
     def train(self, num_epochs: int = 50, save_freq: int = 5):
         """Runs the full distillation training loop with checkpointing."""
         print(f"--> Starting World on Rails Distillation Training for {num_epochs} epochs on {self.device.upper()}...")
-        scheduler = CosineAnnealingLR(self.optimizer, T_max=num_epochs, eta_min=1e-6)
+        self.scheduler = self._build_scheduler(num_epochs)
         best_loss = float("inf")
+        # Model selection follows the held-out set when there is one. Selecting on
+        # training loss makes "best" mean "most memorised" for a head with 106M
+        # parameters over ~9.6k frames.
+        select_on = "val_loss" if self.val_loader is not None else "total_loss"
 
         # The frozen backbone never changes, so it ships once. Per-epoch checkpoints
         # reference it by name and carry only the trained heads.
-        if self._frozen_keys:
-            frozen_path = os.path.join(self.save_dir, "frozen_backbone.pth")
-            torch.save({"model": self._state_dict_cpu(self._frozen_keys)}, frozen_path)
-            n_frozen, n_total = len(self._frozen_keys), len(self.model.state_dict())
-            print(f"--> Wrote frozen backbone once ({n_frozen}/{n_total} tensors) to {frozen_path};"
-                  f" per-epoch checkpoints carry only the {n_total - n_frozen} trained head tensors.")
+        self.ckpt.write_frozen_backbone_once()
 
         for epoch in range(1, num_epochs + 1):
             metrics = self.train_epoch(epoch)
-            scheduler.step()
-            is_best = metrics["total_loss"] < best_loss
+            metrics.update(self.validate())
+            is_best = metrics[select_on] < best_loss
 
             # Checkpointing. One CPU snapshot of the trained heads is shared by every
             # file written this epoch, and the serialization itself runs in a thread,
             # so save_sec below measures only the snapshot - the disk write overlaps
             # the next epoch.
             save_start = time.time()
-            trainable = self._state_dict_cpu(
-                [k for k in self.model.state_dict() if k not in self._frozen_keys]
-            )
+            trainable = self.ckpt.trainable_state_dict_cpu()
             # dict(metrics): the writer thread pickles this while the main thread is
             # still adding save_sec to the live dict below.
             common = {"epoch": epoch, "model": trainable, "metrics": dict(metrics),
-                      "partial": bool(self._frozen_keys), "frozen_ref": "frozen_backbone.pth"}
+                      "partial": bool(self.ckpt.frozen_keys), "frozen_ref": "frozen_backbone.pth",
+                      # Stamped so evaluation rebuilds the same geometry it was trained
+                      # under. Without it, load_state_dict(strict=False) happily loads a
+                      # 5-token checkpoint into a 68-token model and drives on untrained
+                      # positional embeddings.
+                      "config": self.model_config}
             payloads = [(dict(common), os.path.join(self.save_dir, "latest_model.pth"))]
 
             if is_best:
-                best_loss = metrics["total_loss"]
+                best_loss = metrics[select_on]
                 payloads.append((dict(common), os.path.join(self.save_dir, "best_model.pth")))
 
             # Optimizer state is only needed to resume, and for AdamW it is twice the
             # size of the weights it tracks - so it rides along with the periodic
             # snapshots rather than being rewritten every epoch.
             if epoch % save_freq == 0 or epoch == num_epochs:
-                payloads[0][0]["optimizer"] = _to_cpu(self.optimizer.state_dict())
+                payloads[0][0]["optimizer"] = to_cpu(self.optimizer.state_dict())
                 payloads.append((dict(common), os.path.join(self.save_dir, f"model_epoch_{epoch:03d}.pth")))
 
-            self._save_async(payloads)
+            self.ckpt.save_async(payloads)
             metrics["save_sec"] = time.time() - save_start
 
+            val_str = (f"VAL Loss: {metrics['val_loss']:.4f} ADE: {metrics['val_wp_ade_m']:.3f}m "
+                       f"Lat: {metrics['val_wp_lateral_error_m']:.3f}m | " if "val_loss" in metrics else "")
             print(
                 f"[Epoch {epoch:03d}/{num_epochs:03d}] "
                 f"Total Loss: {metrics['total_loss']:.4f} | "
@@ -407,20 +412,40 @@ class WorldOnRailsTrainer:
                 f"WP Loss: {metrics['wp_loss']:.4f} | "
                 f"ADE: {metrics['wp_ade_m']:.3f}m | FDE: {metrics['wp_fde_m']:.3f}m | "
                 f"Lat Err: {metrics['wp_lateral_error_m']:.3f}m | Lon Err: {metrics['wp_longitudinal_error_m']:.3f}m | "
+                f"{val_str}"
+                f"GradNorm: {metrics['grad_norm']:.2f} "
+                f"(clipped {metrics['clipped_grad_batches']}/{metrics['num_batches']}, "
+                f"skipped {metrics['nonfinite_grad_batches']}) | "
                 f"Samples/s: {metrics['samples_per_sec']:.1f} | Time: {metrics['time']:.2f}s "
                 f"(data {metrics['data_wait_sec']:.1f}s / compute {metrics['compute_sec']:.1f}s"
                 f" / save {metrics['save_sec']:.2f}s){' ★ best' if is_best else ''}"
             )
 
             hw = HardwareMonitor.get_metrics()
-            for tag in ("total_loss", "q_loss", "wp_loss", "wp_ade_m", "wp_fde_m",
-                        "wp_lateral_error_m", "wp_longitudinal_error_m",
-                        "grad_norm", "lr_backbone", "lr_heads", "samples_per_sec",
-                        "data_wait_sec", "compute_sec", "save_sec"):
+            scalar_tags = ["total_loss", "q_loss", "wp_loss", "wp_ade_m", "wp_fde_m",
+                           "wp_lateral_error_m", "wp_longitudinal_error_m",
+                           "grad_norm", "nonfinite_grad_batches", "clipped_grad_batches",
+                           "lr_backbone", "lr_heads", "samples_per_sec",
+                           "data_wait_sec", "compute_sec", "save_sec"]
+            scalar_tags += [k for k in ("val_loss", "val_wp_ade_m", "val_wp_fde_m",
+                                        "val_wp_lateral_error_m", "val_wp_longitudinal_error_m")
+                            if k in metrics]
+            for tag in scalar_tags:
                 self.logger.add_scalar(f"wor/{tag}", metrics[tag], epoch)
+
+            # Blank rather than 0.0 when validation is off - a zero here would read as
+            # a perfect held-out score in any downstream plot.
+            val_cols = {k: round(metrics[k], 5) for k in (
+                "val_loss", "val_wp_ade_m", "val_wp_fde_m",
+                "val_wp_lateral_error_m", "val_wp_longitudinal_error_m", "val_time_sec"
+            ) if k in metrics}
 
             self.csv_logger.log_step({
                 "epoch": epoch, "num_batches": metrics["num_batches"],
+                **val_cols,
+                "nonfinite_grad_batches": metrics["nonfinite_grad_batches"],
+                "clipped_grad_batches": metrics["clipped_grad_batches"],
+                "grad_clip": metrics["grad_clip"],
                 "wall_time_s": round(time.time() - self.train_start_time, 2),
                 "epoch_time_sec": round(metrics["time"], 2),
                 "samples_per_sec": round(metrics["samples_per_sec"], 1),
@@ -443,7 +468,7 @@ class WorldOnRailsTrainer:
             })
             self.csv_logger.flush()
 
-        self._await_save()
+        self.ckpt.await_save()
         self.csv_logger.close()
         if os.path.exists(self.csv_logger.filepath):
             self.logger.log_artifact(self.csv_logger.filepath)
