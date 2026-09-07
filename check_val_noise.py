@@ -134,16 +134,18 @@ def main():
     print("  held-out   : %d frames across %d routes (of %d total routes)"
           % (len(val_idx), len(val_routes), len(groups)))
 
-    model = load_wor_model(checkpoint_path=args.checkpoint, backbone_name=args.backbone,
-                           policy_arch=args.policy_arch, device=args.device)
-    model.eval()
+    def score(ckpt, arch):
+        """Per-route mean loss for one checkpoint on the shared held-out routes."""
+        m = load_wor_model(checkpoint_path=ckpt, backbone_name=args.backbone,
+                           policy_arch=arch, device=args.device)
+        m.eval()
+        fl = per_frame_losses(m, dataset, val_idx, args)
+        br = {}
+        for pos, i in enumerate(val_idx):
+            br.setdefault(frame_to_route[i], []).append(fl[pos])
+        return m, fl, {k: float(np.mean(v)) for k, v in br.items()}, {k: len(v) for k, v in br.items()}
 
-    losses = per_frame_losses(model, dataset, val_idx, args)
-    by_route = {}
-    for pos, i in enumerate(val_idx):
-        by_route.setdefault(frame_to_route[i], []).append(losses[pos])
-    route_means = {k: float(np.mean(v)) for k, v in by_route.items()}
-    route_counts = {k: len(v) for k, v in by_route.items()}
+    model, losses, route_means, route_counts = score(args.checkpoint, args.policy_arch)
 
     point = float(losses.mean())
     print("\n  held-out loss (all %d frames) : %.4f" % (len(losses), point))
@@ -175,6 +177,52 @@ def main():
             print("     levers here; capacity is not. Any architecture arm run in this")
             print("     regime is comparing how gracefully models overfit.")
 
+    # ---- Paired comparison -------------------------------------------------
+    # The CI above is on ONE model's absolute loss, and it is not the right yardstick
+    # for a margin between two models. Both were scored on the SAME routes, so the
+    # route-draw uncertainty is shared and largely cancels in the difference: if both
+    # are bad on the same hard route, that route moves both numbers together and says
+    # nothing about which is better. Bootstrapping the per-route DIFFERENCE keeps that
+    # pairing intact, which is why a margin can be solid even when each absolute number
+    # is not. Comparing the two separate CIs instead would be the classic error - it
+    # answers a question nobody asked and is far too conservative here.
+    if args.checkpoint_b:
+        arch_b = args.policy_arch_b or args.policy_arch
+        print("\n" + "=" * 76)
+        print("  PAIRED comparison against %s (%s)" % (args.checkpoint_b, arch_b))
+        print("=" * 76)
+        _mb, losses_b, route_means_b, _cb = score(args.checkpoint_b, arch_b)
+        point_b = float(losses_b.mean())
+
+        shared = [k for k in route_means if k in route_means_b]
+        d = np.array([route_means[k] - route_means_b[k] for k in shared])
+        w = np.array([route_counts[k] for k in shared], dtype=float)
+
+        rng_d = np.random.RandomState(0)
+        dd = rng_d.randint(0, len(shared), size=(args.bootstrap, len(shared)))
+        boot_d = (d[dd] * w[dd]).sum(axis=1) / w[dd].sum(axis=1)
+        dlo, dhi = np.percentile(boot_d, [2.5, 97.5])
+        observed = float((d * w).sum() / w.sum())
+        wins = int((d < 0).sum())
+
+        print("\n  A (%s) : %.4f" % (args.policy_arch, point))
+        print("  B (%s) : %.4f" % (arch_b, point_b))
+        print("  paired difference A - B       : %+.4f  (negative = A better)" % observed)
+        print("  bootstrap 95%% CI on difference: [%+.4f, %+.4f]" % (dlo, dhi))
+        print("  A beats B on %d of %d routes" % (wins, len(shared)))
+        print()
+        if dhi < 0:
+            print("  VERDICT: A is better, and the margin survives the route draw. The")
+            print("  CI on the difference excludes zero even though each model's own CI")
+            print("  is wide, because both were scored on the same routes.")
+        elif dlo > 0:
+            print("  VERDICT: B is better, and that margin survives the route draw.")
+        else:
+            print("  VERDICT: NOT SUPPORTED. The CI on the difference spans zero, so with")
+            print("  %d held-out routes this margin is indistinguishable from which routes" % len(shared))
+            print("  happened to be held out. Reporting it as a result would be an error.")
+        print("=" * 76)
+
     if args.reference_spread is None:
         print("\n  Pass --reference_spread <across-seed spread> for a verdict.")
         return
@@ -186,9 +234,14 @@ def main():
     print("  held-out 95%% CI width         : %.4f  (%.2fx the training spread)" % (spread95, ratio))
     print("-" * 76)
     if ratio >= 0.7:
-        print("\n  VERDICT: the held-out set is a dominant source of variance. Enlarge or")
-        print("  restructure it before spending compute on architecture arms - at this")
-        print("  size a real improvement and a lucky draw of routes look the same.")
+        print("\n  VERDICT: the held-out ESTIMATE is dominated by which routes were drawn.")
+        print("  Any absolute number from this set carries that whole interval with it, so")
+        print("  quoting it to three decimals overstates what was measured.")
+        print()
+        print("  This does NOT by itself invalidate a margin between two models scored on")
+        print("  these same routes - that uncertainty is shared and cancels in the paired")
+        print("  difference. Re-run with --checkpoint_b to test the margin properly; use")
+        print("  this interval only when reporting a single model's absolute performance.")
     elif ratio <= 0.3:
         print("\n  VERDICT: the held-out set is stable; the across-seed spread is genuine")
         print("  training variance. Weight averaging and more seeds are the levers that")
