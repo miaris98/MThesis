@@ -61,6 +61,10 @@ has not been measured. Seed runs were launched and lost when the instance was sh
 
 ---
 
+See also [TODO_optuna_and_resources.md](TODO_optuna_and_resources.md) for the Optuna
+hyperparameter-search plan (the structural fix for 13.6's shared-defaults problem) and an
+assessment of nine external CARLA datasets/models.
+
 ## Next — Tier 1
 
 - [ ] **Re-run the size curve (10M / 30M / 100M).** "Size doesn't matter" was measured
