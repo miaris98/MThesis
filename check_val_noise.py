@@ -80,6 +80,12 @@ def parse_args():
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--reference_spread", type=float, default=None,
                    help="Across-seed spread from compare_wor_runs.py, e.g. 0.0308.")
+    p.add_argument("--checkpoint_b", type=str, default=None,
+                   help="Second checkpoint. Enables the PAIRED comparison, which is the only "
+                        "valid way to ask whether a margin between two models survives the "
+                        "route-draw uncertainty.")
+    p.add_argument("--policy_arch_b", type=str, default=None,
+                   help="Arch of --checkpoint_b (defaults to --policy_arch).")
     p.add_argument("--train_subset", type=int, default=2000,
                    help="Frames of the TRAIN split to score for the generalisation gap (0 to skip).")
     return p.parse_args()
