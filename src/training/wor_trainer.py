@@ -54,7 +54,7 @@ class WorldOnRailsTrainer:
         # `inf` rows in the first telemetry files unreadable. The AMP GradScaler
         # deliberately produces those (it overshoots the loss scale, skips the step and
         # backs off), so their *count* is the useful signal, not their magnitude.
-        "nonfinite_grad_batches", "clipped_grad_batches", "grad_clip",
+        "nonfinite_grad_batches", "clipped_grad_batches", "grad_clip", "seed",
         "is_best", "save_sec",
         "gpu_mem_used_mb", "gpu_mem_pct", "sys_cpu_pct", "sys_ram_used_gb"
     ]
@@ -84,6 +84,7 @@ class WorldOnRailsTrainer:
         decay_gates_and_norms: bool = False,
         val_split: float = 0.0,
         split_seed: int = 0,
+        seed: Optional[int] = None,
         experiment_name: str = "WoR_Offline_Training",
         use_mlflow: bool = True,
         mlflow_port: int = 10100
@@ -121,12 +122,15 @@ class WorldOnRailsTrainer:
         # can be given comparable effective step sizes.
         self.grad_clip = grad_clip
         self.warmup_frac = warmup_frac
+        # Recorded per row so a telemetry CSV alone identifies which run it came from.
+        self.seed = seed
         self.scheduler = None
         # Architecture geometry that a checkpoint cannot be reconstructed from by
         # shape alone, recorded so load_wor_model rebuilds it rather than guessing.
         self.model_config = {
             "backbone": model.encoder.backbone_name,
             "route_points": getattr(model, "route_points", route_points),
+            "seed": seed,
             "vision_grid": getattr(model, "vision_grid", None),
             "pool_vision": getattr(model, "pool_vision", None),
             "num_vision_tokens": getattr(model, "num_vision_tokens", None)
@@ -147,7 +151,7 @@ class WorldOnRailsTrainer:
             "lateral_loss_weight": lateral_loss_weight,
             "grad_clip": grad_clip, "warmup_frac": warmup_frac,
             "decay_gates_and_norms": decay_gates_and_norms,
-            "val_split": val_split, "val_data_dir": val_data_dir or "",
+            "val_split": val_split, "val_data_dir": val_data_dir or "", "seed": seed,
             "vision_grid": getattr(model, "vision_grid", ""),
             "pool_vision": getattr(model, "pool_vision", "")
         })
@@ -167,7 +171,8 @@ class WorldOnRailsTrainer:
             route_points=route_points,
             val_data_dir=val_data_dir,
             val_split=val_split,
-            split_seed=split_seed
+            split_seed=split_seed,
+            seed=seed
         )
         base_ds = getattr(self.train_loader.dataset, "dataset", self.train_loader.dataset)
         if len(self.train_loader.dataset) == 0 or getattr(base_ds, "is_synthetic", False):
@@ -446,6 +451,7 @@ class WorldOnRailsTrainer:
                 "nonfinite_grad_batches": metrics["nonfinite_grad_batches"],
                 "clipped_grad_batches": metrics["clipped_grad_batches"],
                 "grad_clip": metrics["grad_clip"],
+                "seed": "" if self.seed is None else self.seed,
                 "wall_time_s": round(time.time() - self.train_start_time, 2),
                 "epoch_time_sec": round(metrics["time"], 2),
                 "samples_per_sec": round(metrics["samples_per_sec"], 1),

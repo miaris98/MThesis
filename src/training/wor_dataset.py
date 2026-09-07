@@ -21,6 +21,8 @@ from PIL import Image
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 
+from src.training.seeding import make_generator, make_worker_init_fn
+
 
 class WorldOnRailsDataset(Dataset):
     """
@@ -276,7 +278,8 @@ class WorldOnRailsDataset(Dataset):
         }
 
 
-def _wrap_loader(dataset, batch_size: int, num_workers: int, is_train: bool) -> DataLoader:
+def _wrap_loader(dataset, batch_size: int, num_workers: int, is_train: bool,
+                 seed: Optional[int] = None) -> DataLoader:
     kwargs = dict(
         batch_size=batch_size,
         shuffle=is_train,
@@ -285,6 +288,14 @@ def _wrap_loader(dataset, batch_size: int, num_workers: int, is_train: bool) -> 
         drop_last=is_train,
         persistent_workers=num_workers > 0
     )
+    # Sample order and per-worker RNG are seeded so two runs of the same config differ
+    # only by what is being ablated. See src/training/seeding.py for why NumPy needs
+    # explicit per-worker seeding where Torch does not.
+    if seed is not None:
+        if is_train:
+            kwargs["generator"] = make_generator(seed)
+        if num_workers > 0:
+            kwargs["worker_init_fn"] = make_worker_init_fn(seed)
     # Only pass prefetch_factor in the multiprocessing case. Torch accepted an
     # explicit None here from 2.0 onward, but older versions reject it outright
     # ("prefetch_factor option could only be specified in multiprocessing"), which
@@ -325,7 +336,8 @@ def create_wor_train_val_dataloaders(
     route_points: int = 4,
     val_data_dir: Optional[str] = None,
     val_split: float = 0.0,
-    split_seed: int = 0
+    split_seed: int = 0,
+    seed: Optional[int] = None
 ) -> Tuple[DataLoader, Optional[DataLoader]]:
     """Creates the training loader and, when asked for, a held-out validation loader.
 
@@ -350,12 +362,12 @@ def create_wor_train_val_dataloaders(
             data_dir=val_data_dir, is_train=False, synthetic_samples=0,
             cache_decoded=cache_decoded, route_points=route_points
         )
-        return (_wrap_loader(train_ds, batch_size, num_workers, True),
-                _wrap_loader(val_ds, batch_size, num_workers, False))
+        return (_wrap_loader(train_ds, batch_size, num_workers, True, seed),
+                _wrap_loader(val_ds, batch_size, num_workers, False, seed))
 
     n = len(train_ds)
     if val_split <= 0.0 or n < 4:
-        return _wrap_loader(train_ds, batch_size, num_workers, True), None
+        return _wrap_loader(train_ds, batch_size, num_workers, True, seed), None
 
     # Group frames by their source route so the split cannot put frame k in train and
     # frame k+1 in validation. Falls back to a per-frame split if no grouping key is
@@ -381,12 +393,12 @@ def create_wor_train_val_dataloaders(
     train_idx = [i for i in range(n) if i not in val_set]
 
     if not val_idx or not train_idx:
-        return _wrap_loader(train_ds, batch_size, num_workers, True), None
+        return _wrap_loader(train_ds, batch_size, num_workers, True, seed), None
 
     print(f"--> Validation split: {len(train_idx)} train / {len(val_idx)} val frames "
           f"across {len(keys)} route group(s), seed {split_seed}."
           + ("" if len(keys) > 1 else "  [Warning] Only one group found - this is a"
              " frame-level split and will read optimistically."))
 
-    return (_wrap_loader(Subset(train_ds, train_idx), batch_size, num_workers, True),
-            _wrap_loader(Subset(train_ds, val_idx), batch_size, num_workers, False))
+    return (_wrap_loader(Subset(train_ds, train_idx), batch_size, num_workers, True, seed),
+            _wrap_loader(Subset(train_ds, val_idx), batch_size, num_workers, False, seed))

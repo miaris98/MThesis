@@ -21,7 +21,15 @@ import torch.nn as nn
 from src.models.world_on_rails.wor_policy import PretrainedVisionEncoder, PIDController
 from src.models.transformer.layers import RMSNorm, QwenTransformerBlock
 
+# Trunk sizes. The 10m/30m entries exist because the offline dataset is ~9,600 frames:
+# at 100m the trunk carries roughly 11,000 trainable parameters per training sample and
+# still *underfits* (its training loss is worse than a 1.8M conv head's), so the whole
+# 100m/500m/900m range is on the wrong side of the size/data trade-off for this task.
+# Sizing down is the cheapest experiment available and the one that recalibrates every
+# other comparison, so it is a first-class option rather than a debug setting.
 _MODEL_SIZES = {
+    "10m": dict(depth=6, embed_dim=384, num_heads=6, ffn_dim=1024),
+    "30m": dict(depth=8, embed_dim=512, num_heads=8, ffn_dim=1536),
     "100m": dict(depth=12, embed_dim=768, num_heads=12, ffn_dim=2816),
     "500m": dict(depth=28, embed_dim=1024, num_heads=16, ffn_dim=4096),
     "900m": dict(depth=24, embed_dim=1536, num_heads=24, ffn_dim=6144),

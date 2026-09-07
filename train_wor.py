@@ -5,6 +5,7 @@ Usage:
     python train_wor.py --data_dir dataset/ --epochs 50 --batch_size 32 --backbone resnet34 --pretrained 1
 """
 import argparse
+import json
 import os
 import torch
 import torch.nn.functional as F
@@ -14,6 +15,7 @@ from src.models.world_on_rails import WorldOnRailsPolicy, QwenWorldOnRailsPolicy
 from src.training.wor_trainer import WorldOnRailsTrainer
 from src.training.auto_batch_size import find_max_batch_size
 from src.training.gpu_cleanup import cleanup_stale_processes
+from src.training.seeding import seed_everything
 
 
 def parse_args():
@@ -22,7 +24,7 @@ def parse_args():
     parser.add_argument("--save_dir", type=str, default=str(paths.checkpoints_dir() / "wor_resnet34"),
                         help="Directory to save model checkpoints, TensorBoard events and telemetry. Defaults under the machine's experiment root (external disk locally, /workspace on vast.ai) - see src/config/paths.py")
     parser.add_argument("--backbone", type=str, default="resnet34", choices=["resnet18", "resnet34", "resnet50"], help="Vision backbone architecture")
-    parser.add_argument("--policy_arch", type=str, default="cnn", choices=["cnn", "qwen100m", "qwen500m", "qwen900m"], help="Decision-head architecture on top of the frozen vision encoder: 'cnn' is the original WoR SpatialQHead (conv+MLP); 'qwen*' swaps it for a Qwen-style self-attention transformer trunk (see qwen_wor_policy.py), sized 100M/500M/900M params, still predicting waypoints for the same PIDController")
+    parser.add_argument("--policy_arch", type=str, default="cnn", choices=["cnn", "qwen10m", "qwen30m", "qwen100m", "qwen500m", "qwen900m"], help="Decision-head architecture on top of the frozen vision encoder: 'cnn' is the original WoR SpatialQHead (conv+MLP); 'qwen*' swaps it for a Qwen-style self-attention transformer trunk (see qwen_wor_policy.py), sized 10M/30M/100M/500M/900M params (the small sizes matter here - the offline dataset is ~9,600 frames, and the 100M trunk underfits it), still predicting waypoints for the same PIDController")
     parser.add_argument("--pretrained", type=int, default=1, help="Use ImageNet pretrained weights (1=True, 0=False)")
     parser.add_argument("--freeze_backbone", type=int, default=1, help="Freeze the pretrained vision backbone so only the policy heads train (1=True, 0=False). On by default: training the vision model is out of scope here, and fine-tuning it is also the bulk of the compute cost")
     parser.add_argument("--epochs", type=int, default=50, help="Total number of training epochs")
@@ -52,8 +54,11 @@ def parse_args():
     parser.add_argument("--warmup_frac", type=float, default=0.05, help="Fraction of total optimizer steps spent linearly warming the learning rate up before cosine decay begins. 0 reproduces the previous schedule (full LR from batch 1), which a conv head tolerates and a 12-layer pre-norm transformer generally does not")
     parser.add_argument("--decay_gates_and_norms", type=int, default=0, help="Apply AdamW weight decay to gates, norm gains, embeddings and learned tokens as well as weight matrices (1=True, 0=False). The old behaviour, kept for reproducibility. It decays the transformer's 24 alpha residual gates toward zero, i.e. penalizes the model for letting each block contribute at all")
     parser.add_argument("--val_data_dir", type=str, default=None, help="Separate held-out dataset directory. Preferred over --val_split, which divides frames rather than routes")
-    parser.add_argument("--val_split", type=float, default=0.05, help="Fraction of --data_dir held out for validation when --val_data_dir is not given, split on route boundaries where the layout exposes them. 0 disables validation entirely, which also means 'best' is selected on training loss")
+    parser.add_argument("--val_split", type=float, default=0.15, help="Fraction of --data_dir held out for validation when --val_data_dir is not given, split on route boundaries where the layout exposes them. 0 disables validation entirely, which also means 'best' is selected on training loss. 0.15 rather than 0.05 because the held-out number is what an ablation is decided on: 5%% of ~9,600 frames is ~480, and split on route boundaries that can be one or two routes, which is far too noisy to separate two components")
     parser.add_argument("--split_seed", type=int, default=0, help="Seed for the deterministic train/validation split")
+    parser.add_argument("--seed", type=int, default=0, help="Master seed for weight initialization, dropout and data order. Nothing in this pipeline was seeded before, which is fine for one run and fatal for a comparison: an ablation cannot attribute a difference to a component until the spread between two identical runs is known. Vary this to measure that spread")
+    parser.add_argument("--deterministic", type=int, default=0, help="Additionally pin cuDNN kernel selection and refuse nondeterministic CUDA kernels, for bitwise reproducibility (1=True, 0=False). Costs throughput - it disables the cuDNN autotuner - so use it to reproduce one run, not to run a sweep")
+    parser.add_argument("--run_label", type=str, default=None, help="Human-readable name for this run, recorded in run_config.json and used by compare_wor_runs.py to group repeats of the same configuration. Defaults to the save_dir basename")
     parser.add_argument("--compile_model", type=int, default=0, help="Wrap the policy in torch.compile - trades a one-off compilation on the first epoch for faster steps afterwards, so it only pays off over a long run (1=True, 0=False)")
     parser.add_argument("--kill_stale", type=int, default=1, help="On startup, terminate SUSPENDED train_wor.py processes still pinning VRAM (what Ctrl+Z leaves behind). Running instances are reported but never killed (1=True, 0=False)")
     parser.add_argument("--auto_batch_size", type=int, default=0, help="Probe the largest batch size that fits in available VRAM instead of using --batch_size directly (1=True, 0=False)")
@@ -68,7 +73,13 @@ def main():
     if args.device == "cuda":
         # Every batch is a fixed 256x256 image, so cuDNN can safely autotune the
         # fastest conv kernels for that exact shape instead of using generic ones.
+        # seed_everything(deterministic=True) turns this back off, which is the
+        # trade it is documented to make.
         torch.backends.cudnn.benchmark = True
+
+    # Seeded before any model is constructed, so weight init is part of what the seed
+    # controls - the auto-batch-size probe below builds throwaway models too.
+    seed_everything(args.seed, deterministic=bool(args.deterministic))
 
     # Reclaim VRAM from a previous run left suspended by Ctrl+Z before measuring
     # what's free - otherwise the batch-size probe budgets against a GPU that a
@@ -131,6 +142,7 @@ def main():
               f"{'  [GLOBALLY POOLED - spatially blind ablation]' if args.vision_grid <= 0 else ''}")
     print(f" Optimizer:       clip {args.grad_clip} | warmup {args.warmup_frac:.0%} of steps | "
           f"decay on gates/norms: {bool(args.decay_gates_and_norms)}")
+    print(f" Seed:            {args.seed}{' (deterministic)' if args.deterministic else ''}")
     print(f" Validation:      {args.val_data_dir or (f'{args.val_split:.0%} split of --data_dir' if args.val_split > 0 else 'NONE (best selected on train loss)')}")
     print(f" Backbone:        {args.backbone.upper()} (Pretrained: {bool(args.pretrained)})")
     print(f" Training:        {'policy heads only - vision backbone FROZEN' if args.freeze_backbone else 'policy heads + vision backbone (fine-tuning vision!)'}")
@@ -169,6 +181,7 @@ def main():
         val_data_dir=args.val_data_dir,
         val_split=args.val_split,
         split_seed=args.split_seed,
+        seed=args.seed,
         grad_clip=args.grad_clip,
         warmup_frac=args.warmup_frac,
         decay_gates_and_norms=bool(args.decay_gates_and_norms),
@@ -190,7 +203,18 @@ def main():
         mlflow_port=args.mlflow_port
     )
 
-    # 3. Launch Training Loop
+    # 3. Record the full configuration next to the telemetry, so a run directory is
+    # self-describing without MLflow having been reachable. compare_wor_runs.py reads
+    # this to group and label runs; a sweep whose rows cannot be traced back to the
+    # flags that produced them is not an experiment.
+    os.makedirs(args.save_dir, exist_ok=True)
+    run_config = dict(vars(args))
+    run_config["run_label"] = args.run_label or os.path.basename(os.path.normpath(args.save_dir))
+    run_config["batch_size_effective"] = args.batch_size
+    with open(os.path.join(args.save_dir, "run_config.json"), "w", encoding="utf-8") as f:
+        json.dump(run_config, f, indent=2, sort_keys=True, default=str)
+
+    # 4. Launch Training Loop
     trainer.train(num_epochs=args.epochs)
 
 
