@@ -328,7 +328,7 @@ def create_wor_dataloader(
 
 
 def route_group_split(
-    dataset, val_split: float, split_seed: int
+    dataset, val_split: float, split_seed: int, fold: int = 0, num_folds: int = 1
 ) -> Tuple[List[int], List[int], Dict[str, List[int]], List[str]]:
     """Partitions `dataset` into train/val indices on route boundaries.
 
@@ -353,12 +353,28 @@ def route_group_split(
     keys = sorted(groups)
     rng.shuffle(keys)
 
-    target = int(round(len(dataset) * val_split))
-    val_idx: List[int] = []
-    for k in keys:
-        if len(val_idx) >= target:
-            break
-        val_idx.extend(groups[k])
+    if num_folds and num_folds > 1:
+        # K-fold over routes: the shuffled route list is cut into num_folds contiguous
+        # blocks and block `fold` is held out. Across all folds every route is held out
+        # exactly once, so a model scored fold-by-fold is scored on the whole dataset
+        # rather than on one 15% draw. That is the entire point: sampling error falls
+        # with the square root of the number of independent held-out routes, and with
+        # 129 routes against 17 that is a factor of 2.8 on every interval.
+        #
+        # Contiguous blocks of the *shuffled* list, not a modulo stride, so the folds
+        # stay disjoint and reproducible from (split_seed, num_folds) alone.
+        fold = int(fold) % int(num_folds)
+        bounds = [round(len(keys) * f / num_folds) for f in range(num_folds + 1)]
+        val_keys = keys[bounds[fold]:bounds[fold + 1]]
+        val_idx = [i for k in val_keys for i in groups[k]]
+    else:
+        target = int(round(len(dataset) * val_split))
+        val_idx = []
+        for k in keys:
+            if len(val_idx) >= target:
+                break
+            val_idx.extend(groups[k])
+
     val_set = set(val_idx)
     train_idx = [i for i in range(len(dataset)) if i not in val_set]
     return train_idx, val_idx, groups, keys
@@ -374,7 +390,9 @@ def create_wor_train_val_dataloaders(
     val_data_dir: Optional[str] = None,
     val_split: float = 0.0,
     split_seed: int = 0,
-    seed: Optional[int] = None
+    seed: Optional[int] = None,
+    fold: int = 0,
+    num_folds: int = 1
 ) -> Tuple[DataLoader, Optional[DataLoader]]:
     """Creates the training loader and, when asked for, a held-out validation loader.
 
@@ -403,16 +421,18 @@ def create_wor_train_val_dataloaders(
                 _wrap_loader(val_ds, batch_size, num_workers, False, seed))
 
     n = len(train_ds)
-    if val_split <= 0.0 or n < 4:
+    if (val_split <= 0.0 and num_folds <= 1) or n < 4:
         return _wrap_loader(train_ds, batch_size, num_workers, True, seed), None
 
-    train_idx, val_idx, groups, keys = route_group_split(train_ds, val_split, split_seed)
+    train_idx, val_idx, groups, keys = route_group_split(
+        train_ds, val_split, split_seed, fold=fold, num_folds=num_folds)
 
     if not val_idx or not train_idx:
         return _wrap_loader(train_ds, batch_size, num_workers, True, seed), None
 
+    fold_note = f", fold {fold}/{num_folds}" if num_folds > 1 else ""
     print(f"--> Validation split: {len(train_idx)} train / {len(val_idx)} val frames "
-          f"across {len(keys)} route group(s), seed {split_seed}."
+          f"across {len(keys)} route group(s), seed {split_seed}{fold_note}."
           + ("" if len(keys) > 1 else "  [Warning] Only one group found - this is a"
              " frame-level split and will read optimistically."))
 

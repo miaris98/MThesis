@@ -56,6 +56,12 @@ def parse_args():
     parser.add_argument("--val_data_dir", type=str, default=None, help="Separate held-out dataset directory. Preferred over --val_split, which divides frames rather than routes")
     parser.add_argument("--val_split", type=float, default=0.15, help="Fraction of --data_dir held out for validation when --val_data_dir is not given, split on route boundaries where the layout exposes them. 0 disables validation entirely, which also means 'best' is selected on training loss. 0.15 rather than 0.05 because the held-out number is what an ablation is decided on: 5%% of ~9,600 frames is ~480, and split on route boundaries that can be one or two routes, which is far too noisy to separate two components")
     parser.add_argument("--split_seed", type=int, default=0, help="Seed for the deterministic train/validation split")
+    parser.add_argument("--num_folds", type=int, default=1,
+                        help="K-fold cross-validation over routes. With K>1 the shuffled route list is "
+                             "cut into K disjoint blocks and --fold selects which is held out, so K runs "
+                             "score the model on every route exactly once instead of on one 15%% draw. "
+                             "Overrides --val_split.")
+    parser.add_argument("--fold", type=int, default=0, help="Which fold to hold out (0..num_folds-1)")
     parser.add_argument("--seed", type=int, default=0, help="Master seed for weight initialization, dropout and data order. Nothing in this pipeline was seeded before, which is fine for one run and fatal for a comparison: an ablation cannot attribute a difference to a component until the spread between two identical runs is known. Vary this to measure that spread")
     parser.add_argument("--deterministic", type=int, default=0, help="Additionally pin cuDNN kernel selection and refuse nondeterministic CUDA kernels, for bitwise reproducibility (1=True, 0=False). Costs throughput - it disables the cuDNN autotuner - so use it to reproduce one run, not to run a sweep")
     parser.add_argument("--run_label", type=str, default=None, help="Human-readable name for this run, recorded in run_config.json and used by compare_wor_runs.py to group repeats of the same configuration. Defaults to the save_dir basename")
@@ -181,6 +187,8 @@ def main():
         val_data_dir=args.val_data_dir,
         val_split=args.val_split,
         split_seed=args.split_seed,
+        fold=args.fold,
+        num_folds=args.num_folds,
         seed=args.seed,
         grad_clip=args.grad_clip,
         warmup_frac=args.warmup_frac,

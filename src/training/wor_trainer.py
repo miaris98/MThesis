@@ -84,6 +84,8 @@ class WorldOnRailsTrainer:
         decay_gates_and_norms: bool = False,
         val_split: float = 0.0,
         split_seed: int = 0,
+        fold: int = 0,
+        num_folds: int = 1,
         seed: Optional[int] = None,
         experiment_name: str = "WoR_Offline_Training",
         use_mlflow: bool = True,
@@ -131,6 +133,9 @@ class WorldOnRailsTrainer:
             "backbone": model.encoder.backbone_name,
             "route_points": getattr(model, "route_points", route_points),
             "seed": seed,
+            "fold": fold,
+            "num_folds": num_folds,
+            "split_seed": split_seed,
             "vision_grid": getattr(model, "vision_grid", None),
             "pool_vision": getattr(model, "pool_vision", None),
             "num_vision_tokens": getattr(model, "num_vision_tokens", None)
@@ -172,6 +177,8 @@ class WorldOnRailsTrainer:
             val_data_dir=val_data_dir,
             val_split=val_split,
             split_seed=split_seed,
+            fold=fold,
+            num_folds=num_folds,
             seed=seed
         )
         base_ds = getattr(self.train_loader.dataset, "dataset", self.train_loader.dataset)
