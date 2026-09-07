@@ -250,40 +250,39 @@ if [ ! -f "$PRETRAINED_DIR/model_0030_0.pth" ]; then
     fi
 fi
 
-# Auto-download a subset of the PDM-Lite expert-driving dataset (offline WoR training).
-# The full dataset (autonomousvision/PDM_Lite_Carla_LB2) is 100GB-1TB across 8 towns, so
-# only WOR_DATASET_TOWNS is pulled by default. Override e.g. WOR_DATASET_TOWNS="Town01,Town02"
-# or set WOR_DATASET_TOWNS="" to skip the download entirely.
-WOR_DATASET_TOWNS="${WOR_DATASET_TOWNS:-Town01}"
+# Auto-download the PDM-Lite expert-driving dataset, sized to the disk (offline WoR).
+# Previously pinned to Town01 because the first rented instance was small. Town01 alone
+# is 129 routes, and a 15% split of it leaves 17 held-out routes - too few to resolve a
+# 5% difference between two policies (challenges group 13.19). download_pdm_lite.py picks
+# as many towns as the free space allows, smallest-first, so a bigger instance
+# automatically gets a bigger dataset without editing anything here.
+#
+#   WOR_DATASET_TOWNS="Town01,Town03"  pin an explicit list (still disk-checked)
+#   WOR_DATASET_TOWNS="none"           skip the download entirely
+#   WOR_DATASET_RESERVE_GB=40          leave more room for checkpoints
+#   WOR_DATASET_MAX_GB=60              cap the download regardless of free space
+WOR_DATASET_TOWNS="${WOR_DATASET_TOWNS:-auto}"
 WOR_DATASET_DIR="/workspace/dataset/wor_trajectories"
-if [ -n "$WOR_DATASET_TOWNS" ] && [ ! -d "$WOR_DATASET_DIR/$(echo "$WOR_DATASET_TOWNS" | cut -d',' -f1)" ]; then
-    echo -e "${YELLOW}--> Downloading PDM-Lite expert dataset (towns: $WOR_DATASET_TOWNS) for offline WoR training...${NC}"
-    mkdir -p "$WOR_DATASET_DIR"
-    python - "$WOR_DATASET_TOWNS" "$WOR_DATASET_DIR" <<'PYEOF' || echo -e "${RED}[WARNING] PDM-Lite dataset download failed - offline WoR training will fall back to --synthetic_samples.${NC}"
-import sys
-from huggingface_hub import snapshot_download
+WOR_DATASET_RESERVE_GB="${WOR_DATASET_RESERVE_GB:-25}"
 
-towns = [t.strip() for t in sys.argv[1].split(",") if t.strip()]
-out_dir = sys.argv[2]
-patterns = [f"{town}/**" for town in towns]
-snapshot_download(
-    repo_id="autonomousvision/PDM_Lite_Carla_LB2",
-    repo_type="dataset",
-    local_dir=out_dir,
-    allow_patterns=patterns,
-)
-print(f"Downloaded towns {towns} to {out_dir}")
-PYEOF
-    # snapshot_download only fetches the raw *.zip route archives - extract them so
-    # wor_dataset.py finds actual measurements/rgb folders instead of silently falling
-    # back to synthetic data.
-    echo -e "${YELLOW}--> Extracting downloaded PDM-Lite route archives...${NC}"
-    find "$WOR_DATASET_DIR" -name "*.zip" | while read -r zip_path; do
-        unzip -q -o "$zip_path" -d "$(dirname "$zip_path")" && rm -f "$zip_path"
-    done
-    echo -e "${GREEN}✓ PDM-Lite dataset extracted.${NC}"
+if [ "$WOR_DATASET_TOWNS" = "none" ] || [ -z "$WOR_DATASET_TOWNS" ]; then
+    echo -e "${YELLOW}--> PDM-Lite dataset download disabled (WOR_DATASET_TOWNS='none'), skipping.${NC}"
 else
-    echo -e "${YELLOW}--> PDM-Lite dataset already present or download disabled (WOR_DATASET_TOWNS='$WOR_DATASET_TOWNS'), skipping.${NC}"
+    echo -e "${YELLOW}--> Downloading PDM-Lite expert dataset (selection: $WOR_DATASET_TOWNS)...${NC}"
+    DL_ARGS="--dest $WOR_DATASET_DIR --reserve-gb $WOR_DATASET_RESERVE_GB"
+    if [ "$WOR_DATASET_TOWNS" != "auto" ]; then
+        DL_ARGS="$DL_ARGS --towns $WOR_DATASET_TOWNS"
+    fi
+    if [ -n "${WOR_DATASET_MAX_GB:-}" ]; then
+        DL_ARGS="$DL_ARGS --max-gb $WOR_DATASET_MAX_GB"
+    fi
+    # Extracts and deletes each archive as it goes, so a town needs one archive of
+    # headroom rather than twice its own size. Re-running resumes; complete towns are
+    # skipped, and a directory holding only leftover .zip files is treated as incomplete.
+    # PATCH_SCRIPT_DIR, not SCRIPT_DIR: the latter is not assigned until further down
+    # this script, so referencing it here would resolve to an empty path.
+    python "$PATCH_SCRIPT_DIR/download_pdm_lite.py" $DL_ARGS \
+        || echo -e "${RED}[WARNING] PDM-Lite dataset download failed - offline WoR training will fall back to --synthetic_samples.${NC}"
 fi
 
 # Auto-download the pretrained WoR policy checkpoint via PCLA's HF-hosted weights
