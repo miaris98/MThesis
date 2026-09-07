@@ -327,6 +327,43 @@ def create_wor_dataloader(
 
 
 
+def route_group_split(
+    dataset, val_split: float, split_seed: int
+) -> Tuple[List[int], List[int], Dict[str, List[int]], List[str]]:
+    """Partitions `dataset` into train/val indices on route boundaries.
+
+    Extracted so that anything scoring a trained checkpoint can reconstruct the exact
+    partition that checkpoint was trained under. A second, separately-maintained copy
+    of this logic would be worse than none: an evaluation that re-derives the split
+    slightly differently silently grades the model on frames it was trained on, and
+    reports an optimistic number with no error to indicate it.
+
+    Returns `(train_idx, val_idx, groups, shuffled_keys)`. `groups` maps each route key
+    to its frame indices, which is what lets a caller resample at route granularity
+    rather than frame granularity.
+    """
+    groups: Dict[str, List[int]] = {}
+    for i, s in enumerate(dataset.samples):
+        key = ""
+        if isinstance(s, dict):
+            key = os.path.dirname(os.path.dirname(s.get("rgb_path", ""))) or s.get("route_dir", "")
+        groups.setdefault(key or str(i), []).append(i)
+
+    rng = np.random.RandomState(split_seed)
+    keys = sorted(groups)
+    rng.shuffle(keys)
+
+    target = int(round(len(dataset) * val_split))
+    val_idx: List[int] = []
+    for k in keys:
+        if len(val_idx) >= target:
+            break
+        val_idx.extend(groups[k])
+    val_set = set(val_idx)
+    train_idx = [i for i in range(len(dataset)) if i not in val_set]
+    return train_idx, val_idx, groups, keys
+
+
 def create_wor_train_val_dataloaders(
     data_dir: str,
     batch_size: int = 32,
@@ -369,28 +406,7 @@ def create_wor_train_val_dataloaders(
     if val_split <= 0.0 or n < 4:
         return _wrap_loader(train_ds, batch_size, num_workers, True, seed), None
 
-    # Group frames by their source route so the split cannot put frame k in train and
-    # frame k+1 in validation. Falls back to a per-frame split if no grouping key is
-    # recoverable from the sample records.
-    groups: Dict[str, List[int]] = {}
-    for i, s in enumerate(train_ds.samples):
-        key = ""
-        if isinstance(s, dict):
-            key = os.path.dirname(os.path.dirname(s.get("rgb_path", ""))) or s.get("route_dir", "")
-        groups.setdefault(key or str(i), []).append(i)
-
-    rng = np.random.RandomState(split_seed)
-    keys = sorted(groups)
-    rng.shuffle(keys)
-
-    target = int(round(n * val_split))
-    val_idx: List[int] = []
-    for k in keys:
-        if len(val_idx) >= target:
-            break
-        val_idx.extend(groups[k])
-    val_set = set(val_idx)
-    train_idx = [i for i in range(n) if i not in val_set]
+    train_idx, val_idx, groups, keys = route_group_split(train_ds, val_split, split_seed)
 
     if not val_idx or not train_idx:
         return _wrap_loader(train_ds, batch_size, num_workers, True, seed), None
