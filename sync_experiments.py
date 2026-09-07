@@ -49,6 +49,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+#: How often the transfer progress line refreshes, in seconds. The tar stream gives no
+#: total size up front (the remote side only knows once it's done), so this reports
+#: elapsed time, bytes received so far, and instantaneous rate rather than a percentage
+#: - the only honest options without a size the remote could report before finishing.
+PROGRESS_INTERVAL_S = 2.0
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from src.config import paths  # noqa: E402
 
@@ -190,6 +196,52 @@ def extract_snapshot(archive: Path, dest: Path) -> None:
             tar.extractall(dest)
 
 
+def _format_eta(elapsed: float) -> str:
+    m, s = divmod(int(elapsed), 60)
+    return "%dm%02ds" % (m, s) if m else "%ds" % s
+
+
+def _run_with_progress(cmd: List[str], sink_path: Path) -> int:
+    """Runs `cmd`, streaming its stdout into `sink_path`, printing a live progress
+    line while it does.
+
+    subprocess.run(..., stdout=sink) blocks silently until the whole transfer
+    finishes, which for a multi-run checkpoint pull can be minutes with zero
+    feedback - indistinguishable from a hang. Popen + polling the growing output
+    file's size is what lets a line update in place instead.
+    """
+    is_tty = sys.stdout.isatty()
+    with open(sink_path, "wb") as sink:
+        proc = subprocess.Popen(cmd, stdout=sink)
+        started = time.time()
+        last_size = 0
+        last_tick = started
+        try:
+            while proc.poll() is None:
+                time.sleep(PROGRESS_INTERVAL_S)
+                now = time.time()
+                size = sink_path.stat().st_size
+                rate = (size - last_size) / max(1e-6, now - last_tick)
+                line = "    ...received %6.1f MB | %5.1f MB/s | elapsed %s" % (
+                    size / 1e6, rate / 1e6, _format_eta(now - started)
+                )
+                if is_tty:
+                    # \r overwrites the line in place; pad so a shorter line fully
+                    # covers a longer previous one instead of leaving stray tail text.
+                    print("\r" + line.ljust(70), end="", flush=True)
+                else:
+                    # No terminal to overwrite (piped output, CI, this session's tool
+                    # capture) - one line per tick instead, still far better than
+                    # nothing until the transfer completes.
+                    print(line, flush=True)
+                last_size, last_tick = size, now
+        finally:
+            if is_tty:
+                print()  # leave the final progress line intact, move to a fresh one
+        proc.wait()
+        return proc.returncode
+
+
 def pull(port: str, user_host: str, remote_root: str, includes: List[str], dest: Path,
          ssh_opts: Optional[List[str]] = None, ssh_bin: str = "ssh") -> Path:
     """Stream the selected remote output into ``dest`` and return that directory."""
@@ -208,19 +260,18 @@ def pull(port: str, user_host: str, remote_root: str, includes: List[str], dest:
     tmp_path = Path(tmp_name)
     started = time.time()
     try:
-        with open(tmp_path, "wb") as sink:
-            result = subprocess.run(cmd, stdout=sink)
-        if result.returncode == 9:
+        returncode = _run_with_progress(cmd, tmp_path)
+        if returncode == 9:
             raise SystemExit("Remote root '%s' does not exist on the instance." % remote_root)
-        if result.returncode == 8:
+        if returncode == 8:
             raise SystemExit("None of the requested paths exist on the instance yet - nothing to pull.")
         size = tmp_path.stat().st_size
-        if result.returncode != 0 or size == 0:
+        if returncode != 0 or size == 0:
             raise SystemExit(
-                "Transfer failed (ssh exit %s, %d bytes received)." % (result.returncode, size)
+                "Transfer failed (ssh exit %s, %d bytes received)." % (returncode, size)
             )
 
-        print("    Received %.1f MB in %.0fs, extracting..." % (size / 1e6, time.time() - started))
+        print("    Received %.1f MB in %s, extracting..." % (size / 1e6, _format_eta(time.time() - started)))
         extract_snapshot(tmp_path, dest)
     finally:
         try:
