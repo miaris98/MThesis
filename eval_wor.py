@@ -67,7 +67,7 @@ def parse_args():
     parser.add_argument("--checkpoint", type=str, default="/workspace/checkpoints/wor_10k/best_model.pth", help="Path to custom model checkpoint (.pth)")
     parser.add_argument("--model_type", type=str, default="wor_nc", choices=["wor_nc", "wor_lb"], help="Pretrained PCLA model variant")
     parser.add_argument("--backbone", type=str, default="resnet34", help="Backbone architecture (resnet18/34/50)")
-    parser.add_argument("--policy_arch", type=str, default="cnn", choices=["cnn", "qwen100m", "qwen500m", "qwen900m"], help="Decision-head architecture the checkpoint was trained with - must match train_wor.py's --policy_arch for this checkpoint")
+    parser.add_argument("--policy_arch", type=str, default="cnn", choices=["cnn", "qwen10m", "qwen30m", "qwen100m", "qwen500m", "qwen900m"], help="Decision-head architecture the checkpoint was trained with - must match train_wor.py's --policy_arch for this checkpoint")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="CARLA host IP")
     parser.add_argument("--port", type=int, default=2000, help="CARLA world port")
     parser.add_argument("--town", type=str, default="Town01", help="CARLA map/town")
