@@ -83,7 +83,7 @@ class WorldOnRailsAgent:
         Args:
             input_data: Dictionary containing sensor readings:
                 - 'rgb_front': (Frame, np.ndarray uint8 RGB image)
-                - 'speed': (Frame, dict with 'speed' in m/s or scalar km/h)
+                - 'speed': (Frame, dict with 'speed' in m/s, or a scalar in m/s)
                 - 'command': Optional high-level command (1=Left, 2=Right, 3=Straight, 4=Follow)
         Returns:
             carla.VehicleControl or dict with (steer, throttle, brake)
@@ -102,16 +102,22 @@ class WorldOnRailsAgent:
             # Fallback dummy RGB
             rgb_img = np.zeros((256, 256, 3), dtype=np.uint8)
 
-        # 2. Extract Speed (km/h)
+        # 2. Extract Speed (metres per second)
+        #
+        # m/s is the unit throughout: PDM-Lite's measurement files store it, so it is
+        # what the network trained on, and `act()` converts to km/h for the PID. This
+        # previously multiplied the dict form by 3.6 and passed bare floats through
+        # untouched, so the two shapes meant different units and neither matched the
+        # network's. CARLA's speedometer pseudo-sensor reports {'speed': m/s}.
         if "speed" in input_data:
             speed_data = input_data["speed"]
             speed_val = speed_data[1] if isinstance(speed_data, (tuple, list)) else speed_data
             if isinstance(speed_val, dict):
-                speed_kmh = float(speed_val.get("speed", 0.0)) * 3.6
+                speed_mps = float(speed_val.get("speed", 0.0))
             else:
-                speed_kmh = float(speed_val)
+                speed_mps = float(speed_val)
         else:
-            speed_kmh = 0.0
+            speed_mps = 0.0
 
         # 3. Extract High-Level Navigation Command
         command = input_data.get("command", 2)  # Default: Follow Lane
@@ -129,7 +135,7 @@ class WorldOnRailsAgent:
         # 5. Neural Network Forward Inference & PID Control
         steer, throttle, brake = self.net.act(
             rgb=rgb_img,
-            speed=speed_kmh,
+            speed=speed_mps,
             command=int(command),
             device=self.device,
             route=route

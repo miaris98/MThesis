@@ -215,7 +215,10 @@ def record_eval_video(
                     # WoR consumes a single 256x256 front view: the centre tile of the panorama.
                     control = agent.run_step({
                         "rgb_front": (step_in_ep, np.ascontiguousarray(model_rgb[:, 256:512, :])),
-                        "speed": (step_in_ep, spd),
+                        # obs["speed"] is km/h (carla_gym_env), the agent wants m/s -
+                        # the network trained on PDM-Lite's m/s field. Passing km/h put
+                        # the speed input 3.6x outside the training distribution.
+                        "speed": (step_in_ep, spd / 3.6),
                         "command": WOR_LANEFOLLOW_COMMAND,
                     })
                     if isinstance(control, dict):

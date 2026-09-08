@@ -251,7 +251,13 @@ class QwenWorldOnRailsPolicy(nn.Module):
         route: Optional[Union[np.ndarray, torch.Tensor]] = None
     ) -> Tuple[float, float, float]:
         """Mirrors WorldOnRailsPolicy.act() exactly, including the "no route -> no
-        navigation intent" caveat: same PID conversion, same input handling."""
+        navigation intent" caveat: same PID conversion, same input handling.
+
+        `speed` is in metres per second (the unit the dataset stores and the network
+        trained on); the km/h conversion for the PID happens here. See the note in
+        WorldOnRailsPolicy.act - this copy mirrored that method's units bug as
+        faithfully as everything else, which is the recurring cost of a method whose
+        contract is "identical to the other one" rather than a shared implementation."""
         self.eval()
         if isinstance(rgb, torch.Tensor):
             rgb_tensor = rgb
@@ -268,14 +274,14 @@ class QwenWorldOnRailsPolicy(nn.Module):
         rgb_tensor = rgb_tensor.to(device)
 
         if isinstance(speed, (int, float)):
-            speed_tensor = torch.tensor([[speed]], device=device, dtype=torch.float32)
-            current_speed_kmh = float(speed)
+            speed_mps = float(speed)
         elif isinstance(speed, torch.Tensor):
-            speed_tensor = speed.to(device).view(-1, 1).float()
-            current_speed_kmh = float(speed_tensor.item())
+            speed_mps = float(speed.view(-1)[0].item())
         else:
-            speed_tensor = torch.tensor([[float(speed)]], device=device, dtype=torch.float32)
-            current_speed_kmh = float(speed)
+            speed_mps = float(speed)
+
+        speed_tensor = torch.tensor([[speed_mps]], device=device, dtype=torch.float32)
+        current_speed_kmh = speed_mps * 3.6
 
         cmd_tensor = torch.tensor([command], device=device, dtype=torch.long)
 

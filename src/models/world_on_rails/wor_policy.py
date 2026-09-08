@@ -400,6 +400,18 @@ class WorldOnRailsPolicy(nn.Module):
         """
         Generates (steer, throttle, brake) controls for direct CARLA execution.
 
+        `speed` is in **metres per second**. That is the unit PDM-Lite's measurement
+        files store and therefore the unit `speed_mlp` was trained on, so it is the
+        network's input verbatim. The PID is the only consumer that wants km/h and the
+        conversion happens here, at the one place that knows both.
+
+        This used to hand the same scalar to both, which cannot be right for both: the
+        two callers in the repo disagreed about which unit they were passing, so each
+        was feeding one consumer correctly and the other a value 3.6x off. Passing m/s
+        to the controller silently raises its effective target from 20 km/h to 72;
+        passing km/h to the network puts its input 3.6x outside the training
+        distribution. Neither raises an error.
+
         `route` is the ego-frame planned route, (route_points, 2). Omitting it feeds
         a zero route, which leaves the policy with no navigation intent and makes it
         drive straight through junctions - so a caller that wants steering must
@@ -421,14 +433,14 @@ class WorldOnRailsPolicy(nn.Module):
         rgb_tensor = rgb_tensor.to(device)
 
         if isinstance(speed, (int, float)):
-            speed_tensor = torch.tensor([[speed]], device=device, dtype=torch.float32)
-            current_speed_kmh = float(speed)
+            speed_mps = float(speed)
         elif isinstance(speed, torch.Tensor):
-            speed_tensor = speed.to(device).view(-1, 1).float()
-            current_speed_kmh = float(speed_tensor.item())
+            speed_mps = float(speed.view(-1)[0].item())
         else:
-            speed_tensor = torch.tensor([[float(speed)]], device=device, dtype=torch.float32)
-            current_speed_kmh = float(speed)
+            speed_mps = float(speed)
+
+        speed_tensor = torch.tensor([[speed_mps]], device=device, dtype=torch.float32)
+        current_speed_kmh = speed_mps * 3.6
 
         cmd_tensor = torch.tensor([command], device=device, dtype=torch.long)
 
