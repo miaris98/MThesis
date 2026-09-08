@@ -4,7 +4,8 @@ Companion to `challenges/challenges_13_transformer_head_underperformance.md` (se
 13.1–13.28), which carries the full reasoning. This file is the working checklist.
 
 Last updated: 2026-09-08, after seed replication, the vision_grid8 test, the size curve, the
-geometry-loss implementation, and the geometry-loss A/B.
+geometry-loss implementation, the geometry-loss A/B, and building (but not yet running)
+closed-loop CARLA evaluation.
 
 ---
 
@@ -117,6 +118,25 @@ exists to answer. This moves closed-loop CARLA evaluation from "the remaining ga
       paired bootstraps NOT SUPPORTED), `val_wp_heading_err` down 92%, `val_wp_curvature_err`
       down ~2.5%, `val_wp_lateral_error_m` flat. Free to keep; closed-loop eval is now the only
       way to know if it matters. (13.29)
+- [x] Audited whether the `route` input leaks the `waypoints` target. It does not: targets
+      come from `ego_matrix`, route from the planner's plan, and the entire 5-waypoint
+      horizon (mean 5.27 m) sits inside the *first* route segment (route points at
+      2.6/8.6/15.3/20.8 m). A no-vision (route+speed+command) MLP floor of 0.7558 reframes
+      the result — the transformer extracts 1.87x the visual signal the conv head does,
+      measured against what vision is worth rather than against zero. (13.30)
+- [x] Built closed-loop CARLA evaluation end to end and verified it against a live server:
+      `src/eval/driving_metrics.py` (Leaderboard 1.0 Driving Score, no `carla` import, 16
+      unit tests), `eval_wor_closed_loop.py` (deterministic rollout — seeded routes AND
+      seeded traffic, so checkpoints are comparable route-by-route), `compare_closed_loop.py`
+      (paired bootstrap), `src/eval/rollout_video.py` (optional chase-cam recording).
+      Found and fixed three real bugs building it: a speed-units mismatch present since
+      `wor_policy.py`'s `act()` was written (network trained on m/s, PID needs km/h, the two
+      existing callers each passed the wrong one to one consumer — see 11.6); a collision
+      double-counting artifact (one continuous 30 s wedge against a van logged six
+      infractions instead of one, see 11.7); and a third variant of the Vulkan driver gap,
+      where the ICD manifest pointed at a library file that was simply absent rather than
+      mismatched — `vulkaninfo` cannot tell the two apart from its error message alone
+      (`carla_vulkan_driver_troubleshooting_guide.md`, 1.6a). (13.31)
 
 ---
 
@@ -126,16 +146,54 @@ assessment of nine external CARLA datasets/models.
 
 ## Next — Tier 1
 
-- [ ] **Closed-loop CARLA evaluation.** Nothing in this entire group has measured driving.
-      A 13.6% L1 margin may not survive the PID controller — the error is dominated by
-      longitudinal displacement, which is near-closed-form from the speed scalar, while the
-      controller steers off lateral only (13.16, 13.22). Now the *only* open question, not
-      just the largest one: the geometry loss (13.29) moved heading error 92% and left the
-      lateral quantity the PID reads unmoved, and open-loop metrics cannot say whether that
-      matters. Run the qwen30m-geometry-loss checkpoint against the qwen30m-baseline
-      checkpoint and the cnn checkpoint, same routes, same seeds.
-      - Launch CARLA first: `nohup su carlauser -c '/workspace/carla/CarlaUE4.sh
-        -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' &`
+- [ ] **RUN the closed-loop comparison — infrastructure is built, this was stopped mid-run
+      for time on 2026-09-08 and needs a clean restart, not new engineering.** Nothing in
+      this entire group has measured driving. A 13.6% L1 margin may not survive the PID
+      controller — the error is dominated by longitudinal displacement, near-closed-form
+      from the speed scalar the policy is already handed, while the controller steers off
+      lateral only (13.16, 13.22). Now the *only* open question, not just the largest one:
+      the geometry loss (13.29) moved heading error 92% and left the lateral quantity the
+      PID reads unmoved, and open-loop metrics cannot say whether that matters.
+
+      **To resume on a fresh instance:**
+      1. `bash setup_carla_eval.sh` — provisions the matching NVIDIA userspace driver,
+         CARLA 0.9.15, and a Python 3.10 `/workspace/venv_carla` (the `carla` wheel has no
+         cp312 ABI, so this cannot share `/venv/main`). ~10 min, mostly download.
+      2. Train three checkpoints (none currently exist off-instance — `.pth` files are
+         never kept per the never-sync-large-artifacts rule, and the previous instance
+         that had them is gone). ~15 min each, run concurrently on one GPU (this session
+         measured ~1.05x solo time for 3x the work when GPU util was ~25% on one job —
+         see challenges_05 §5.7/§5.8 once written up, or just check `nvidia-smi` util
+         before assuming sequential is necessary):
+         `cnn_s0`, `qwen30m_baseline_s0` (`--heading_loss_weight 0 --curvature_loss_weight 0`),
+         `qwen30m_geom_s0` (`--heading_loss_weight 0.5 --curvature_loss_weight 0.2`) — same
+         flags as the seed-replication runs, `--data_dir` pointed at a 4-town PDM-Lite
+         pull (`python download_pdm_lite.py --towns Town01,Town02,Town03,Town10` reproduces
+         the exact 656-route/114,556-frame set every prior result in this group used).
+         Check `nvidia-smi` utilisation on the first job alone before deciding sequential
+         vs. concurrent — this exact 3-job case measured ~25-30% solo utilisation and ran
+         all three in ~1.07x solo time when launched concurrently (challenges_05 §5.8);
+         don't assume 5.7's "sequential by default" applies without checking first.
+      3. `bash run_closed_loop_arms.sh` — drives all three checkpoints through 15 identical
+         routes each (seeded routes AND seeded traffic via `--route_seed`, so they are
+         comparable route-by-route), records video for the first 2 routes of each arm,
+         writes JSON per arm to `/workspace/closed_loop/`.
+      4. `python compare_closed_loop.py --a <arm>.json --b <arm>.json` for the paired
+         bootstrap between any two arms.
+
+      **Timing, measured on 2026-09-08 (V100, Town01):** the first two routes (with video)
+      took ~3 min each, close to the 150 s `--max_steps 3000` cap — most routes were not
+      completing early. Extrapolated: **~40–45 min per arm, ~2–2.5 hours for all three
+      sequentially.** Do not start this without that much time, or drop `--routes` to 5–8
+      for a faster (still paired, just noisier) first read, or run the three arms
+      concurrently the way the training runs were (untested for this script, but nothing
+      about it should require the GPU to itself — CARLA is the bottleneck, not the policy
+      network — try it on 3 separate ports with 3 separate CARLA server instances).
+      **What was actually observed before this was stopped:** the CNN arm's first two
+      routes, watched by eye — route completion in the 65-95% range, terminations mostly
+      `timeout` rather than `completed` or collision, consistent with the units bug fix
+      working (speed held near the 20 km/h target rather than 72). No paired comparison
+      was obtained; do not treat anything from the interrupted run as a result.
 - [ ] **More data.** Dominant lever twice over. `python download_pdm_lite.py --towns
       Town04,Town05 --reserve-gb 30` → 47 GB, ~9 min, ~1,840 routes total.
 

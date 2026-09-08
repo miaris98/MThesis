@@ -74,6 +74,23 @@ Two distinct failure modes, which need **different** fixes:
 - `vkCreateInstance: Found no drivers!` with **no ICD manifest on disk** → the graphics stack was never installed (§4).
 - `ERROR_INCOMPATIBLE_DRIVER` with a manifest present → userspace/kernel **version mismatch** (§4.2). This is also what you get if you "fix" the first case with the wrong apt package.
 
+> **Third variant, seen 2026-09-08 on a different Vast.ai host (V100, driver 580.178.04):**
+> the manifest was present (`/etc/vulkan/icd.d/nvidia_icd.json`) but the library it points
+> at — `libGLX_nvidia.so.0` — **did not exist anywhere on the filesystem**. `vulkaninfo`'s
+> loader still reports `ERROR_INCOMPATIBLE_DRIVER`, identically to the real mismatch case,
+> because that is the loader's generic "the ICD I found didn't work" message — it does not
+> distinguish "wrong version" from "no file at all". Check which one you actually have
+> before following §4.2's mismatch framing:
+> ```bash
+> cat /etc/vulkan/icd.d/*.json                              # what the manifest expects
+> ls -la /usr/lib/x86_64-linux-gnu/libGLX_nvidia.so*         # what actually exists
+> ```
+> An empty `ls` means "never installed" (this variant), not "wrong version" — proceed
+> straight to §4.2's `.run` installer; there is nothing to purge first, because nothing was
+> ever there to conflict with it. The fix is identical, but the diagnosis in §3.3 below
+> (`dpkg -l | grep -i nvidia`) is the more reliable signal for this variant, since it will
+> show no `libnvidia-gl-*` package at all rather than a wrong-version one.
+
 ### 3.3 Confirm the underlying cause
 
 ```bash
