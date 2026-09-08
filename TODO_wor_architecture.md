@@ -3,8 +3,8 @@
 Companion to `challenges/challenges_13_transformer_head_underperformance.md` (sections
 13.1–13.28), which carries the full reasoning. This file is the working checklist.
 
-Last updated: 2026-09-08, after seed replication, the vision_grid8 test, the size curve, and
-the geometry-loss implementation.
+Last updated: 2026-09-08, after seed replication, the vision_grid8 test, the size curve, the
+geometry-loss implementation, and the geometry-loss A/B.
 
 ---
 
@@ -51,6 +51,25 @@ grid resolution (13.24), capacity (13.25), and positional embeddings (already pr
 supervised on* and *what it is allowed to express*. Hence the two items now at the top of
 Tier 1.
 
+**Geometry-loss A/B: heading error down 90%+, val_loss unmoved (2026-09-08, seeds 0/1/2):**
+`--heading_loss_weight 0.5 --curvature_loss_weight 0.2` against a freshly matched baseline
+(same code, same 656-route data, same seeds, weights zeroed — the original baseline's
+checkpoints no longer existed to compare against directly, since only lightweight artifacts
+are kept off-instance; see the note below). Paired bootstrap on `val_loss` at all three seeds:
+**NOT SUPPORTED** — every CI spans zero, routes-won 46/98, 48/98, 43/98, indistinguishable
+from a coin flip. The loss did not cost anything on the metric it was required not to move.
+On the metric it was built to move, `val_wp_heading_err` fell from a baseline mean of 0.043 to
+a geometry-loss mean of 0.0034 — a 92% reduction, same direction and same order of magnitude
+at every seed, not a bootstrap-shaky effect. `val_wp_curvature_err` improved a smaller ~2.5%.
+**But `val_wp_lateral_error_m` — the one quantity `PIDController.control_from_waypoints`
+actually reads — was flat within noise** (baseline mean 0.0517, geometry-loss mean 0.0522).
+So the loss visibly straightens the predicted path's *direction* between waypoints without
+moving the *position* of any single waypoint measurably. Whether that helps the vehicle drive
+is not something held-out loss of any kind can answer — it depends on how the PID's lookahead
+point selection responds to a smoother path, which is exactly the question closed-loop eval
+exists to answer. This moves closed-loop CARLA evaluation from "the remaining gate" to
+"the only thing left that can adjudicate this."
+
 ---
 
 ## Done
@@ -93,6 +112,11 @@ Tier 1.
       longitudinal, which the PID never reads for steering. Added `--heading_loss_weight`
       and `--curvature_loss_weight` (scale-free, default 0, `val_loss` deliberately
       unchanged so the whole result series stays comparable) + 6 tests. (13.26)
+- [x] Ran the geometry-loss A/B: `qwen30m` seeds 0/1/2, `--heading_loss_weight 0.5
+      --curvature_loss_weight 0.2` vs a freshly matched baseline. `val_loss` unchanged (all 3
+      paired bootstraps NOT SUPPORTED), `val_wp_heading_err` down 92%, `val_wp_curvature_err`
+      down ~2.5%, `val_wp_lateral_error_m` flat. Free to keep; closed-loop eval is now the only
+      way to know if it matters. (13.29)
 
 ---
 
@@ -102,19 +126,18 @@ assessment of nine external CARLA datasets/models.
 
 ## Next — Tier 1
 
-- [ ] **A/B the geometry loss.** Implemented and tested, never run. `qwen30m` at seeds 0/1/2
-      with `--heading_loss_weight 0.5 --curvature_loss_weight 0.2` against the existing
-      three-seed baseline, paired bootstrap. Note the metric asymmetry: it must win on the
-      *unchanged* `val_loss`, while `val_wp_heading_err` shows whether it did what it was
-      built to do. (13.26)
-- [ ] **More data.** Dominant lever twice over. `python download_pdm_lite.py --towns
-      Town04,Town05 --reserve-gb 30` → 47 GB, ~9 min, ~1,840 routes total.
 - [ ] **Closed-loop CARLA evaluation.** Nothing in this entire group has measured driving.
       A 13.6% L1 margin may not survive the PID controller — the error is dominated by
       longitudinal displacement, which is near-closed-form from the speed scalar, while the
-      controller steers off lateral only. (13.16, 13.22)
+      controller steers off lateral only (13.16, 13.22). Now the *only* open question, not
+      just the largest one: the geometry loss (13.29) moved heading error 92% and left the
+      lateral quantity the PID reads unmoved, and open-loop metrics cannot say whether that
+      matters. Run the qwen30m-geometry-loss checkpoint against the qwen30m-baseline
+      checkpoint and the cnn checkpoint, same routes, same seeds.
       - Launch CARLA first: `nohup su carlauser -c '/workspace/carla/CarlaUE4.sh
         -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' &`
+- [ ] **More data.** Dominant lever twice over. `python download_pdm_lite.py --towns
+      Town04,Town05 --reserve-gb 30` → 47 GB, ~9 min, ~1,840 routes total.
 
 ## Next — Tier 2
 
@@ -161,3 +184,12 @@ little left to recover.
    you are measuring which model overfits more gracefully.
 5. A dataset too small to learn from is also too small to compare on — and expanding it was
    cheaper than every model-side fix attempted before it.
+6. A point-estimate delta and a paired-bootstrap verdict can disagree, and the bootstrap
+   wins: 13.29's raw numbers looked like a small, consistent regression across all three
+   seeds; the paired test showed every one of those seeds was a coin flip. Trust the CI
+   over the sign of three numbers, even when the sign agrees three times.
+7. Keeping only lightweight artifacts off-instance is cheap until a later comparison needs
+   the checkpoint itself — 13.29 could not be bootstrapped against the original baseline
+   because those `.pth` files were never kept, and retraining a matched baseline cost real
+   (if small) time. If a follow-up comparison is foreseeable, keep the checkpoint until it
+   isn't.
