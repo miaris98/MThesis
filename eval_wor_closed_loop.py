@@ -72,6 +72,7 @@ from agents.navigation.global_route_planner import GlobalRoutePlanner  # noqa: E
 
 from src.agents.wor_agent import WorldOnRailsAgent  # noqa: E402
 from src.eval.driving_metrics import DrivingMetrics, TerminationReason, aggregate  # noqa: E402
+from src.eval.rollout_video import RouteVideoRecorder  # noqa: E402
 
 # Imported rather than re-derived: these define the exact ego-frame route encoding the
 # policy was trained on, and a second copy of them here would be free to drift out of
@@ -126,6 +127,14 @@ def parse_args():
                         "than traffic, and walker spawning is the most segfault-prone part "
                         "of the setup (Group 3). Enable only with the controller work done")
     p.add_argument("--out", type=str, required=True, help="Output JSON path")
+    p.add_argument("--record_video", type=int, default=0,
+                   help="Record a chase-camera video per route. Off by default: it costs "
+                        "a 1280x720 sensor per step and the scored numbers do not depend on it")
+    p.add_argument("--video_dir", type=str, default="",
+                   help="Where to write videos (defaults to <out>_videos/)")
+    p.add_argument("--video_routes", type=int, default=3,
+                   help="Record only the first N routes, so a 20-route run does not "
+                        "produce 20 videos nobody watches")
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     return p.parse_args()
 
@@ -255,10 +264,12 @@ class RedLightWatcher:
         return violated
 
 
-def run_route(world, client, agent, route_spec, spawn_points, grp, args) -> Dict:
+def run_route(world, client, agent, route_spec, spawn_points, grp, args,
+              record_video: bool = False) -> Dict:
     """Drives one route and returns its metrics record."""
     bp_lib = world.get_blueprint_library()
     actors = []
+    recorder = None
     origin = spawn_points[route_spec["spawn_idx"]]
     dest = spawn_points[route_spec["dest_idx"]]
 
@@ -302,6 +313,14 @@ def run_route(world, client, agent, route_spec, spawn_points, grp, args) -> Dict
         cam.listen(lambda img: rgb_buf.update({
             "data": np.frombuffer(img.raw_data, dtype=np.uint8)
                       .reshape((256, 256, 4))[:, :, [2, 1, 0]]}))
+
+        if record_video:
+            video_dir = args.video_dir or (os.path.splitext(args.out)[0] + "_videos")
+            recorder = RouteVideoRecorder(
+                world, ego,
+                path=os.path.join(video_dir, f"{route_spec['route_id']}.mp4"),
+                route_id=route_spec["route_id"])
+            actors.extend(recorder.actors())
 
         # Settle under gravity before scoring, so an interpenetrating spawn is not
         # charged to the policy as a collision.
@@ -360,7 +379,27 @@ def run_route(world, client, agent, route_spec, spawn_points, grp, args) -> Dict
             })
             ego.apply_control(control)
 
-        return metrics.to_dict()
+            if recorder is not None:
+                recorder.capture(
+                    speed_kmh=speed_mps * 3.6,
+                    target_speed_kmh=agent.net.controller.target_speed,
+                    steer=control.steer, throttle=control.throttle, brake=control.brake,
+                    step=step, max_steps=args.max_steps,
+                    command_name="LANEFOLLOW",
+                    route_progress_pct=100.0 * metrics.raw_route_completion,
+                    collisions=(metrics.to_dict()["collisions_vehicle"]
+                                + metrics.to_dict()["collisions_static"]
+                                + metrics.to_dict()["collisions_pedestrian"]),
+                    elapsed_s=t_s,
+                    driving_score=metrics.driving_score,
+                )
+
+        record = metrics.to_dict()
+        if recorder is not None:
+            written = recorder.close()
+            if written:
+                record["video"] = written
+        return record
 
     finally:
         # Sensors must be stopped before they are destroyed. A listening sensor delivers
@@ -434,7 +473,8 @@ def main():
         records = []
         t_start = time.time()
         for k, spec in enumerate(manifest, 1):
-            rec = run_route(world, client, agent, spec, spawn_points, grp, args)
+            rec = run_route(world, client, agent, spec, spawn_points, grp, args,
+                            record_video=bool(args.record_video) and k <= args.video_routes)
             records.append(rec)
             print(f"  [{k:03d}/{len(manifest)}] {spec['route_id']}  "
                   f"DS={rec['driving_score']:.3f}  RC={rec['route_completion']:.3f}  "
