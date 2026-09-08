@@ -1,9 +1,10 @@
 # WoR decision-head study — status and next steps
 
 Companion to `challenges/challenges_13_transformer_head_underperformance.md` (sections
-13.1–13.22), which carries the full reasoning. This file is the working checklist.
+13.1–13.28), which carries the full reasoning. This file is the working checklist.
 
-Last updated: 2026-09-08, after seed replication and the vision_grid8 test.
+Last updated: 2026-09-08, after seed replication, the vision_grid8 test, the size curve, and
+the geometry-loss implementation.
 
 ---
 
@@ -34,6 +35,21 @@ at grid8 (90s vs 80s, from the longer 68-token sequence); cnn's cost is flat (co
 attention, so more spatial cells is cheap). Grid resolution beyond 4×4 is not currently a
 productive lever here — deprioritise below the remaining Tier-1 items unless a size-curve or
 more-data result changes the picture.
+
+**Size curve is flat — capacity is not the constraint (2026-09-08, seed 0):** qwen10m
+(10.8M) 0.5913, qwen30m (27.5M) 0.5715/0.5896/0.5874, qwen100m (106.5M) 0.5895. All three
+sizes land in a 3.5% band against qwen30m's own 1.8% seed spread — a **tenfold parameter
+range produces no resolvable difference**, and this is now out of the memorisation regime on
+5× the data, so it is not 13.2's underfitting story either. qwen100m converges *later* (0.6535
+at epoch 7 vs qwen10m's 0.6282) and recovers the whole deficit in the cosine tail, so a size
+curve read mid-schedule reports the schedule rather than the capacity. It costs 128s/epoch
+against qwen10m's 95s for a number 0.3% apart.
+
+**What that leaves.** Three architectural hypotheses have now been closed by measurement —
+grid resolution (13.24), capacity (13.25), and positional embeddings (already present since
+13.6, see 13.27). The remaining levers are not capacity or connectivity but *what the head is
+supervised on* and *what it is allowed to express*. Hence the two items now at the top of
+Tier 1.
 
 ---
 
@@ -71,6 +87,12 @@ more-data result changes the picture.
       (telemetry/config/logs, not checkpoints) kept in `results/csvs/`.
 - [x] Tested `--vision_grid 8` (seed 0) — no improvement for either arch, qwen slightly
       worse and costs more compute; deprioritised.
+- [x] Re-ran the size curve (10M/30M/100M) on 656 routes — flat. Retires the "100M may win
+      now" hypothesis. (13.25)
+- [x] Measured where the objective actually spends itself: 73.5% of held-out loss is
+      longitudinal, which the PID never reads for steering. Added `--heading_loss_weight`
+      and `--curvature_loss_weight` (scale-free, default 0, `val_loss` deliberately
+      unchanged so the whole result series stays comparable) + 6 tests. (13.26)
 
 ---
 
@@ -80,9 +102,11 @@ assessment of nine external CARLA datasets/models.
 
 ## Next — Tier 1
 
-- [ ] **Re-run the size curve (10M / 30M / 100M).** "Size doesn't matter" was measured
-      inside the memorisation regime, where capacity *couldn't* help. That conclusion is
-      now suspect and 100M may win. Cheap and high-information.
+- [ ] **A/B the geometry loss.** Implemented and tested, never run. `qwen30m` at seeds 0/1/2
+      with `--heading_loss_weight 0.5 --curvature_loss_weight 0.2` against the existing
+      three-seed baseline, paired bootstrap. Note the metric asymmetry: it must win on the
+      *unchanged* `val_loss`, while `val_wp_heading_err` shows whether it did what it was
+      built to do. (13.26)
 - [ ] **More data.** Dominant lever twice over. `python download_pdm_lite.py --towns
       Town04,Town05 --reserve-gb 30` → 47 GB, ~9 min, ~1,840 routes total.
 - [ ] **Closed-loop CARLA evaluation.** Nothing in this entire group has measured driving.
