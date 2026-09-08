@@ -13,6 +13,7 @@ from src.models.world_on_rails import (
 )
 from src.training.wor_dataset import WorldOnRailsDataset, create_wor_dataloader
 from src.training.wor_trainer import WorldOnRailsTrainer
+from src.training.wor_eval import waypoint_losses
 from src.agents.wor_agent import WorldOnRailsAgent
 
 
@@ -255,3 +256,107 @@ def test_wor_reward_function():
     r_coll, info_coll = reward_fn.compute_reward(state_collision)
     assert r_coll <= -20.0
     assert info_coll["r_terminal"] == -25.0
+
+
+# --------------------------------------------------------------------------- #
+# Path-geometry loss terms (src/training/wor_eval.py)
+# --------------------------------------------------------------------------- #
+
+def _wp_batch(pred, target):
+    """Wraps two (5, 2) waypoint paths into the dict waypoint_losses expects."""
+    pred_t = torch.tensor(pred, dtype=torch.float32).unsqueeze(0)
+    target_t = torch.tensor(target, dtype=torch.float32).unsqueeze(0)
+    out = {"selected_waypoints": pred_t, "selected_rail_q": torch.zeros(1, 9)}
+    return out, target_t, torch.zeros(1, 9)
+
+
+#: Expert drives straight ahead at 2 m per waypoint.
+_STRAIGHT = [[2.0, 0.0], [4.0, 0.0], [6.0, 0.0], [8.0, 0.0], [10.0, 0.0]]
+
+
+def test_geometry_terms_default_to_the_original_objective():
+    """The four-town comparison, the three seeds and the size curve are all stated in
+    the loss as it was *before* the heading/curvature terms existed. If the defaults
+    changed that number, every one of those results would silently stop being
+    comparable, so pin it: unweighted, the total must still be exactly
+    `longitudinal + 3 * lateral`."""
+    curving = [[2.0, 0.3], [4.0, 1.2], [6.0, 2.7], [8.0, 4.8], [10.0, 7.5]]
+    out, target, target_q = _wp_batch(curving, _STRAIGHT)
+
+    losses = waypoint_losses(out, target, target_q)
+
+    pred_t, tgt_t = out["selected_waypoints"], target
+    expected = (torch.nn.functional.l1_loss(pred_t[..., 0], tgt_t[..., 0])
+                + 3.0 * torch.nn.functional.l1_loss(pred_t[..., 1], tgt_t[..., 1]))
+    assert torch.allclose(losses["total"], expected, atol=1e-6)
+    assert torch.allclose(losses["total"], losses["wp"], atol=1e-6)
+
+
+def test_geometry_terms_are_zero_on_a_perfect_path():
+    out, target, target_q = _wp_batch(_STRAIGHT, _STRAIGHT)
+    losses = waypoint_losses(out, target, target_q,
+                             heading_loss_weight=1.0, curvature_loss_weight=1.0)
+    assert losses["heading"].item() < 1e-6
+    assert losses["curvature"].item() < 1e-6
+
+
+def test_curvature_separates_paths_a_waypoint_l1_cannot():
+    """A steady lateral offset and a zig-zag across the same offset carry identical
+    per-waypoint L1. Only the second one makes the PID's derivative term chatter, which
+    is exactly the failure the position loss is blind to."""
+    offset = [[2.0, 0.4], [4.0, 0.4], [6.0, 0.4], [8.0, 0.4], [10.0, 0.4]]
+    zigzag = [[2.0, 0.4], [4.0, -0.4], [6.0, 0.4], [8.0, -0.4], [10.0, 0.4]]
+
+    smooth = waypoint_losses(*_wp_batch(offset, _STRAIGHT))
+    jagged = waypoint_losses(*_wp_batch(zigzag, _STRAIGHT))
+
+    assert torch.allclose(smooth["wp"], jagged["wp"], atol=1e-6)
+    assert jagged["curvature"].item() > 10 * smooth["curvature"].item()
+    assert jagged["heading"].item() > 10 * smooth["heading"].item()
+
+
+def test_heading_is_invariant_to_path_length():
+    """The whole point of the term: it cannot be swamped by longitudinal magnitude the
+    way the position L1 is (73% of which is forward displacement the controller's
+    steering never reads). Scaling a path threefold triples the L1 and must leave the
+    heading error untouched."""
+    short = [[1.0, 0.1], [2.0, 0.2], [3.0, 0.3], [4.0, 0.4], [5.0, 0.5]]
+    long = [[3.0 * x, 3.0 * y] for x, y in short]
+    short_target = [[1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [4.0, 0.0], [5.0, 0.0]]
+    long_target = [[3.0 * x, 0.0] for x, _ in short_target]
+
+    near = waypoint_losses(*_wp_batch(short, short_target))
+    far = waypoint_losses(*_wp_batch(long, long_target))
+
+    assert far["wp"].item() == pytest.approx(3.0 * near["wp"].item(), rel=1e-4)
+    assert far["heading"].item() == pytest.approx(near["heading"].item(), abs=1e-5)
+
+
+def test_heading_masks_a_stopped_vehicle_instead_of_producing_nan():
+    """A stationary expert has zero-length segments, whose direction is undefined.
+    Those must drop out rather than divide through a near-zero norm."""
+    stopped = [[0.0, 0.0]] * 5
+    out, target, target_q = _wp_batch([[0.02, 0.01]] * 5, stopped)
+
+    losses = waypoint_losses(out, target, target_q,
+                             heading_loss_weight=1.0, curvature_loss_weight=1.0)
+
+    for key in ("heading", "curvature", "total"):
+        assert torch.isfinite(losses[key]).all()
+    assert losses["heading"].item() == 0.0
+
+
+def test_geometry_terms_produce_finite_gradients():
+    pred = torch.tensor(
+        [[2.0, 0.3], [4.0, 1.2], [6.0, 2.7], [8.0, 4.8], [10.0, 7.5]]
+    ).unsqueeze(0).requires_grad_(True)
+    out = {"selected_waypoints": pred, "selected_rail_q": torch.zeros(1, 9)}
+
+    losses = waypoint_losses(
+        out, torch.tensor(_STRAIGHT).unsqueeze(0), torch.zeros(1, 9),
+        wp_loss_weight=0.0, heading_loss_weight=1.0, curvature_loss_weight=1.0
+    )
+    losses["total"].backward()
+
+    assert torch.isfinite(pred.grad).all()
+    assert pred.grad.norm().item() > 0.0
