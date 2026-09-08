@@ -43,11 +43,16 @@ class WorldOnRailsTrainer:
         "data_wait_sec", "compute_sec",
         "total_loss", "q_loss", "wp_loss", "wp_ade_m", "wp_fde_m",
         "wp_lateral_error_m", "wp_longitudinal_error_m",
+        # Path-shape errors. Logged unconditionally, including on runs whose objective
+        # does not contain them, so a run trained with heading supervision can be
+        # compared against the existing ones on the same two columns.
+        "wp_heading_err", "wp_curvature_err",
         # Held-out metrics, blank when no validation set is configured. Training loss
         # alone cannot tell a model that generalises from one that has memorised, and
         # `is_best` used to be selected on it.
         "val_loss", "val_wp_ade_m", "val_wp_fde_m",
-        "val_wp_lateral_error_m", "val_wp_longitudinal_error_m", "val_time_sec",
+        "val_wp_lateral_error_m", "val_wp_longitudinal_error_m",
+        "val_wp_heading_err", "val_wp_curvature_err", "val_time_sec",
         "lr_backbone", "lr_heads", "grad_norm",
         # grad_norm is a mean over finite batches only. A single non-finite batch used
         # to poison the whole epoch's mean to inf, which is what made the periodic
@@ -75,6 +80,8 @@ class WorldOnRailsTrainer:
         wp_loss_weight: float = 1.0,
         q_loss_weight: float = 0.0,
         lateral_loss_weight: float = 3.0,
+        heading_loss_weight: float = 0.0,
+        curvature_loss_weight: float = 0.0,
         synthetic_samples: int = 0,
         cache_decoded: bool = True,
         compile_model: bool = False,
@@ -115,6 +122,18 @@ class WorldOnRailsTrainer:
         # producing a policy that accelerates fine but steers close to zero. Weight
         # the lateral term up to correct for that scale mismatch.
         self.lateral_loss_weight = lateral_loss_weight
+        # Scale-free path-shape terms, off by default so the objective is unchanged
+        # unless asked for. The lateral weight above rescales an axis; these two change
+        # *what* is supervised. Measured on the four-town runs the weighted L1
+        # decomposes as 0.433 longitudinal + 0.156 lateral, so 73% of the gradient is
+        # spent on forward displacement the steering controller never reads - and which
+        # is close to the integral of the speed scalar the policy already receives.
+        # `heading` supervises segment direction (what the controller aims at) and
+        # `curvature` the second difference (the zig-zag its derivative term reacts to);
+        # neither can be dominated by the longitudinal magnitude, because both are
+        # normalised or differenced away from it. See src/training/wor_eval.py.
+        self.heading_loss_weight = heading_loss_weight
+        self.curvature_loss_weight = curvature_loss_weight
         # Global-norm clip threshold. The default of 5.0 was chosen against the CNN
         # head, whose epoch-mean gradient norm falls under it around epoch 17 and so
         # spends the back half of a run unclipped. The 106M-parameter Qwen trunk sat
@@ -154,6 +173,8 @@ class WorldOnRailsTrainer:
             "lr_backbone": lr_backbone, "lr_heads": lr_heads, "batch_size": batch_size,
             "wp_loss_weight": wp_loss_weight, "q_loss_weight": q_loss_weight,
             "lateral_loss_weight": lateral_loss_weight,
+            "heading_loss_weight": heading_loss_weight,
+            "curvature_loss_weight": curvature_loss_weight,
             "grad_clip": grad_clip, "warmup_frac": warmup_frac,
             "decay_gates_and_norms": decay_gates_and_norms,
             "val_split": val_split, "val_data_dir": val_data_dir or "", "seed": seed,
@@ -231,6 +252,8 @@ class WorldOnRailsTrainer:
         fde_accum = 0.0
         lateral_err_accum = 0.0
         longitudinal_err_accum = 0.0
+        heading_err_accum = 0.0
+        curvature_err_accum = 0.0
         grad_norm_accum = 0.0
         grad_norm_batches = 0
         nonfinite_batches = 0
@@ -260,7 +283,8 @@ class WorldOnRailsTrainer:
                 out = self.model(rgb, speed, command, route)
                 losses = waypoint_losses(
                     out, target_wp, target_q,
-                    self.wp_loss_weight, self.q_loss_weight, self.lateral_loss_weight
+                    self.wp_loss_weight, self.q_loss_weight, self.lateral_loss_weight,
+                    self.heading_loss_weight, self.curvature_loss_weight
                 )
                 total_loss = losses["total"]
 
@@ -306,6 +330,8 @@ class WorldOnRailsTrainer:
             fde_accum += losses["fde"].item()
             lateral_err_accum += losses["lateral"].item()
             longitudinal_err_accum += losses["longitudinal"].item()
+            heading_err_accum += losses["heading"].item()
+            curvature_err_accum += losses["curvature"].item()
             num_batches += 1
             num_samples += rgb.shape[0]
 
@@ -323,6 +349,8 @@ class WorldOnRailsTrainer:
         avg_fde = fde_accum / max(1, num_batches)
         avg_lateral_err = lateral_err_accum / max(1, num_batches)
         avg_longitudinal_err = longitudinal_err_accum / max(1, num_batches)
+        avg_heading_err = heading_err_accum / max(1, num_batches)
+        avg_curvature_err = curvature_err_accum / max(1, num_batches)
         avg_grad_norm = grad_norm_accum / max(1, grad_norm_batches)
         elapsed = time.time() - start_time
         samples_per_sec = num_samples / max(1e-6, elapsed)
@@ -340,6 +368,8 @@ class WorldOnRailsTrainer:
             "wp_fde_m": avg_fde,
             "wp_lateral_error_m": avg_lateral_err,
             "wp_longitudinal_error_m": avg_longitudinal_err,
+            "wp_heading_err": avg_heading_err,
+            "wp_curvature_err": avg_curvature_err,
             "grad_norm": avg_grad_norm,
             "nonfinite_grad_batches": nonfinite_batches,
             "clipped_grad_batches": clipped_batches,
@@ -424,6 +454,7 @@ class WorldOnRailsTrainer:
                 f"WP Loss: {metrics['wp_loss']:.4f} | "
                 f"ADE: {metrics['wp_ade_m']:.3f}m | FDE: {metrics['wp_fde_m']:.3f}m | "
                 f"Lat Err: {metrics['wp_lateral_error_m']:.3f}m | Lon Err: {metrics['wp_longitudinal_error_m']:.3f}m | "
+                f"Head: {metrics['wp_heading_err']:.4f} | "
                 f"{val_str}"
                 f"GradNorm: {metrics['grad_norm']:.2f} "
                 f"(clipped {metrics['clipped_grad_batches']}/{metrics['num_batches']}, "
@@ -439,8 +470,10 @@ class WorldOnRailsTrainer:
                            "grad_norm", "nonfinite_grad_batches", "clipped_grad_batches",
                            "lr_backbone", "lr_heads", "samples_per_sec",
                            "data_wait_sec", "compute_sec", "save_sec"]
+            scalar_tags += ["wp_heading_err", "wp_curvature_err"]
             scalar_tags += [k for k in ("val_loss", "val_wp_ade_m", "val_wp_fde_m",
-                                        "val_wp_lateral_error_m", "val_wp_longitudinal_error_m")
+                                        "val_wp_lateral_error_m", "val_wp_longitudinal_error_m",
+                                        "val_wp_heading_err", "val_wp_curvature_err")
                             if k in metrics]
             for tag in scalar_tags:
                 self.logger.add_scalar(f"wor/{tag}", metrics[tag], epoch)
@@ -449,7 +482,8 @@ class WorldOnRailsTrainer:
             # a perfect held-out score in any downstream plot.
             val_cols = {k: round(metrics[k], 5) for k in (
                 "val_loss", "val_wp_ade_m", "val_wp_fde_m",
-                "val_wp_lateral_error_m", "val_wp_longitudinal_error_m", "val_time_sec"
+                "val_wp_lateral_error_m", "val_wp_longitudinal_error_m",
+                "val_wp_heading_err", "val_wp_curvature_err", "val_time_sec"
             ) if k in metrics}
 
             self.csv_logger.log_step({
@@ -472,6 +506,8 @@ class WorldOnRailsTrainer:
                 "wp_fde_m": round(metrics["wp_fde_m"], 4),
                 "wp_lateral_error_m": round(metrics["wp_lateral_error_m"], 4),
                 "wp_longitudinal_error_m": round(metrics["wp_longitudinal_error_m"], 4),
+                "wp_heading_err": round(metrics["wp_heading_err"], 5),
+                "wp_curvature_err": round(metrics["wp_curvature_err"], 5),
                 "lr_backbone": f"{metrics['lr_backbone']:.2e}",
                 "lr_heads": f"{metrics['lr_heads']:.2e}",
                 "grad_norm": round(metrics["grad_norm"], 4),

@@ -3,29 +3,37 @@
 Companion to `challenges/challenges_13_transformer_head_underperformance.md` (sections
 13.1–13.22), which carries the full reasoning. This file is the working checklist.
 
-Last updated: 2026-09-07, after the four-town comparison.
+Last updated: 2026-09-08, after seed replication and the vision_grid8 test.
 
 ---
 
 ## Where the result currently stands
 
 **The Qwen transformer head beats the conv head on held-out waypoint loss, and the margin
-survives the route draw.**
+survives both the route draw and seed replication.**
 
-| | qwen30m | cnn |
-|---|---|---|
-| held-out loss | **0.5715** | 0.6616 |
-| paired difference | **−0.0900** (13.6% relative) | |
-| 95% CI on difference | **[−0.1160, −0.0670]** — excludes zero | |
-| routes won | **78 / 98** (p = 1.4×10⁻⁹) | |
-| generalisation gap | 1.52× | |
+| seed | qwen30m | cnn | paired diff | 95% CI | routes won | relative margin |
+|---|---|---|---|---|---|---|
+| 0 | 0.5715 | 0.6616 | −0.0900 | [−0.1160, −0.0670] | 78/98 (p=1.4×10⁻⁹) | 13.6% |
+| 1 | 0.5896 | 0.6660 | −0.0757 | [−0.1047, −0.0511] | 77/98 | 11.5% |
+| 2 | 0.5874 | 0.6583 | −0.0718 | [−0.0954, −0.0491] | 78/98 | 10.8% |
 
 Conditions: 4 towns / 656 routes / 114,556 frames, 15 epochs, batch 32, `resnet34`,
-`--vision_grid 4`, `--val_split 0.15`, `--split_seed 0`, seed 0.
+`--vision_grid 4`, `--val_split 0.15`, `--split_seed 0`. Generalisation gap 1.52× at seed 0.
 
-**Caveat that remains open:** n=1 seed per arm. The paired route bootstrap is the correct
-test for this comparison and it is decisive, but across-seed variation on the new dataset
-has not been measured. Seed runs were launched and lost when the instance was shut down.
+**Seed replication closed (2026-09-08):** every seed individually clears the paired
+bootstrap — CI excludes zero all three times, and routes-won is stable at 77-78/98. qwen's
+own across-seed spread (0.5715–0.5896, 1.8% wide) sits far inside the qwen-cnn gap (0.069 at
+the closest pair, 6-8× the within-arch noise). Not a seed-0 fluke.
+
+**`--vision_grid 8` tested, did not help (2026-09-08, seed 0 only):** qwen 0.5835 held-out
+(vs 0.5715 at grid4 — 2.1% *worse*), cnn 0.6613 (vs 0.6616 — flat). Paired diff −0.0782, CI
+[−0.1020, −0.0571], 73/98 routes: the margin is unchanged within normal seed noise (compare
+the 10.8–13.6% range above), not larger as hypothesised. qwen also costs ~13% more per epoch
+at grid8 (90s vs 80s, from the longer 68-token sequence); cnn's cost is flat (conv head, not
+attention, so more spatial cells is cheap). Grid resolution beyond 4×4 is not currently a
+productive lever here — deprioritise below the remaining Tier-1 items unless a size-curve or
+more-data result changes the picture.
 
 ---
 
@@ -58,6 +66,11 @@ has not been measured. Seed runs were launched and lost when the instance was sh
       (13.20, 13.21)
 - [x] Results archived to `E:\MThesis_EXP\multitown\multitown.tar` (998 MB — both
       checkpoints, telemetry, run configs, MLflow store).
+- [x] Seed replication of the four-town comparison (seeds 1, 2) — margin confirmed at every
+      seed via paired bootstrap, CI excludes zero all three times. Lightweight artifacts
+      (telemetry/config/logs, not checkpoints) kept in `results/csvs/`.
+- [x] Tested `--vision_grid 8` (seed 0) — no improvement for either arch, qwen slightly
+      worse and costs more compute; deprioritised.
 
 ---
 
@@ -72,15 +85,12 @@ assessment of nine external CARLA datasets/models.
       now suspect and 100M may win. Cheap and high-information.
 - [ ] **More data.** Dominant lever twice over. `python download_pdm_lite.py --towns
       Town04,Town05 --reserve-gb 30` → 47 GB, ~9 min, ~1,840 routes total.
-- [ ] **`--vision_grid 8`.** The one mechanism confirmed twice. Grid 4→8 nearly doubles
-      per-cell discrimination (1.89 → 2.97). ~3× compute.
 - [ ] **Closed-loop CARLA evaluation.** Nothing in this entire group has measured driving.
       A 13.6% L1 margin may not survive the PID controller — the error is dominated by
       longitudinal displacement, which is near-closed-form from the speed scalar, while the
       controller steers off lateral only. (13.16, 13.22)
       - Launch CARLA first: `nohup su carlauser -c '/workspace/carla/CarlaUE4.sh
         -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' &`
-- [ ] **Seed replication** of the four-town comparison (2 more seeds per arm, ~25 min).
 
 ## Next — Tier 2
 

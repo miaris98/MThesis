@@ -18,6 +18,7 @@ challenges/
 experiments/
 mlruns/
 runs/
+results/
 weights/wor_nc.pth
 # Added by code-review-graph
 .code-review-graph/

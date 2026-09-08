@@ -44,6 +44,8 @@ def parse_args():
     parser.add_argument("--wp_loss_weight", type=float, default=1.0, help="Weight of the waypoint imitation loss")
     parser.add_argument("--q_loss_weight", type=float, default=0.0, help="Weight of the Q-value distillation loss (0 for datasets without precomputed Q-values, e.g. PDM-Lite)")
     parser.add_argument("--lateral_loss_weight", type=float, default=3.0, help="Extra weight on the lateral (y) waypoint error relative to longitudinal (x) - lateral offset is what the PID controller steers from, but is typically much smaller in magnitude than forward distance, so a flat L1 loss underfits it")
+    parser.add_argument("--heading_loss_weight", type=float, default=0.0, help="Weight on the segment-direction (1 - cosine) error between the predicted path and the expert's. The waypoint L1 above is dominated by longitudinal displacement - on the four-town runs it is 0.433 of a 0.589 loss, i.e. 73% - which the PID's steering never reads, and which is close to the integral of the speed scalar the policy is already given. This term is scale-free, so it cannot be swamped by that magnitude, and it supervises the quantity the controller actually aims at. 0 reproduces the objective the existing results were measured with")
+    parser.add_argument("--curvature_loss_weight", type=float, default=0.0, help="Weight on the L1 between the second differences of the predicted and expert paths. Per-waypoint L1 is indifferent to point-to-point zig-zag that integrates to the same positions; the PID's derivative term is not, and reacts to it as steering chatter. 0 reproduces the previous objective")
     parser.add_argument("--experiment_name", type=str, default="WoR_Offline_Training", help="MLflow experiment name")
     parser.add_argument("--use_mlflow", type=int, default=1, help="Enable MLflow tracking (1=True, 0=False)")
     parser.add_argument("--mlflow_port", type=int, default=10100, help="MLflow tracking server port")
@@ -206,6 +208,8 @@ def main():
         wp_loss_weight=args.wp_loss_weight,
         q_loss_weight=args.q_loss_weight,
         lateral_loss_weight=args.lateral_loss_weight,
+        heading_loss_weight=args.heading_loss_weight,
+        curvature_loss_weight=args.curvature_loss_weight,
         experiment_name=args.experiment_name,
         use_mlflow=bool(args.use_mlflow),
         mlflow_port=args.mlflow_port
