@@ -163,6 +163,11 @@ See also [TODO_optuna_and_resources.md](TODO_optuna_and_resources.md) for the Op
 hyperparameter-search plan (the structural fix for 13.6's shared-defaults problem) and an
 assessment of nine external CARLA datasets/models.
 
+See also [TODO_leaderboard_benchmark.md](TODO_leaderboard_benchmark.md) for putting our own
+checkpoints through the official CARLA Leaderboard's public route/scenario protocol (our
+current closed-loop numbers aren't on the same footing as WoR's/TCP's published leaderboard
+scores), and for testing TCP itself.
+
 ## Next — Tier 1
 
 - [ ] **More data.** Dominant lever twice over. `python download_pdm_lite.py --towns
