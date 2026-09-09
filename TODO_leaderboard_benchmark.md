@@ -121,22 +121,54 @@ Not investigated further (likely VRAM/scene-complexity related — Town05 is a l
 Town01/04 — but unconfirmed); **avoid Town05 for closed-loop runs on this instance class
 until someone diagnoses it properly.**
 
-**Open, before a real run:**
-- [ ] **Decide weather.** Not in the route files. Options: leave the server's default
-      (simplest, but a further fidelity gap on top of no scripted scenarios), or cycle
-      through CARLA's standard presets per route (closer to the spirit of the leaderboard's
-      weather variation, still not its actual per-route assignment, which isn't public).
-- [ ] **Decide which routes to actually run.** `routes_testing.xml`'s Town04 (10 routes) is
-      genuinely held-out — never in this project's training data (Town01/02/03/10) — unlike
-      reusing Town01 again, which 13.31 already covered with our own random routes. **Town05
-      is currently off the table** (see crash finding above) even though it's also held-out
-      and `routes_testing.xml` carries 10 routes for it. Town04 alone gives a real
-      generalization read that Option A would also have given; that part of the value isn't
-      lost by skipping Option A.
-- [ ] Set `--max_steps` realistically for official-route length (~1273 m mean on the Town04
-      sample vs. this project's own 100-500 m routes) — 3000 (the existing default, 150 s)
-      may still be short; check a few routes' actual completion time before committing to a
-      value for the full run.
+**Resolved, before the real run:**
+- [x] **Weather.** Cycled through 14 standard CARLA presets by route index
+      (`WEATHER_PRESETS[(route_index - 1) % 14]`) rather than leaving the server default —
+      closer to the spirit of the leaderboard's per-route weather variation, though not its
+      actual (non-public) assignment.
+- [x] **Routes.** Town04 only, 10 routes from `routes_testing.xml`, `--route_seed 0`. Town05
+      stayed off the table (crash finding above). All 3 arms driven on byte-identical routes
+      and traffic (`--num_vehicles 20`), which is what makes the paired comparison below valid.
+- [x] **`--max_steps`.** Set to 8000 (400s sim time) against the ~1273m mean route length;
+      `--blocked_timeout_s 45`.
+
+## Result — Town04, official routes, all 3 arms (2026-09-09)
+
+`run_closed_loop_official.sh`, 3 concurrent CARLA servers (ports 2000/2010/2020), same
+checkpoints as 13.31 (seed 0).
+
+| Arm | Driving Score | Route Completion | Infraction Penalty | Terminations |
+|---|---|---|---|---|
+| cnn | 0.304 | 0.594 | 0.571 | 10 timeout |
+| qwen30m (baseline) | 0.257 | 0.548 | 0.517 | 9 timeout, 1 blocked |
+| qwen30m+geom | 0.274 | 0.602 | 0.533 | 10 timeout |
+
+Paired bootstrap (`compare_closed_loop.py`, `driving_score`, 10 shared routes) — **all three
+pairings NOT SUPPORTED**:
+
+| Pairing | A − B | 95% CI |
+|---|---|---|
+| cnn vs qwen30m | +0.0477 | [−0.0002, +0.1161] |
+| cnn vs qwen30m+geom | +0.0309 | [−0.0003, +0.0918] |
+| qwen30m vs qwen30m+geom | −0.0168 | [−0.0617, +0.0102] |
+
+None of the three CIs exclude zero — at n=10 nothing here is distinguishable from route-draw
+noise, so no ranking claim is supportable from this run alone. The notable point is *direction*:
+13.31 (Town01, in-distribution, n=15) found cnn vs qwen30m+geom was the one pairing that
+**did** clear the bootstrap, with qwen30m+geom ahead (CI [−0.148, −0.012] in RC terms — see
+13.31). Here, out-of-distribution, the point estimate for that same pairing flips — cnn nominally
+ahead by +0.031 — though the CI ([−0.0003, +0.0918]) is the closest of the three to excluding
+zero in cnn's favor, not geom's. Read together: **the geometry-loss advantage found
+in-distribution does not clearly replicate out-of-distribution**, and a second training seed
+(seed 1, running now — see below) is needed before treating even that directional flip as
+anything more than one more coin flip (the exact 13.29 lesson: same-signed point estimates
+without a cleared CI are not evidence).
+
+All three arms terminate almost exclusively by `timeout` rather than collision/off-road — Town04
+is a highway-and-mountain map genuinely unlike the flat suburban grid (Town01/02/03/10) all
+three policies trained on, so low completion here reads as "doesn't know this road geometry"
+more than "drives badly." Consistent with the pre-registered expectation in this doc's
+"honest ceiling" section below.
 
 ## Either way — the honest ceiling
 
