@@ -67,6 +67,15 @@ INCLUDE_GROUPS: Dict[str, List[str]] = {
     "tensorboard": ["runs"],
     "checkpoints": ["checkpoints"],
     "videos": ["eval_video.mp4", "eval_video_best.mp4", "wor_eval_video.mp4"],
+    # The actual experimental record behind every closed-loop/Bench2Drive table in
+    # challenges_13.md and TODO_leaderboard_benchmark.md: driving-score JSON, per-route
+    # logs and their rollout videos. Not covered by "videos" above (that group predates
+    # this output layout) or "checkpoints" (a sibling tree, not nested under it). Each
+    # entry is a whole directory, since build_remote_tar_cmd single-quotes every path
+    # (globs like train_*.log would not expand under that quoting, so logs aren't in
+    # this group - pull them by hand if needed, e.g. scp 'root@host:/workspace/train_*.log').
+    "results": ["closed_loop", "closed_loop_official", "closed_loop_seed1",
+                "closed_loop_seed2", "bench2drive_out"],
 }
 #: What a bare invocation pulls: small, and enough to compare runs.
 DEFAULT_INCLUDES = ["mlruns", "telemetry"]
