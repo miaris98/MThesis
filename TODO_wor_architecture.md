@@ -3,9 +3,9 @@
 Companion to `challenges/challenges_13_transformer_head_underperformance.md` (sections
 13.1–13.28), which carries the full reasoning. This file is the working checklist.
 
-Last updated: 2026-09-08, after seed replication, the vision_grid8 test, the size curve, the
-geometry-loss implementation, the geometry-loss A/B, and building (but not yet running)
-closed-loop CARLA evaluation.
+Last updated: 2026-09-09, after running the closed-loop CARLA comparison to completion: cnn
+vs qwen30m (baseline) vs qwen30m (+geometry loss), 15 paired routes each. See "Where the
+result currently stands" below and challenges_13 §13.31.
 
 ---
 
@@ -70,6 +70,16 @@ is not something held-out loss of any kind can answer — it depends on how the 
 point selection responds to a smoother path, which is exactly the question closed-loop eval
 exists to answer. This moves closed-loop CARLA evaluation from "the remaining gate" to
 "the only thing left that can adjudicate this."
+
+**Closed-loop run complete (2026-09-09): the two-improvement bundle wins, neither
+improvement alone is certified.** 15 paired Town01 routes, same traffic seed, all three
+checkpoints retrained fresh (4 towns / 656 routes, matching every prior result exactly).
+Point estimates: cnn mean DS 0.244, qwen30m baseline 0.278, qwen30m+geometry 0.327. Paired
+bootstrap: cnn-vs-baseline **NOT SUPPORTED** (CI [-0.100, +0.032]), baseline-vs-geometry
+**NOT SUPPORTED** (CI [-0.145, +0.064]), but cnn-vs-geometry **clears** on both driving score
+(CI [-0.148, -0.012]) and route completion (CI [-0.068, -0.004]). At 15 routes each single
+step is indistinguishable from route-draw noise; only the accumulated change across both
+improvements survives the same test. Full writeup: challenges_13 §13.31.
 
 ---
 
@@ -136,7 +146,16 @@ exists to answer. This moves closed-loop CARLA evaluation from "the remaining ga
       infractions instead of one, see 11.7); and a third variant of the Vulkan driver gap,
       where the ICD manifest pointed at a library file that was simply absent rather than
       mismatched — `vulkaninfo` cannot tell the two apart from its error message alone
-      (`carla_vulkan_driver_troubleshooting_guide.md`, 1.6a). (13.31)
+      (`carla_vulkan_driver_troubleshooting_guide.md`, 1.6a).
+- [x] Ran all three checkpoints concurrently for the first time, hit a traffic-manager port
+      collision invisible from the CARLA server's own logs (`get_trafficmanager()` binds a
+      fixed port regardless of `--port`), fixed with an explicit `--tm_port` per arm. See
+      11.8 for the two failure modes it produced (a catchable `RuntimeError` on one arm, an
+      uncatchable C++ `std::terminate` on another, depending on timing).
+- [x] **Completed the closed-loop comparison: 15 paired routes, cnn vs qwen30m baseline vs
+      qwen30m+geometry-loss.** Only the two-improvement bundle (cnn vs geometry-loss) clears
+      a paired bootstrap; neither single step does at this sample size. Recorded and pulled
+      chase-cam video for the first 2 routes of each arm. (13.31)
 
 ---
 
@@ -146,56 +165,20 @@ assessment of nine external CARLA datasets/models.
 
 ## Next — Tier 1
 
-- [ ] **RUN the closed-loop comparison — infrastructure is built, this was stopped mid-run
-      for time on 2026-09-08 and needs a clean restart, not new engineering.** Nothing in
-      this entire group has measured driving. A 13.6% L1 margin may not survive the PID
-      controller — the error is dominated by longitudinal displacement, near-closed-form
-      from the speed scalar the policy is already handed, while the controller steers off
-      lateral only (13.16, 13.22). Now the *only* open question, not just the largest one:
-      the geometry loss (13.29) moved heading error 92% and left the lateral quantity the
-      PID reads unmoved, and open-loop metrics cannot say whether that matters.
-
-      **To resume on a fresh instance:**
-      1. `bash setup_carla_eval.sh` — provisions the matching NVIDIA userspace driver,
-         CARLA 0.9.15, and a Python 3.10 `/workspace/venv_carla` (the `carla` wheel has no
-         cp312 ABI, so this cannot share `/venv/main`). ~10 min, mostly download.
-      2. Train three checkpoints (none currently exist off-instance — `.pth` files are
-         never kept per the never-sync-large-artifacts rule, and the previous instance
-         that had them is gone). ~15 min each, run concurrently on one GPU (this session
-         measured ~1.05x solo time for 3x the work when GPU util was ~25% on one job —
-         see challenges_05 §5.7/§5.8 once written up, or just check `nvidia-smi` util
-         before assuming sequential is necessary):
-         `cnn_s0`, `qwen30m_baseline_s0` (`--heading_loss_weight 0 --curvature_loss_weight 0`),
-         `qwen30m_geom_s0` (`--heading_loss_weight 0.5 --curvature_loss_weight 0.2`) — same
-         flags as the seed-replication runs, `--data_dir` pointed at a 4-town PDM-Lite
-         pull (`python download_pdm_lite.py --towns Town01,Town02,Town03,Town10` reproduces
-         the exact 656-route/114,556-frame set every prior result in this group used).
-         Check `nvidia-smi` utilisation on the first job alone before deciding sequential
-         vs. concurrent — this exact 3-job case measured ~25-30% solo utilisation and ran
-         all three in ~1.07x solo time when launched concurrently (challenges_05 §5.8);
-         don't assume 5.7's "sequential by default" applies without checking first.
-      3. `bash run_closed_loop_arms.sh` — drives all three checkpoints through 15 identical
-         routes each (seeded routes AND seeded traffic via `--route_seed`, so they are
-         comparable route-by-route), records video for the first 2 routes of each arm,
-         writes JSON per arm to `/workspace/closed_loop/`.
-      4. `python compare_closed_loop.py --a <arm>.json --b <arm>.json` for the paired
-         bootstrap between any two arms.
-
-      **Timing, measured on 2026-09-08 (V100, Town01):** the first two routes (with video)
-      took ~3 min each, close to the 150 s `--max_steps 3000` cap — most routes were not
-      completing early. Extrapolated: **~40–45 min per arm, ~2–2.5 hours for all three
-      sequentially.** Do not start this without that much time, or drop `--routes` to 5–8
-      for a faster (still paired, just noisier) first read, or run the three arms
-      concurrently the way the training runs were (untested for this script, but nothing
-      about it should require the GPU to itself — CARLA is the bottleneck, not the policy
-      network — try it on 3 separate ports with 3 separate CARLA server instances).
-      **What was actually observed before this was stopped:** the CNN arm's first two
-      routes, watched by eye — route completion in the 65-95% range, terminations mostly
-      `timeout` rather than `completed` or collision, consistent with the units bug fix
-      working (speed held near the 20 km/h target rather than 72). No paired comparison
-      was obtained; do not treat anything from the interrupted run as a result.
 - [ ] **More data.** Dominant lever twice over. `python download_pdm_lite.py --towns
       Town04,Town05 --reserve-gb 30` → 47 GB, ~9 min, ~1,840 routes total.
+- [ ] **Widen the closed-loop sample.** 15 routes was enough to certify the two-improvement
+      bundle (cnn vs qwen30m+geometry) but not either single step (13.31) — the CIs on those
+      two comparisons ([-0.100, +0.032] and [-0.145, +0.064]) are wide enough that more
+      routes could plausibly resolve one or both. `run_closed_loop_arms.sh` already runs all
+      three arms concurrently (`--tm_port` fix, 11.8); raising `--routes` past 15 is the only
+      change needed, budget ~2.5 min/route/arm when solo, less under concurrency.
+- [ ] **Attribute the two-improvement bundle.** 13.31 shows cnn-vs-geometry clears but
+      neither cnn-vs-baseline nor baseline-vs-geometry does alone — that's a sample-size
+      argument, not evidence the architecture change contributes nothing on its own. A wider
+      route sample (above) is the direct way to find out whether baseline-vs-geometry
+      resolves on its own with more routes, which is the more informative of the two
+      open comparisons since architecture-only was already the certified open-loop result.
 
 ## Next — Tier 2
 

@@ -20,6 +20,7 @@ mlruns/
 runs/
 results/
 weights/wor_nc.pth
+closed_loop_videos/
 # Added by code-review-graph
 .code-review-graph/
 # graphify knowledge-graph output (regenerable via /graphify --update)
