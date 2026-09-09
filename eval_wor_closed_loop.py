@@ -96,6 +96,18 @@ MAX_ROUTE_DEVIATION_M = 30.0
 # red over a stationary car is not counted as a violation.
 RED_LIGHT_MIN_SPEED_MPS = 0.5
 
+# CARLA's 14 standard presets. The leaderboard varies weather per route and does not publish
+# the assignment, so there is no "correct" mapping to reproduce - this cycles through all 14
+# by route position instead of leaving every route on the server's default. It is a function
+# of route position alone (not of policy_arch, checkpoint, or wall-clock time), so every arm
+# sees the identical weather sequence for the identical --route_seed manifest and the paired
+# comparison stays valid.
+WEATHER_PRESETS = [
+    "ClearNoon", "CloudyNoon", "WetNoon", "WetCloudyNoon", "MidRainyNoon",
+    "HardRainNoon", "SoftRainNoon", "ClearSunset", "CloudySunset", "WetSunset",
+    "WetCloudySunset", "MidRainSunset", "HardRainSunset", "SoftRainSunset",
+]
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="Closed-loop CARLA evaluation of a WoR policy")
@@ -355,12 +367,18 @@ class RedLightWatcher:
         return violated
 
 
-def run_route(world, client, agent, route_spec, spawn_points, grp, args,
+def run_route(world, client, agent, route_spec, spawn_points, grp, args, route_index: int,
               record_video: bool = False) -> Dict:
     """Drives one route and returns its metrics record."""
     bp_lib = world.get_blueprint_library()
     actors = []
     recorder = None
+
+    # A pure function of route_index, not of policy_arch/checkpoint/wall-clock, so every
+    # arm sees the identical weather for the identical manifest position - see
+    # WEATHER_PRESETS.
+    world.set_weather(getattr(carla.WeatherParameters,
+                               WEATHER_PRESETS[(route_index - 1) % len(WEATHER_PRESETS)]))
 
     if "waypoints_raw" in route_spec:
         # Official-route path (load_official_routes): snap each hand-authored (x, y) to
@@ -601,7 +619,7 @@ def main():
         records = []
         t_start = time.time()
         for k, spec in enumerate(manifest, 1):
-            rec = run_route(world, client, agent, spec, spawn_points, grp, args,
+            rec = run_route(world, client, agent, spec, spawn_points, grp, args, k,
                             record_video=bool(args.record_video) and k <= args.video_routes)
             records.append(rec)
             print(f"  [{k:03d}/{len(manifest)}] {spec['route_id']}  "
