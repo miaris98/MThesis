@@ -105,6 +105,17 @@ def parse_args():
     p.add_argument("--backbone", type=str, default="resnet34")
     p.add_argument("--host", type=str, default="127.0.0.1")
     p.add_argument("--port", type=int, default=2000)
+    p.add_argument("--tm_port", type=int, default=0,
+                   help="Traffic manager RPC port. 0 (default) derives --port + 8000, which "
+                        "reduces to the client library's own hardcoded default (8000) only "
+                        "when run against a lone server on --port 0 - anywhere else it must "
+                        "be set. get_trafficmanager() ALWAYS binds a fixed port unless told "
+                        "otherwise, regardless of which CARLA server --port the client "
+                        "connected to, so two concurrent evaluations against two different "
+                        "CARLA servers still collide here unless each passes a distinct "
+                        "--tm_port - the CARLA server's own RPC/streaming ports (--port, "
+                        "--port+1, --port+2) do not protect against this at all, it is a "
+                        "wholly separate service with its own port")
     p.add_argument("--town", type=str, default="Town01")
     p.add_argument("--routes", type=int, default=20,
                    help="Number of routes to drive. Routes are the independent unit for the "
@@ -179,15 +190,29 @@ def build_route_manifest(world, num_routes: int, seed: int) -> List[Dict]:
     return manifest
 
 
-def spawn_traffic(world, client, num_vehicles: int, num_walkers: int, seed: int):
+def spawn_traffic(world, client, num_vehicles: int, num_walkers: int, seed: int,
+                   tm_port: int = 8000):
     """Spawns background traffic under a fixed traffic-manager seed.
 
     Without `set_random_device_seed` the NPC vehicles behave differently on every run,
     which would put a different obstacle in front of each checkpoint and reintroduce
     exactly the variance the fixed route manifest exists to remove.
+
+    `tm_port` matters more than it looks. `get_trafficmanager()` starts an RPC server of
+    its own and binds it to a FIXED port (8000) unless told otherwise - unlike the CARLA
+    server itself, whose --carla-port choice this call has no knowledge of at all. Two
+    concurrent evaluations against two different CARLA servers on two different ports
+    still collide here if neither passes an explicit `tm_port`: whichever calls
+    `get_trafficmanager()` second gets `RuntimeError: ... bind error`, and depending on
+    timing the first can instead take down the whole process with an uncatchable C++
+    exception (`clmdep_msgpack::v1::type_error: std::bad_cast`, straight to
+    `std::terminate` - no Python try/except reaches it). Found by running three arms of
+    this evaluation concurrently in the same tmux host: it reproduced on the third arm
+    both times, consistent with the third caller racing the first two for a port already
+    taken.
     """
     actors = []
-    tm = client.get_trafficmanager()
+    tm = client.get_trafficmanager(tm_port)
     tm.set_synchronous_mode(True)
     tm.set_random_device_seed(seed)
 
@@ -455,9 +480,11 @@ def main():
         print(f"✓ Route manifest: {len(manifest)} routes, "
               f"mean length {np.mean([r['length_m'] for r in manifest]):.0f} m")
 
+        tm_port = args.tm_port if args.tm_port else (args.port + 8000)
         traffic_actors, tm = spawn_traffic(world, client, args.num_vehicles,
-                                           args.num_walkers, args.route_seed)
-        print(f"✓ Traffic: {len(traffic_actors)} actors (tm seed {args.route_seed})")
+                                           args.num_walkers, args.route_seed, tm_port)
+        print(f"✓ Traffic: {len(traffic_actors)} actors (tm seed {args.route_seed}, "
+              f"tm_port {tm_port})")
 
         agent = WorldOnRailsAgent(
             checkpoint_path=args.checkpoint,
