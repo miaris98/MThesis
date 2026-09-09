@@ -36,55 +36,113 @@ identical-protocol number. The best available fix is the closest legitimate *pro
 leaderboard's own public route pool, which the original papers themselves used for local
 validation before their real submission. This gets us close, not identical.
 
-## Two build options — keep both on the table
+## Option A tried, hit a real wall: CARLA 0.9.10.1 is gone
 
-Per 2026-09-09 discussion: don't commit to one path yet, scope both so a future session can
-pick based on time available.
+2026-09-09: before writing any code, checked whether 0.9.10.1 — the version the leaderboard
+docs insist on, "the exact version used by the online servers" — is still obtainable.
+It isn't, through any channel found:
 
-### Option A — proper build (closest legitimate number)
+- The official CDN link (`tiny.carla.org/carla-0-9-10-1-linux` →
+  `carla-releases.b-cdn.net/Linux/CARLA_0.9.10.1.tar.gz`) returns **403 Forbidden** — and this
+  reproduces from a plain local `curl`, not just from vast.ai, so it is not an IP/datacenter
+  block. CARLA appears to have stopped serving this specific legacy release.
+- The community SourceForge mirror (`carla-simulator.mirror`) only goes back to **0.9.13** —
+  nothing for 0.9.10.x.
+- The GitHub release page for `0.9.10.1` lists no alternate mirror (no Google Drive/Baidu/
+  etc., unlike TCP's own dataset links).
 
-- Second CARLA install, **0.9.10.1** specifically — the leaderboard docs are explicit that
-  this is "the exact version used by the online servers," pinned, not a suggestion. This
-  project's existing instance runs 0.9.15 for everything else; this would sit alongside it,
-  not replace it.
-- Clone `carla-simulator/leaderboard` and `carla-simulator/scenario_runner`, wire up their
-  env vars. `scenario_runner` is a hard dependency for the actual triggered scenarios along
-  each route — without it this degrades to Option B.
-- Write a new agent class implementing the five-method `AutonomousAgent` interface
-  (`get_entry_point`, `setup`, `sensors`, `run_step`, `destroy`) that wraps the existing
-  `wor_policy.py` / `qwen_wor_policy.py` inference — this is a new adapter, not a reuse of
-  `eval_wor_closed_loop.py`'s current agent loop, since the interface shape is different.
-- Run on `routes_training.xml` (50 routes, 112.8 km) and/or `routes_testing.xml` (26 routes,
-  58.9 km) from the leaderboard repo's `data/` folder — the 8 public towns, official weather
-  presets.
-- **Risk:** a second CARLA version on the same box means redoing the Vulkan/userspace-driver
-  matching dance from challenges_01 §1.1-1.6a for a *different* CARLA build. That saga was
-  expensive the first time; budget real time for it to happen again.
-- **Payoff:** this is also most of what's needed to run TCP itself (see below) — TCP already
-  targets 0.9.10.1, so Option A's CARLA install and scenario_runner setup remove two of TCP's
-  three blockers for free if that thread gets picked up too.
+Decision (user, 2026-09-09): drop the second-CARLA-version plan rather than go looking for an
+unofficial mirror of a multi-GB precompiled Unreal Engine binary — that is a real
+supply-chain trust call, not something to route around unilaterally. **Building Option B
+instead.** Option A's prerequisite repos are already cloned and left in place in case
+0.9.10.1 resurfaces somewhere trustworthy later: `/workspace/leaderboard` (branch
+`leaderboard-1.0`) and `/workspace/scenario_runner` (branch `0.9.10`) — these clones are what
+Option B's route files are actually read from (see below), so they were not wasted effort.
 
-### Option B — lighter, unverified middle ground
+## Option B — status: built, mid-validation
 
-- Keep the current CARLA 0.9.15 install and `eval_wor_closed_loop.py`'s existing agent loop.
-- Pull in just the official town list, route waypoints, and weather presets from
-  `routes_training.xml`/`routes_testing.xml`, and feed them into `build_route_manifest()` in
-  place of the current self-generated routes.
-- Skip `scenario_runner` — no scripted dynamic scenarios, ambient traffic only, same as now.
-- **Not yet verified feasible.** Two open questions before committing time: (1) does the
-  leaderboard's route XML format parse cleanly against a 0.9.15 map, given maps can change
-  between CARLA versions in ways that shift spawn points or invalidate route waypoints; (2)
-  does skipping scenario_runner's scenarios undermine the comparison enough that it isn't
-  worth doing at all — the published numbers include scripted-scenario infractions that this
-  option would structurally be unable to reproduce. Check both before starting, not after.
-- **Payoff:** no second CARLA install, reuses all existing infra, much smaller time cost than
-  Option A if it turns out to work.
+Reuses the current CARLA 0.9.15 install and `eval_wor_closed_loop.py`'s existing agent loop.
+Pulls in the official route pool; skips `scenario_runner` entirely (no scripted dynamic
+scenarios — ambient traffic only, same as every run so far).
 
-### Either way — the honest ceiling
+**Done:**
+- `eval_wor_closed_loop.py`: added `load_official_routes(xml_path, town, num_routes, seed)`,
+  which parses a Leaderboard 1.0 `routes_*.xml`, filters by town, and deterministically
+  subsamples if there are more routes than requested. New CLI flags `--route_source
+  {random,official}` (default `random`, so every prior invocation of this script is
+  unaffected) and `--route_file`.
+- `run_route()` now branches: an official-route spec carries `waypoints_raw` (a list of
+  `(x, y)` pairs, not the XML's raw z/pitch/yaw/roll — some shipped entries have values like
+  `pitch="360.0"`, not safe to trust directly). Each point is snapped to the nearest driving
+  lane via `get_waypoint(project_to_road=True)`, then `GlobalRoutePlanner.trace_route()` is
+  chained between every consecutive pair of snapped points, so the vehicle actually follows
+  the route's full shape (routes carry up to ~29 control points) rather than a single
+  start/end trace that would let the planner pick its own path and silently discard it.
+- Confirmed the route files themselves: `/workspace/leaderboard/data/routes_training.xml`
+  (50 routes: Town01×10, Town03×20, Town04×10, Town06×10) and `routes_testing.xml` (26
+  routes: Town02×6, Town04×10, Town05×10). No `<weathers>` block in either file — weather
+  isn't in the XML, the real leaderboard evaluator assigns it separately, so this still needs
+  a decision before a real run (see Open below). There's also a separate
+  `all_towns_traffic_scenarios_public.json` (the scripted-scenario trigger definitions) which
+  Option B does not use, by design — that's the scenario_runner-shaped fidelity gap already
+  named above.
+- Town coverage check against the existing CARLA 0.9.15 install: Town01–05 and Town10HD were
+  already present; **Town06 was missing** (only an `.xodr` road-network file, no compiled
+  `.umap`). Fetched `AdditionalMaps_0.9.15.tar.gz` (official, still live —
+  `downloads.carlasim.com`, unlike 0.9.10.1's dead link) and ran `ImportAssets.sh` to add it.
 
-Even a fully successful Option A run only reaches "closest legitimate proxy available," not
-the literal routes behind the 31.4/69.7/75.1 numbers above. State it that way in any writeup
-that cites this comparison — don't let a hard-won number quietly imply more than it earned.
+- [x] `ImportAssets.sh` completed and Town06 verified loadable
+      (`client.load_world("Town06")` + `world.tick()`, 436 spawn points, no error). The tar
+      output did include `Unexpected inconsistency when making directory` warnings on a
+      handful of generic `Engine/Content/` editor-support files (not CARLA map content); did
+      not investigate further since the actual map load works.
+- [x] **Smoke-tested `--route_source official` end to end — works.** 3 routes on Town04 via
+      `routes_testing.xml`, clean run, correct route IDs (`official_r12`, `official_r15`,
+      `official_r6`, matching the deterministic subsample). Route completion was low (7-10%,
+      all `timeout`) only because the smoke test used a deliberately short `--max_steps 800`
+      (40 s) against routes whose mean length (~1273 m estimated) is far longer than this
+      project's own random routes (100-500 m) — a real run needs a much larger `--max_steps`,
+      not a code fix.
+
+**Found and resolved during validation: a real crash, but not in the new code.**
+`--route_source official` on **Town05** crashed reproducibly — always at the same point (a
+CARLA-server-side segfault, `Signal 11`, right after checkpoint loading, before the first
+route's first tick). Isolated with two scratch scripts run against a live server: route
+loading + snap-to-lane + chained `trace_route()` alone (no torch) completed cleanly on
+Town05, and ego+sensor spawn alone (no torch) also completed cleanly on Town05 — so the new
+route code was not the trigger. Then the **pre-existing, long-proven-stable `--route_source
+random` path** (unchanged code, used for every prior closed-loop run in this project) was
+run on Town05 and **crashed identically, at the identical point**. Conclusive: this is a
+pre-existing environment instability specific to Town05, never discovered before because
+every closed-loop run in this project's history used Town01 exclusively until this session.
+Town04 (also genuinely held-out) was tried next and works cleanly with both `random` and
+`official` route sources — the instability is Town05-specific, not "any non-Town01 town."
+Not investigated further (likely VRAM/scene-complexity related — Town05 is a larger map than
+Town01/04 — but unconfirmed); **avoid Town05 for closed-loop runs on this instance class
+until someone diagnoses it properly.**
+
+**Open, before a real run:**
+- [ ] **Decide weather.** Not in the route files. Options: leave the server's default
+      (simplest, but a further fidelity gap on top of no scripted scenarios), or cycle
+      through CARLA's standard presets per route (closer to the spirit of the leaderboard's
+      weather variation, still not its actual per-route assignment, which isn't public).
+- [ ] **Decide which routes to actually run.** `routes_testing.xml`'s Town04 (10 routes) is
+      genuinely held-out — never in this project's training data (Town01/02/03/10) — unlike
+      reusing Town01 again, which 13.31 already covered with our own random routes. **Town05
+      is currently off the table** (see crash finding above) even though it's also held-out
+      and `routes_testing.xml` carries 10 routes for it. Town04 alone gives a real
+      generalization read that Option A would also have given; that part of the value isn't
+      lost by skipping Option A.
+- [ ] Set `--max_steps` realistically for official-route length (~1273 m mean on the Town04
+      sample vs. this project's own 100-500 m routes) — 3000 (the existing default, 150 s)
+      may still be short; check a few routes' actual completion time before committing to a
+      value for the full run.
+
+## Either way — the honest ceiling
+
+Even a fully successful run only reaches "closest legitimate proxy available," not the
+literal routes behind the 31.4/69.7/75.1 numbers above. State it that way in any writeup that
+cites this comparison — don't let a hard-won number quietly imply more than it earned.
 
 ## TCP, separately
 

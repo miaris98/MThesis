@@ -41,6 +41,7 @@ import os
 import random
 import sys
 import time
+import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -121,6 +122,17 @@ def parse_args():
                    help="Number of routes to drive. Routes are the independent unit for the "
                         "paired bootstrap, so this - not episode length - is what sets the "
                         "resolution of the comparison")
+    p.add_argument("--route_source", type=str, default="random", choices=["random", "official"],
+                   help="'random' (default) draws --routes random origin/destination pairs "
+                        "via build_route_manifest, as this script always has. 'official' "
+                        "loads hand-authored routes for --town from --route_file (a CARLA "
+                        "Leaderboard 1.0 routes_*.xml) via load_official_routes instead - "
+                        "the closest local proxy to the leaderboard's own protocol. See "
+                        "TODO_leaderboard_benchmark.md for what it still does not reproduce")
+    p.add_argument("--route_file", type=str, default="",
+                   help="Path to a Leaderboard 1.0 routes_*.xml (e.g. "
+                        "leaderboard/data/routes_testing.xml). Required when "
+                        "--route_source official; ignored otherwise")
     p.add_argument("--route_seed", type=int, default=0,
                    help="Seeds route generation AND traffic. Two runs sharing this value drive "
                         "identical routes through identical traffic, which is what makes them "
@@ -187,6 +199,60 @@ def build_route_manifest(world, num_routes: int, seed: int) -> List[Dict]:
     if len(manifest) < num_routes:
         print(f"[WARNING] Only {len(manifest)}/{num_routes} routes met the "
               f"{MIN_ROUTE_LENGTH_M} m minimum on this map.")
+    return manifest
+
+
+def load_official_routes(xml_path: str, town: str, num_routes: Optional[int],
+                          seed: int) -> List[Dict]:
+    """Loads routes for `town` from a CARLA Leaderboard 1.0 `routes_*.xml` file.
+
+    These are hand-authored multi-waypoint routes (see `leaderboard/data/routes_training.xml`
+    and `routes_testing.xml`, 50 + 26 routes across the 8 public towns), not the random
+    origin/destination pairs `build_route_manifest` draws. This is the closest legitimate
+    proxy available for the leaderboard's own protocol: the actual held-out test routes are
+    secret and were only ever scoreable by the leaderboard's own (now-deprecated) online
+    server, so this file's public route pool - what the leaderboard ships for local
+    training/validation - is as close as a local run can get. See
+    TODO_leaderboard_benchmark.md for what this still does not reproduce (no
+    `scenario_runner`-driven scripted scenarios, no official weather assignment).
+
+    Only (x, y) is kept from each `<waypoint>`. z/pitch/yaw/roll are not trusted as spawn
+    geometry - some entries in the shipped files carry values like `pitch="360.0"`, and a
+    raw z is not guaranteed to sit exactly on the road surface. `run_route` instead snaps
+    each (x, y) to the nearest driving-lane waypoint via `get_waypoint(project_to_road=True)`,
+    which is the standard CARLA pattern for turning an arbitrary 2D coordinate into a valid
+    on-road transform.
+
+    Deterministic subsampling: if `town` has more routes than `num_routes`, a `Random(seed)`
+    instance picks which ones, so the same `--route_seed` always yields the same subset -
+    the same determinism guarantee `build_route_manifest` gives the random-route path.
+    """
+    tree = ET.parse(xml_path)
+    town_routes = [r for r in tree.getroot().findall("route") if r.get("town") == town]
+
+    if num_routes is not None and len(town_routes) > num_routes:
+        rng = random.Random(seed)
+        town_routes = rng.sample(town_routes, num_routes)
+
+    manifest = []
+    for r in town_routes:
+        waypoints = [(float(wp.get("x")), float(wp.get("y")))
+                     for wp in r.findall("waypoint")]
+        if len(waypoints) < 2:
+            continue
+        length_m = sum(
+            ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+            for (x1, y1), (x2, y2) in zip(waypoints[:-1], waypoints[1:])
+        )
+        manifest.append({
+            "route_id": f"official_r{r.get('id')}",
+            "waypoints_raw": waypoints,
+            "length_m": round(length_m, 1),
+        })
+
+    if num_routes is not None and len(manifest) < num_routes:
+        print(f"[WARNING] Town {town} has only {len(manifest)} official routes in "
+              f"{xml_path}, fewer than the {num_routes} requested.")
     return manifest
 
 
@@ -295,11 +361,36 @@ def run_route(world, client, agent, route_spec, spawn_points, grp, args,
     bp_lib = world.get_blueprint_library()
     actors = []
     recorder = None
-    origin = spawn_points[route_spec["spawn_idx"]]
-    dest = spawn_points[route_spec["dest_idx"]]
 
-    route = grp.trace_route(origin.location, dest.location)
-    route_locations = [wp.transform.location for wp, _ in route]
+    if "waypoints_raw" in route_spec:
+        # Official-route path (load_official_routes): snap each hand-authored (x, y) to
+        # the nearest driving lane, then chain trace_route() between consecutive snapped
+        # points so the vehicle follows all of the route's control points, not just a
+        # start/end pair - a multi-waypoint route through Town03/04 (up to 29 points, see
+        # TODO_leaderboard_benchmark.md) means a single trace_route(first, last) call
+        # would let the planner pick its own path and silently discard the route's shape.
+        world_map = world.get_map()
+        transforms = [
+            world_map.get_waypoint(carla.Location(x=x, y=y, z=0.0), project_to_road=True,
+                                    lane_type=carla.LaneType.Driving).transform
+            for x, y in route_spec["waypoints_raw"]
+        ]
+        origin = carla.Transform(
+            carla.Location(x=transforms[0].location.x, y=transforms[0].location.y,
+                            z=transforms[0].location.z + 0.3),  # lift clear of the road mesh
+            transforms[0].rotation)
+        route_locations = [transforms[0].location]
+        for a, b in zip(transforms[:-1], transforms[1:]):
+            try:
+                seg = grp.trace_route(a.location, b.location)
+            except Exception:
+                continue
+            route_locations.extend(wp.transform.location for wp, _ in seg)
+    else:
+        origin = spawn_points[route_spec["spawn_idx"]]
+        dest = spawn_points[route_spec["dest_idx"]]
+        route = grp.trace_route(origin.location, dest.location)
+        route_locations = [wp.transform.location for wp, _ in route]
 
     metrics = DrivingMetrics(
         route_id=route_spec["route_id"],
@@ -447,6 +538,8 @@ def run_route(world, client, agent, route_spec, spawn_points, grp, args,
 
 def main():
     args = parse_args()
+    if args.route_source == "official" and not args.route_file:
+        raise SystemExit("--route_file is required when --route_source official")
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
 
     print("=" * 70)
@@ -476,9 +569,17 @@ def main():
 
     traffic_actors, tm = [], None
     try:
-        manifest = build_route_manifest(world, args.routes, args.route_seed)
-        print(f"✓ Route manifest: {len(manifest)} routes, "
-              f"mean length {np.mean([r['length_m'] for r in manifest]):.0f} m")
+        if args.route_source == "official":
+            manifest = load_official_routes(args.route_file, args.town, args.routes,
+                                             args.route_seed)
+            print(f"✓ Official route manifest: {len(manifest)} routes from "
+                  f"{args.route_file} (town {args.town}), "
+                  f"mean length {np.mean([r['length_m'] for r in manifest]):.0f} m "
+                  f"(straight-segment estimate, not the traced driving distance)")
+        else:
+            manifest = build_route_manifest(world, args.routes, args.route_seed)
+            print(f"✓ Route manifest: {len(manifest)} routes, "
+                  f"mean length {np.mean([r['length_m'] for r in manifest]):.0f} m")
 
         tm_port = args.tm_port if args.tm_port else (args.port + 8000)
         traffic_actors, tm = spawn_traffic(world, client, args.num_vehicles,
@@ -512,6 +613,8 @@ def main():
             "checkpoint": args.checkpoint,
             "policy_arch": args.policy_arch,
             "town": args.town,
+            "route_source": args.route_source,
+            "route_file": args.route_file,
             "route_seed": args.route_seed,
             "num_vehicles": args.num_vehicles,
             "num_walkers": args.num_walkers,
