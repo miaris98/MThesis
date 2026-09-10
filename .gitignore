@@ -25,3 +25,6 @@ closed_loop_videos/
 .code-review-graph/
 # graphify knowledge-graph output (regenerable via /graphify --update)
 graphify-out/
+
+# secrets - never commit
+.env
