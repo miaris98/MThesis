@@ -63,6 +63,19 @@ def waypoint_losses(
     the version the existing four-town results were measured with.
     """
     pred_wp = out["selected_waypoints"]
+
+    # Defends against a corrupt/degenerate ground-truth record, not against the model:
+    # seen in practice on the qwen30m+geom 8-town run, where training reproducibly hit
+    # a non-finite loss at the exact same epoch and batch index across multiple restarts
+    # from a clean checkpoint - i.e. a specific data sample, not a random numerical
+    # fluke. clamp_min() elsewhere in this function only enforces a floor, so it does
+    # nothing against an outright inf/nan already present in a waypoint; one such value
+    # makes this function's scalar `total` nan, which poisons that whole batch's
+    # gradient for every sample in it, not just the bad one. nan_to_num neutralises that
+    # at the source, for both tensors, before anything downstream can propagate it.
+    target_wp = torch.nan_to_num(target_wp, nan=0.0, posinf=1e4, neginf=-1e4)
+    pred_wp = torch.nan_to_num(pred_wp, nan=0.0, posinf=1e4, neginf=-1e4)
+
     loss_q = F.mse_loss(out["selected_rail_q"], target_q)
     loss_wp_x = F.l1_loss(pred_wp[..., 0], target_wp[..., 0])
     loss_wp_y = F.l1_loss(pred_wp[..., 1], target_wp[..., 1])

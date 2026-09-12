@@ -26,9 +26,25 @@ from src.logging.experiment_logger import ExperimentLogger
 from src.logging.hardware_monitor import HardwareMonitor
 
 try:
-    from torch.cuda.amp import GradScaler, autocast
+    from torch.cuda.amp import GradScaler, autocast as _autocast
 except ImportError:
-    from torch.amp import GradScaler, autocast
+    from torch.amp import GradScaler, autocast as _autocast
+
+# fp16 (autocast's CUDA default) has an 8-bit mantissa / 5-bit exponent, so its dynamic
+# range tops out around 65504 - a QK^T attention logit or an activation that drifts past
+# that overflows to inf, and softmax(inf) is nan. Seen in practice on the qwen30m+geom
+# 8-town run: training reproducibly hit a non-finite loss at the *exact same* epoch and
+# batch index across three separate resumes from a clean checkpoint (same seed -> same
+# weight trajectory -> same forward pass overflowing every time), while the cnn arm -
+# sharing this same trainer, same data, same fp16 autocast, just no attention - never
+# once did, pointing at attention-logit overflow rather than a corrupt data sample.
+# bfloat16 has fp32's 8-bit exponent (same ~1e38 range, just less mantissa precision),
+# so the identical activation pattern that overflows fp16 does not overflow bf16 - the
+# standard fix for exactly this failure signature in transformer training. Ampere GPUs
+# (this project's boxes) support bf16 natively at full speed, so this is not a
+# precision-for-speed tradeoff the way switching off AMP entirely would be.
+def autocast(enabled: bool = True):
+    return _autocast(enabled=enabled, dtype=torch.bfloat16) if torch.cuda.is_available() else _autocast(enabled=enabled)
 
 
 class WorldOnRailsTrainer:
@@ -258,6 +274,7 @@ class WorldOnRailsTrainer:
         grad_norm_batches = 0
         nonfinite_batches = 0
         clipped_batches = 0
+        consecutive_nonfinite_loss = 0
         num_batches = 0
         num_samples = 0
         # Split the epoch into "blocked waiting for the dataloader" vs "actually
@@ -323,16 +340,47 @@ class WorldOnRailsTrainer:
             # waypoint loss; the unweighted per-axis errors are tracked separately so a
             # lateral/longitudinal imbalance (the near-zero-steering failure mode) stays
             # visible even though the loss weights the axes unevenly on purpose.
-            total_loss_accum += total_loss.item()
-            q_loss_accum += losses["q"].item()
-            wp_loss_accum += losses["wp"].item()
-            ade_accum += losses["ade"].item()
-            fde_accum += losses["fde"].item()
-            lateral_err_accum += losses["lateral"].item()
-            longitudinal_err_accum += losses["longitudinal"].item()
-            heading_err_accum += losses["heading"].item()
-            curvature_err_accum += losses["curvature"].item()
-            num_batches += 1
+            #
+            # Only fold a batch into these running sums when its own loss came out
+            # finite - same reasoning as the grad-norm split above (nan + anything is
+            # nan forever), but this accumulator used to skip that check entirely, so
+            # one bad batch silently turned the whole epoch's printed loss/ADE/FDE into
+            # nan even on epochs where the gradient step for that batch was correctly
+            # skipped by the scaler and every other batch was fine.
+            loss_val = total_loss.item()
+            if math.isfinite(loss_val):
+                total_loss_accum += loss_val
+                q_loss_accum += losses["q"].item()
+                wp_loss_accum += losses["wp"].item()
+                ade_accum += losses["ade"].item()
+                fde_accum += losses["fde"].item()
+                lateral_err_accum += losses["lateral"].item()
+                longitudinal_err_accum += losses["longitudinal"].item()
+                heading_err_accum += losses["heading"].item()
+                curvature_err_accum += losses["curvature"].item()
+                num_batches += 1
+                consecutive_nonfinite_loss = 0
+            else:
+                consecutive_nonfinite_loss += 1
+                # A handful of nan/inf losses in a row is the routine AMP overflow case
+                # the scaler already recovers from by skipping the step and halving its
+                # scale. A long run of them back-to-back instead means every forward
+                # pass is nan - i.e. the model's own weights have gone non-finite (seen
+                # in practice on the qwen30m+geom arm: one bad batch's loss was nan, the
+                # scaler correctly skipped that step, but the *next* batch was nan too,
+                # and every batch after it, because the corruption was already in the
+                # weights, not just that one gradient). Grinding through the remaining
+                # epochs at that point trains nothing and only burns GPU time, so fail
+                # fast instead - the orchestrator's watchdog resumes from the latest
+                # dated model_epoch_*.pth, which predates the corruption.
+                if consecutive_nonfinite_loss >= 50:
+                    raise RuntimeError(
+                        f"Aborting: {consecutive_nonfinite_loss} consecutive non-finite "
+                        f"training losses at epoch {epoch}, batch {batch_idx} - the "
+                        "model's weights are almost certainly corrupted (nan/inf), not "
+                        "recovering from a transient overflow. Let the watchdog resume "
+                        "from the latest model_epoch_*.pth instead of continuing here."
+                    )
             num_samples += rgb.shape[0]
 
             # CUDA work is async, so the compute window has to be closed on a sync or
