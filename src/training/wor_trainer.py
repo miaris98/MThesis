@@ -395,8 +395,17 @@ class WorldOnRailsTrainer:
             warmup_frac=self.warmup_frac, peak_lr=self.lr_heads
         )
 
-    def train(self, num_epochs: int = 50, save_freq: int = 5):
-        """Runs the full distillation training loop with checkpointing."""
+    def train(self, num_epochs: int = 50, save_freq: int = 5, resume_from: Optional[str] = None):
+        """Runs the full distillation training loop with checkpointing.
+
+        resume_from: path to a `model_epoch_*.pth` written by a prior call (needs its
+        "optimizer" key, so pick a dated snapshot rather than a mid-epoch `latest_model.pth`).
+        Restarts at that checkpoint's epoch + 1 with the same optimizer state and a
+        fast-forwarded LR schedule, so a run interrupted (or deliberately stopped, e.g. to
+        destroy a cloud instance) resumes rather than restarting from scratch. The frozen
+        backbone is not reloaded - it's rebuilt identically from --weights_path/pretrained
+        init, since it never changes during training.
+        """
         print(f"--> Starting World on Rails Distillation Training for {num_epochs} epochs on {self.device.upper()}...")
         self.scheduler = self._build_scheduler(num_epochs)
         best_loss = float("inf")
@@ -409,7 +418,25 @@ class WorldOnRailsTrainer:
         # reference it by name and carry only the trained heads.
         self.ckpt.write_frozen_backbone_once()
 
-        for epoch in range(1, num_epochs + 1):
+        start_epoch = 1
+        if resume_from:
+            ckpt = torch.load(resume_from, map_location=self.device)
+            self.model.load_state_dict(ckpt["model"], strict=False)
+            if "optimizer" in ckpt:
+                self.optimizer.load_state_dict(ckpt["optimizer"])
+            else:
+                print(f"[Warning] {resume_from} has no 'optimizer' key - resuming with a "
+                      f"freshly initialized optimizer (momentum/variance state is lost).")
+            start_epoch = ckpt["epoch"] + 1
+            best_loss = ckpt.get("metrics", {}).get(select_on, best_loss)
+            # LambdaLR's schedule is a pure function of its internal step counter, so
+            # fast-forward by replaying steps rather than reconstructing one - cheap even
+            # over tens of thousands of steps.
+            for _ in range((start_epoch - 1) * len(self.train_loader)):
+                self.scheduler.step()
+            print(f"--> Resumed from {resume_from}: continuing at epoch {start_epoch}/{num_epochs}")
+
+        for epoch in range(start_epoch, num_epochs + 1):
             metrics = self.train_epoch(epoch)
             metrics.update(self.validate())
             is_best = metrics[select_on] < best_loss
@@ -439,8 +466,16 @@ class WorldOnRailsTrainer:
             # size of the weights it tracks - so it rides along with the periodic
             # snapshots rather than being rewritten every epoch.
             if epoch % save_freq == 0 or epoch == num_epochs:
-                payloads[0][0]["optimizer"] = to_cpu(self.optimizer.state_dict())
-                payloads.append((dict(common), os.path.join(self.save_dir, f"model_epoch_{epoch:03d}.pth")))
+                # Both the "latest" and the dated snapshot need this: "latest" gets
+                # overwritten every subsequent epoch (without optimizer state, since
+                # `common` is rebuilt from scratch each iteration), so it's only ever
+                # resumable in the narrow window before the next epoch's save. The
+                # dated file is the one a resume should actually target.
+                opt_state = to_cpu(self.optimizer.state_dict())
+                payloads[0][0]["optimizer"] = opt_state
+                epoch_payload = dict(common)
+                epoch_payload["optimizer"] = opt_state
+                payloads.append((epoch_payload, os.path.join(self.save_dir, f"model_epoch_{epoch:03d}.pth")))
 
             self.ckpt.save_async(payloads)
             metrics["save_sec"] = time.time() - save_start

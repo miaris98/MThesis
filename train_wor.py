@@ -72,6 +72,8 @@ def parse_args():
     parser.add_argument("--auto_batch_size", type=int, default=0, help="Probe the largest batch size that fits in available VRAM instead of using --batch_size directly (1=True, 0=False)")
     parser.add_argument("--vram_headroom_mb", type=float, default=2048.0, help="VRAM (MB) to leave unused when --auto_batch_size is set, so other processes sharing the GPU (e.g. an online PPO/SAC trainer) still have room")
     parser.add_argument("--auto_batch_size_max", type=int, default=512, help="Upper bound the auto batch-size search won't exceed")
+    parser.add_argument("--resume_from", type=str, default=None, help="Path to a model_epoch_*.pth written by a prior run of this exact config - loads the trainable-head weights and optimizer state and continues at checkpoint['epoch']+1 with a fast-forwarded LR schedule, instead of starting over at epoch 1. Use a dated model_epoch_*.pth, not latest_model.pth - only the dated snapshots reliably carry optimizer state (see WorldOnRailsTrainer.train's docstring)")
+    parser.add_argument("--save_freq", type=int, default=5, help="Epoch interval between dated model_epoch_*.pth snapshots (the ones --resume_from targets) and optimizer-state saves. Lower values bound how much a stopped/interrupted run can lose, at the cost of writing (and briefly holding in memory) the optimizer state - roughly 2x the trainable weights' size for AdamW - more often")
     return parser.parse_args()
 
 
@@ -227,7 +229,7 @@ def main():
         json.dump(run_config, f, indent=2, sort_keys=True, default=str)
 
     # 4. Launch Training Loop
-    trainer.train(num_epochs=args.epochs)
+    trainer.train(num_epochs=args.epochs, save_freq=args.save_freq, resume_from=args.resume_from)
 
 
 if __name__ == "__main__":
