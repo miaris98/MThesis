@@ -164,9 +164,23 @@ best/latest/frozen_backbone/run_config/telemetry for epochs 1-2, all sha256-veri
 
 ## 7. Not yet built / deferred
 
-- Depth + semantic aux heads exist in `src/models/world_on_rails/aux_heads.py` but the dataset
-  loader doesn't read those modalities. TF++ trains with **`loss_depth 0.1`, `loss_semantic 0.1`,
-  `loss_bev_semantic 0.1`, plus CenterNet box terms** — 10 active loss terms vs our 1-2.
+- **TF++'s extra losses are INERT for us as currently architected — do not build them blindly.**
+  TF++ runs 10 active loss terms (`loss_depth 0.1`, `loss_semantic 0.1`, `loss_bev_semantic 0.1`,
+  `loss_center_heatmap/wh/offset/yaw_class/yaw_res 0.1`, `loss_target_speed 0.1`,
+  `loss_checkpoint 0.1`; note `loss_wp` is **0.0**, disabled). Eight of those are *perception*
+  losses whose job is to shape the **encoder**. Our encoder is frozen: `requires_grad=False` on
+  every parameter, and `CarlaPretrainedEncoder.forward_pyramid` runs it inside
+  `with torch.no_grad()`. **Gradients from an aux head cannot reach it.** Adding a depth or
+  semantic head would train only that decoder — a dead-end branch off the frozen features that
+  never feeds the policy — and would change driving behaviour by exactly nothing.
+  We already *inherit* that supervision: the TF++ weights we load were trained with those losses.
+  The two TF++ losses that act on a trainable path are `loss_target_speed` (we have it) and
+  `loss_checkpoint` ≈ our waypoint loss (we have it).
+  Extra losses could only help via: **(a)** unfreezing the backbone — but that contradicts the
+  standing "vision training is out of scope" constraint, kills feature caching, and is far
+  slower; or **(b)** attaching aux heads to the **trainable trunk** (make the qwen trunk itself
+  predict depth/BEV as multi-task regularisation) rather than to the frozen feature map. (b) is
+  legitimate and unexplored, but it is a research bet, not a known win.
 - **TF++ uses `use_grad_clip: 0`** (no clipping at all) with `lr 3e-4`, `batch_size 16`,
   `epochs 31`. We clip at 5.0 and **qwen is clipping 100% of batches** (grad norm ~17-22), so
   every qwen gradient is scaled to ~29% — while cnn's clip rate is already falling naturally
@@ -181,7 +195,36 @@ best/latest/frozen_backbone/run_config/telemetry for epochs 1-2, all sha256-veri
 
 ---
 
-## 8. Suggested first message for the new conversation
+## 8. THE OPEN DECISION: 24 h is not viable — how to get faster
 
-> Read `continuation_prompt.md`, check both training arms are alive, then continue: deploy and
-> validate the feature-caching work described in §3 without disturbing the live run.
+User's position: the current ~22 h remaining is too slow. Ranked by (speedup x confidence):
+
+1. **Feature caching — the real lever.** Code is committed and deployed to the box; a 256-frame
+   validation pass was about to run when the session ended. **Nothing is validated yet.**
+   Expected: cnn ~4-6 min/epoch (becomes disk-bound), qwen ~8-15 min/epoch. Plausibly turns 50
+   epochs into ~8-11 h, or ~5 h at 30 epochs. **Unmeasured — do not quote these as facts.**
+2. **Cut epochs.** 50 epochs x 442k frames = 22.1M sample presentations; the old baseline that
+   scored 59.14/56.86 saw 50 x 52.8k = **2.64M**. We are already doing **8.4x** its gradient
+   steps. 25-30 epochs would still be 4-5x, and roughly halves wall time. Note: the LR schedule
+   is cosine over `--epochs`, so **early-stopping a 50-epoch run is NOT equivalent** — the LR
+   never anneals. To get the benefit properly this requires a relaunch with `--epochs 30`.
+3. **Validate every N epochs.** Measured cost: 159 s/epoch cnn (13.2%), 188 s/epoch qwen (10%).
+   TF++ uses `val_every: 5`. Caveat: `best_model.pth` is selected on `val_loss`, so this
+   coarsens which checkpoint ships.
+4. `torch.compile` on the trunk (~15-25%, untested; trainer already has a `compile_model` param).
+
+**Do NOT "run the arms sequentially instead of concurrently"** (a suggestion the user received
+from Gemini). Concurrent aggregate is 421 + 260 = 681 samples/s; the best any single arm reaches
+alone is ~450. Sequential would take **~32 h instead of ~22 h**. Concurrency is already correct.
+
+Suggested plan: validate the cache on a small slice -> measure real throughput -> then kill and
+relaunch both arms with caching + `--epochs 30`. Killing costs the ~5 cnn / ~3 qwen epochs done
+so far (~2.7 h). **Get explicit go-ahead before killing the live run.**
+
+---
+
+## 9. Suggested first message for the new conversation
+
+> Read `continuation_prompt.md` (committed at 2d1078b), check both training arms are still alive,
+> then pick up §8: validate the feature-caching code on a small slice, measure the real speedup,
+> and tell me whether to relaunch with caching + fewer epochs before continuing the current run.
