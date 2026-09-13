@@ -79,7 +79,8 @@ def load_wor_model(
     policy_arch: str = "cnn",
     route_points: int = 4,
     vision_grid: Optional[int] = None,
-    pool_vision: Optional[bool] = None
+    pool_vision: Optional[bool] = None,
+    use_target_speed: Optional[bool] = None
 ) -> Union[WorldOnRailsPolicy, QwenWorldOnRailsPolicy]:
     """
     Instantiates and loads a World on Rails policy model. `policy_arch` selects the
@@ -116,12 +117,23 @@ def load_wor_model(
             return stored
         return default
 
+    # A checkpoint trained with the target-speed head has extra tensors; building the model
+    # without it would drop them on load and quietly run a different architecture. Derived from
+    # the stored loss weight so older checkpoints (which have neither key) resolve to False.
+    stored_ts = ckpt_cfg.get("use_target_speed")
+    if stored_ts is None and ckpt_cfg.get("target_speed_loss_weight") is not None:
+        stored_ts = float(ckpt_cfg.get("target_speed_loss_weight") or 0.0) > 0
+    resolved_ts = bool(_resolve("use_target_speed", use_target_speed,
+                                bool(stored_ts) if stored_ts is not None else False))
+
     if policy_arch == "cnn":
         model = WorldOnRailsPolicy(
             backbone_name=backbone_name,
             pretrained=pretrained_backbone,
             freeze_backbone=freeze_backbone,
-            pool_vision=bool(_resolve("pool_vision", pool_vision, False))
+            route_points=route_points,
+            pool_vision=bool(_resolve("pool_vision", pool_vision, False)),
+            use_target_speed=resolved_ts
         )
     else:
         model = QwenWorldOnRailsPolicy(
@@ -130,7 +142,8 @@ def load_wor_model(
             freeze_backbone=freeze_backbone,
             route_points=route_points,
             model_size=policy_arch.replace("qwen", ""),
-            vision_grid=int(_resolve("vision_grid", vision_grid, 8))
+            vision_grid=_resolve("vision_grid", vision_grid, 8),
+            use_target_speed=resolved_ts
         )
 
     if checkpoint_path and os.path.exists(checkpoint_path):

@@ -140,6 +140,34 @@ def to_device_batch(batch: Dict[str, torch.Tensor], device: str):
     )
 
 
+def to_device_batch_with_features(batch: Dict[str, torch.Tensor], device: str):
+    """Like to_device_batch, but also surfaces a precomputed vision-encoder feature map when
+    the batch carries one instead of raw pixels (see WorldOnRailsDataset's feature_cache_tag).
+
+    A separate function rather than changing to_device_batch's signature: the latter's 6-tuple
+    return is a stable contract other callers (check_val_noise.py) already depend on, and this
+    project's own history is full of exactly this kind of quiet-shape-change bug (11.x).
+    """
+    vision_features = batch.get("vision_features")
+    if vision_features is not None:
+        # rgb is None on this path - forward() is told to skip the encoder entirely rather
+        # than being handed a zero image it would otherwise happily (and wrongly) encode.
+        rgb = None
+        vision_features = vision_features.to(device, non_blocking=True)
+    else:
+        rgb = batch["rgb"].to(device, non_blocking=True)
+        rgb = rgb.permute(0, 3, 1, 2).float().div_(255.0)
+    return (
+        rgb,
+        vision_features,
+        batch["speed"].to(device, non_blocking=True),
+        batch["command"].to(device, non_blocking=True),
+        batch["route"].to(device, non_blocking=True),
+        batch["target_q"].to(device, non_blocking=True),
+        batch["target_waypoints"].to(device, non_blocking=True)
+    )
+
+
 @torch.no_grad()
 def run_validation(
     model,
@@ -149,7 +177,8 @@ def run_validation(
     use_amp: bool,
     wp_loss_weight: float = 1.0,
     q_loss_weight: float = 0.0,
-    lateral_loss_weight: float = 3.0
+    lateral_loss_weight: float = 3.0,
+    max_batches: int = 0
 ) -> Dict[str, float]:
     """Evaluates the current weights on the held-out set.
 
@@ -165,6 +194,13 @@ def run_validation(
     that trains with heading supervision therefore still has to prove itself on the
     original held-out objective. The heading/curvature errors are reported alongside as
     diagnostics, which also means they are measurable on runs that never trained on them.
+
+    `max_batches` caps the number of validation batches, mirroring the training loop's smoke-test
+    cap. Without it a capped "epoch" runs a handful of training batches and then the entire
+    held-out set - on the full PDM-Lite split that is ~100 train batches followed by ~2,070
+    validation ones, so the wall time a smoke test reports would be almost entirely validation
+    and would not estimate epoch cost at all. A capped val_loss is a timing artefact, not a
+    model-quality number, so callers that cap must not compare it against a full run's.
     """
     if val_loader is None:
         return {}
@@ -176,10 +212,13 @@ def run_validation(
            "heading": 0.0, "curvature": 0.0}
     n = 0
 
-    for batch in val_loader:
-        rgb, speed, command, route, target_q, target_wp = to_device_batch(batch, device)
+    for batch_idx, batch in enumerate(val_loader):
+        if max_batches and batch_idx >= max_batches:
+            break
+        rgb, vision_features, speed, command, route, target_q, target_wp = \
+            to_device_batch_with_features(batch, device)
         with autocast_ctx(enabled=use_amp):
-            out = model(rgb, speed, command, route)
+            out = model(rgb, speed, command, route, vision_features=vision_features)
             losses = waypoint_losses(out, target_wp, target_q,
                                      wp_loss_weight, q_loss_weight, lateral_loss_weight)
         acc["loss"] += losses["total"].item()

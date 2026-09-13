@@ -18,12 +18,44 @@ from src.training.gpu_cleanup import cleanup_stale_processes
 from src.training.seeding import seed_everything
 
 
+def _parse_img_size(spec: str):
+    """'192x512' -> (192, 512). Height first, matching the (H, W) convention everywhere else.
+
+    Worth being explicit about because the two numbers are not interchangeable here: the source
+    render is 1024x512 (W x H), so a spec whose aspect ratio does not match the post-crop source
+    re-introduces the geometric distortion this flag exists to remove.
+    """
+    try:
+        h, w = spec.lower().split("x")
+        return int(h), int(w)
+    except (ValueError, AttributeError) as exc:
+        raise argparse.ArgumentTypeError(
+            f"--img_size must look like HxW (e.g. 192x512), got {spec!r}") from exc
+
+
+def _parse_vision_grid(spec):
+    """'8' -> (8, 8); '6x16' -> (6, 16); '0' -> (0, 0) for the globally-pooled ablation."""
+    if isinstance(spec, (tuple, list)):
+        return int(spec[0]), int(spec[1])
+    s = str(spec).lower()
+    if "x" in s:
+        h, w = s.split("x")
+        return int(h), int(w)
+    v = int(s)
+    return v, v
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train World on Rails (WoR) Sensorimotor Driving Policy")
     parser.add_argument("--data_dir", type=str, default="dataset/wor_trajectories", help="Path to offline CARLA dataset logs")
     parser.add_argument("--save_dir", type=str, default=str(paths.checkpoints_dir() / "wor_resnet34"),
                         help="Directory to save model checkpoints, TensorBoard events and telemetry. Defaults under the machine's experiment root (external disk locally, /workspace on vast.ai) - see src/config/paths.py")
-    parser.add_argument("--backbone", type=str, default="resnet34", choices=["resnet18", "resnet34", "resnet50"], help="Vision backbone architecture")
+    parser.add_argument("--backbone", type=str, default="resnet34", choices=["resnet18", "resnet34", "resnet50", "regnety_032"], help="Vision backbone architecture. 'regnety_032' selects the CARLA-pretrained TransFuser++ encoder (src/models/world_on_rails/carla_encoder.py) and requires --weights_path; the resnet options are the ImageNet-pretrained torchvision stacks")
+    parser.add_argument("--img_size", type=str, default="256x256", help="Input resolution as HxW. The PDM-Lite source render is 1024x512, so the 256x256 default squashes horizontal geometry ~2x relative to vertical and throws away 4x the horizontal resolution; '192x512' with --crop_bottom_frac 0.25 reproduces TransFuser++'s aspect-preserving 1024x384 crop at half scale")
+    parser.add_argument("--crop_bottom_frac", type=float, default=0.0, help="Fraction of image height cut from the bottom before resize. 0.25 removes the ego bonnet from PDM-Lite's 1024x512 render, matching the 1024x384 crop the CARLA-pretrained encoder was trained on. Part of the decode-cache key, so it cannot silently serve a differently-cropped array")
+    parser.add_argument("--max_batches", type=int, default=0, help="Stop each epoch after this many batches (0 = full epoch). For smoke tests that measure per-batch cost and extrapolate a full run without paying for one")
+    parser.add_argument("--route_overlay", type=int, default=0, help="Draw the planned route into the camera image like a reversing camera's guide lines, so route and road share a spatial frame before the frozen encoder sees either (1=True, 0=False). Uses the same subsampled route the route MLP gets, so it adds no information the policy did not already have - only a spatial presentation of it. Must match at evaluation; the agent reads it from run_config.json")
+    parser.add_argument("--target_speed_loss_weight", type=float, default=0.0, help="Weight of the auxiliary 8-bin target-speed classification loss (0 disables the head entirely). Gives the policy an explicit longitudinal output including an exactly-zero class, instead of leaving speed to be inferred from waypoint spacing - which can express 'slow' but only approaches 'stopped', and cannot express 'stationary while steering' at all")
     parser.add_argument("--policy_arch", type=str, default="cnn", choices=["cnn", "qwen10m", "qwen30m", "qwen100m", "qwen500m", "qwen900m"], help="Decision-head architecture on top of the frozen vision encoder: 'cnn' is the original WoR SpatialQHead (conv+MLP); 'qwen*' swaps it for a Qwen-style self-attention transformer trunk (see qwen_wor_policy.py), sized 10M/30M/100M/500M/900M params (the small sizes matter here - the offline dataset is ~9,600 frames, and the 100M trunk underfits it), still predicting waypoints for the same PIDController")
     parser.add_argument("--pretrained", type=int, default=1, help="Use ImageNet pretrained weights (1=True, 0=False)")
     parser.add_argument("--freeze_backbone", type=int, default=1, help="Freeze the pretrained vision backbone so only the policy heads train (1=True, 0=False). On by default: training the vision model is out of scope here, and fine-tuning it is also the bulk of the compute cost")
@@ -44,13 +76,13 @@ def parse_args():
     parser.add_argument("--wp_loss_weight", type=float, default=1.0, help="Weight of the waypoint imitation loss")
     parser.add_argument("--q_loss_weight", type=float, default=0.0, help="Weight of the Q-value distillation loss (0 for datasets without precomputed Q-values, e.g. PDM-Lite)")
     parser.add_argument("--lateral_loss_weight", type=float, default=3.0, help="Extra weight on the lateral (y) waypoint error relative to longitudinal (x) - lateral offset is what the PID controller steers from, but is typically much smaller in magnitude than forward distance, so a flat L1 loss underfits it")
-    parser.add_argument("--heading_loss_weight", type=float, default=0.0, help="Weight on the segment-direction (1 - cosine) error between the predicted path and the expert's. The waypoint L1 above is dominated by longitudinal displacement - on the four-town runs it is 0.433 of a 0.589 loss, i.e. 73% - which the PID's steering never reads, and which is close to the integral of the speed scalar the policy is already given. This term is scale-free, so it cannot be swamped by that magnitude, and it supervises the quantity the controller actually aims at. 0 reproduces the objective the existing results were measured with")
+    parser.add_argument("--heading_loss_weight", type=float, default=0.0, help="Weight on the segment-direction (1 - cosine) error between the predicted path and the expert's. The waypoint L1 above is dominated by longitudinal displacement - on the four-town runs it is 0.433 of a 0.589 loss, i.e. 73%% - which the PID's steering never reads, and which is close to the integral of the speed scalar the policy is already given. This term is scale-free, so it cannot be swamped by that magnitude, and it supervises the quantity the controller actually aims at. 0 reproduces the objective the existing results were measured with")
     parser.add_argument("--curvature_loss_weight", type=float, default=0.0, help="Weight on the L1 between the second differences of the predicted and expert paths. Per-waypoint L1 is indifferent to point-to-point zig-zag that integrates to the same positions; the PID's derivative term is not, and reacts to it as steering chatter. 0 reproduces the previous objective")
     parser.add_argument("--experiment_name", type=str, default="WoR_Offline_Training", help="MLflow experiment name")
     parser.add_argument("--use_mlflow", type=int, default=1, help="Enable MLflow tracking (1=True, 0=False)")
     parser.add_argument("--mlflow_port", type=int, default=10100, help="MLflow tracking server port")
     parser.add_argument("--route_points", type=int, default=4, help="How many ego-frame route points to condition the policy on. PDM-Lite's command enum is LANEFOLLOW on every frame, so this is the policy's only navigation input - without it the model cannot tell a left turn from a right one and learns to drive straight. Higher values leak more of the answer (the full 20-point route correlates ~0.84 with the lateral target); use this to ablate that")
-    parser.add_argument("--vision_grid", type=int, default=8, help="Qwen heads only. Side length of the vision token grid handed to the transformer: 8 forwards all 64 cells of the encoder's 8x8 feature map as separate tokens (68-token sequence), 4 pools to 4x4 first (20 tokens), and 0 restores the original single globally-averaged vision token (5 tokens). 0 is the configuration the first Qwen runs used and is spatially blind by construction - AdaptiveAvgPool2d((1,1)) gives every cell an identical gradient - so it exists only as an ablation. Costs wall time: the trunk's compute scales with sequence length, so 8 is roughly an order of magnitude slower per epoch than 0")
+    parser.add_argument("--vision_grid", type=str, default="8", help="Qwen heads only. Accepts a single int for a square grid or 'HxW' (e.g. '6x16') to keep the encoder's native rectangular layout - required once --img_size is not square, since pooling a 6x16 feature map to 8x8 re-imposes the very horizontal squash the aspect-correct crop removes. Side length of the vision token grid handed to the transformer: 8 forwards all 64 cells of the encoder's 8x8 feature map as separate tokens (68-token sequence), 4 pools to 4x4 first (20 tokens), and 0 restores the original single globally-averaged vision token (5 tokens). 0 is the configuration the first Qwen runs used and is spatially blind by construction - AdaptiveAvgPool2d((1,1)) gives every cell an identical gradient - so it exists only as an ablation. Costs wall time: the trunk's compute scales with sequence length, so 8 is roughly an order of magnitude slower per epoch than 0")
     parser.add_argument("--pool_vision", type=int, default=0, help="CNN head only. Collapses the encoder feature map to 1x1 before SpatialQHead, giving the CNN the same spatially-blind input as --vision_grid 0. The matching ablation on the CNN side: without it, a CNN-beats-transformer result confounds architecture family with the fact that only one head was shown where things are in the frame (1=True, 0=False)")
     parser.add_argument("--grad_clip", type=float, default=5.0, help="Global gradient-norm clip threshold. The 5.0 default was set against the CNN head, whose epoch-mean gradient norm drops below it around epoch 17; the 106M Qwen trunk stayed above it on all 50 epochs of its first run, so the two were not being given comparable effective step sizes")
     parser.add_argument("--warmup_frac", type=float, default=0.05, help="Fraction of total optimizer steps spent linearly warming the learning rate up before cosine decay begins. 0 reproduces the previous schedule (full LR from batch 1), which a conv head tolerates and a 12-layer pre-norm transformer generally does not")
@@ -80,8 +112,14 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # Resolved once, here, because three separate things downstream need the real input shape:
+    # the auto-batch-size probe (which must allocate the same shape the run will), the banner's
+    # feature-grid line, and the trainer itself. It used to be parsed only at the trainer call
+    # and assumed to be 256x256 everywhere else, which was true until --img_size existed.
+    img_h, img_w = _parse_img_size(args.img_size)
+
     if args.device == "cuda":
-        # Every batch is a fixed 256x256 image, so cuDNN can safely autotune the
+        # Every batch is a fixed {img_h}x{img_w} image, so cuDNN can safely autotune the
         # fastest conv kernels for that exact shape instead of using generic ones.
         # seed_everything(deterministic=True) turns this back off, which is the
         # trade it is documented to make.
@@ -111,14 +149,14 @@ def main():
                                            freeze_backbone=bool(args.freeze_backbone),
                                            route_points=args.route_points,
                                            model_size=args.policy_arch.replace("qwen", ""),
-                                           vision_grid=args.vision_grid)
+                                           vision_grid=_parse_vision_grid(args.vision_grid))
 
         def _optimizer_factory(m):
             return torch.optim.AdamW(m.parameters(), lr=args.lr_heads, weight_decay=1e-4)
 
         def _batch_factory(bs):
             return {
-                "rgb": torch.rand(bs, 3, 256, 256, device=args.device),
+                "rgb": torch.rand(bs, 3, img_h, img_w, device=args.device),
                 "speed": torch.rand(bs, 1, device=args.device) * 30.0,
                 "command": torch.randint(0, 6, (bs,), device=args.device),
                 "route": torch.randn(bs, args.route_points, 2, device=args.device),
@@ -145,11 +183,17 @@ def main():
     print(" 🚗 World on Rails (WoR) Distillation Training Pipeline")
     print(f" Policy Head:     {args.policy_arch.upper()}")
     if args.policy_arch == "cnn":
-        print(f" Vision input:    {'1x1 GLOBALLY POOLED (spatially blind ablation)' if args.pool_vision else '8x8 spatial feature map'}")
+        # Derived, not hardcoded: every backbone here reduces by 32, so the map the CNN head
+        # actually receives is img_size/32. The literal '8x8' this used to print was only ever
+        # true for a 256x256 input, so at 192x512 a run directory would have described itself
+        # with a feature map it never saw (6x16).
+        print(f" Vision input:    {'1x1 GLOBALLY POOLED (spatially blind ablation)' if args.pool_vision else f'{img_h // 32}x{img_w // 32} spatial feature map'}")
     else:
-        n_tok = 1 if args.vision_grid <= 0 else args.vision_grid ** 2
-        print(f" Vision input:    {n_tok} token(s) + 4 state = {n_tok + 4}-token sequence"
-              f"{'  [GLOBALLY POOLED - spatially blind ablation]' if args.vision_grid <= 0 else ''}")
+        _gh, _gw = _parse_vision_grid(args.vision_grid)
+        n_tok = 1 if min(_gh, _gw) <= 0 else _gh * _gw
+        print(f" Vision input:    {_gh}x{_gw} -> {n_tok} token(s) + 4 state = "
+              f"{n_tok + 4}-token sequence"
+              f"{'  [GLOBALLY POOLED - spatially blind ablation]' if min(_gh, _gw) <= 0 else ''}")
     print(f" Optimizer:       clip {args.grad_clip} | warmup {args.warmup_frac:.0%} of steps | "
           f"decay on gates/norms: {bool(args.decay_gates_and_norms)}")
     print(f" Seed:            {args.seed}{' (deterministic)' if args.deterministic else ''}")
@@ -171,7 +215,8 @@ def main():
             freeze_backbone=bool(args.freeze_backbone),
             weights_path=args.weights_path,
             route_points=args.route_points,
-            pool_vision=bool(args.pool_vision)
+            pool_vision=bool(args.pool_vision),
+            use_target_speed=args.target_speed_loss_weight > 0
         )
     else:
         policy = QwenWorldOnRailsPolicy(
@@ -181,7 +226,8 @@ def main():
             weights_path=args.weights_path,
             route_points=args.route_points,
             model_size=args.policy_arch.replace("qwen", ""),
-            vision_grid=args.vision_grid
+            vision_grid=_parse_vision_grid(args.vision_grid),
+            use_target_speed=args.target_speed_loss_weight > 0
         )
 
     # 2. Initialize Trainer
@@ -207,6 +253,11 @@ def main():
         cache_decoded=bool(args.cache_decoded),
         compile_model=bool(args.compile_model),
         route_points=args.route_points,
+        img_size=(img_h, img_w),
+        crop_bottom_frac=args.crop_bottom_frac,
+        route_overlay=bool(args.route_overlay),
+        max_batches=args.max_batches,
+        target_speed_loss_weight=args.target_speed_loss_weight,
         wp_loss_weight=args.wp_loss_weight,
         q_loss_weight=args.q_loss_weight,
         lateral_loss_weight=args.lateral_loss_weight,

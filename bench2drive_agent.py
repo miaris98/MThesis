@@ -141,20 +141,38 @@ class WorB2DAgent(AutonomousAgent):
                              if hasattr(transform, "location") else transform)
         return _resample_locations(locations)
 
+    def _get_hero(self):
+        """The ego actor, looked up in a way that works on both evaluators.
+
+        `hero_actor` / `get_hero()` are additions Bench2Drive made to its fork of
+        AutonomousAgent; the vanilla Leaderboard base class this project also runs against
+        (run_leaderboard_official.sh) has neither, so touching `self.hero_actor` there raises
+        AttributeError on the first step of every route - the agent crashes, and the route is
+        still scored, as a 0% completion rather than as an error. CarlaDataProvider is the
+        scenario_runner API underneath both forks and is populated by the time run_step is
+        first called, so prefer it and keep the fork's accessor only as a fallback.
+        """
+        hero = CarlaDataProvider.get_hero_actor()
+        if hero is None and hasattr(self, "get_hero"):
+            self.get_hero()
+            hero = getattr(self, "hero_actor", None)
+        if hero is None:
+            raise RuntimeError(
+                "No hero actor: CarlaDataProvider.get_hero_actor() returned None and no "
+                "fork-specific accessor was available. The ego is not spawned/registered.")
+        return hero
+
     def run_step(self, input_data, timestamp):
         if self._route_locations is None:
             self._route_locations = self._build_route_locations()
-        if self.hero_actor is None:
-            # The base class looks the hero up at construction time, which can precede the
-            # ego actually being spawned.
-            self.get_hero()
+        hero = self._get_hero()
 
         rgb = input_data["rgb_front"][1]
         if rgb.shape[-1] == 4:
             rgb = rgb[:, :, [2, 1, 0]]  # BGRA -> RGB, not a bare alpha drop
 
         route, self._route_idx, _ = _ego_frame_route(
-            self.hero_actor, self._route_locations, self._route_idx)
+            hero, self._route_locations, self._route_idx)
 
         return self._inner.run_step({
             "rgb_front": rgb,

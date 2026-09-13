@@ -8,7 +8,7 @@ PPO/SAC trainers' logging stack).
 The objective and the held-out pass live in src/training/wor_eval.py; the optimizer
 groups and LR schedule live in src/training/wor_optim.py.
 """
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 import math
 import os
 import time
@@ -18,7 +18,8 @@ from torch.optim.lr_scheduler import LambdaLR
 
 from src.models.world_on_rails.wor_policy import WorldOnRailsPolicy
 from src.training.wor_dataset import create_wor_train_val_dataloaders
-from src.training.wor_eval import run_validation, to_device_batch, waypoint_losses
+from src.training.wor_eval import run_validation, to_device_batch_with_features, waypoint_losses
+from src.models.world_on_rails.aux_heads import target_speed_loss
 from src.training.wor_checkpoint import CheckpointWriter, to_cpu
 from src.training.wor_optim import build_optimizer, build_warmup_cosine_scheduler
 from src.logging.csv_logger import CSVTelemetryLogger
@@ -102,6 +103,12 @@ class WorldOnRailsTrainer:
         cache_decoded: bool = True,
         compile_model: bool = False,
         route_points: int = 4,
+        img_size: Tuple[int, int] = (256, 256),
+        crop_bottom_frac: float = 0.0,
+        route_overlay: bool = False,
+        feature_cache_tag: Optional[str] = None,
+        max_batches: int = 0,
+        target_speed_loss_weight: float = 0.0,
         grad_clip: float = 5.0,
         warmup_frac: float = 0.05,
         decay_gates_and_norms: bool = False,
@@ -126,6 +133,7 @@ class WorldOnRailsTrainer:
         self.device = device
         self.use_amp = use_amp and (device == "cuda")
         self.wp_loss_weight = wp_loss_weight
+        self.target_speed_loss_weight = target_speed_loss_weight
         # Datasets without precomputed Q-values (e.g. PDM-Lite) leave target_q at
         # zero, so q_loss_weight defaults to 0 to avoid supervising toward zero.
         self.q_loss_weight = q_loss_weight
@@ -216,8 +224,16 @@ class WorldOnRailsTrainer:
             split_seed=split_seed,
             fold=fold,
             num_folds=num_folds,
-            seed=seed
+            seed=seed,
+            img_size=img_size,
+            crop_bottom_frac=crop_bottom_frac,
+            route_overlay=route_overlay,
+            feature_cache_tag=feature_cache_tag
         )
+        # Cap on batches per epoch, for smoke tests that measure cost without paying for a full
+        # epoch. 0 means no cap. Stored rather than applied here so both the train and eval
+        # loops can honour it consistently.
+        self.max_batches = max_batches
         base_ds = getattr(self.train_loader.dataset, "dataset", self.train_loader.dataset)
         if len(self.train_loader.dataset) == 0 or getattr(base_ds, "is_synthetic", False):
             print(f"[Warning] Training on SYNTHETIC data - no real frames were indexed under {data_dir}.")
@@ -287,23 +303,41 @@ class WorldOnRailsTrainer:
         t_batch_start = time.time()
 
         for batch_idx, batch in enumerate(self.train_loader):
+            # Smoke-test cap. Breaking rather than slicing the loader keeps the sampler, the
+            # seeding and the per-batch bookkeeping identical to a real run, so the s/batch this
+            # measures is the number a full epoch would actually pay.
+            if self.max_batches and batch_idx >= self.max_batches:
+                break
             data_wait += time.time() - t_batch_start
             t_compute_start = time.time()
 
-            rgb, speed, command, route, target_q, target_wp = to_device_batch(batch, self.device)
+            rgb, vision_features, speed, command, route, target_q, target_wp = \
+                to_device_batch_with_features(batch, self.device)
 
             self.optimizer.zero_grad()
 
             # One shared definition of the objective for training and validation - see
             # src/training/wor_eval.py.
             with autocast(enabled=self.use_amp):
-                out = self.model(rgb, speed, command, route)
+                out = self.model(rgb, speed, command, route, vision_features=vision_features)
                 losses = waypoint_losses(
                     out, target_wp, target_q,
                     self.wp_loss_weight, self.q_loss_weight, self.lateral_loss_weight,
                     self.heading_loss_weight, self.curvature_loss_weight
                 )
                 total_loss = losses["total"]
+
+                # Auxiliary target-speed objective. Added to the same scalar the optimizer
+                # steps on, rather than a second backward pass, so gradient clipping and the
+                # AMP scaler see one consistent graph. Weight 0 disables it entirely, which is
+                # the default: enabling it changes the objective, so it is opt-in per run.
+                if self.target_speed_loss_weight > 0 and "target_speed_logits" in out:
+                    ts_target = batch.get("target_speed")
+                    if ts_target is not None:
+                        ts_loss = target_speed_loss(
+                            out["target_speed_logits"], ts_target.to(self.device))
+                        total_loss = total_loss + self.target_speed_loss_weight * ts_loss
+                        losses["target_speed"] = ts_loss
 
             if self.use_amp:
                 self.scaler.scale(total_loss).backward()
@@ -434,7 +468,8 @@ class WorldOnRailsTrainer:
         """Held-out evaluation; empty dict when no validation loader is configured."""
         return run_validation(
             self.model, self.val_loader, self.device, autocast, self.use_amp,
-            self.wp_loss_weight, self.q_loss_weight, self.lateral_loss_weight
+            self.wp_loss_weight, self.q_loss_weight, self.lateral_loss_weight,
+            max_batches=self.max_batches
         )
 
     def _build_scheduler(self, num_epochs: int) -> LambdaLR:

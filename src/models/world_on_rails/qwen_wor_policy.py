@@ -18,7 +18,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from src.models.world_on_rails.wor_policy import PretrainedVisionEncoder, PIDController
+from src.models.world_on_rails.wor_policy import (
+    PretrainedVisionEncoder, PIDController, build_vision_encoder)
 from src.models.transformer.layers import RMSNorm, QwenTransformerBlock
 
 # Trunk sizes. The 10m/30m entries exist because the offline dataset is ~9,600 frames:
@@ -137,7 +138,8 @@ class QwenWorldOnRailsPolicy(nn.Module):
         num_rails: int = 9,
         route_points: int = 4,
         model_size: str = "100m",
-        vision_grid: int = 8
+        vision_grid: int = 8,
+        use_target_speed: bool = False
     ):
         super().__init__()
         self.num_commands = num_commands
@@ -152,12 +154,13 @@ class QwenWorldOnRailsPolicy(nn.Module):
         # trunk is exactly blind to where anything is in the frame, while the CNN's
         # SpatialQHead convolves state into all 64 cells before pooling. It is kept
         # only so the ablation can be run.
-        self.vision_grid = int(vision_grid)
+        self.vision_grid = int(vision_grid[0]) if isinstance(vision_grid, (tuple, list)) \
+            else int(vision_grid)
 
         # Same frozen pretrained vision encoder as WorldOnRailsPolicy - training a
         # vision model stays out of scope, and --weights_path (e.g. the CARLA-domain
         # PCLA WoR checkpoint) plugs in identically here.
-        self.encoder = PretrainedVisionEncoder(
+        self.encoder = build_vision_encoder(
             backbone_name=backbone_name,
             pretrained=pretrained,
             freeze_backbone=freeze_backbone,
@@ -169,9 +172,21 @@ class QwenWorldOnRailsPolicy(nn.Module):
 
         # vision_grid=0 keeps the legacy 1x1 global average; any other value pools the
         # encoder map to that side length (a no-op when it already matches).
-        self.num_vision_tokens = 1 if self.vision_grid <= 0 else self.vision_grid ** 2
+        #
+        # A square grid is only correct for a square input. Once the image is the source's own
+        # 8:3 aspect (a 192x512 crop gives a 6x16 feature map), pooling to NxN squeezes 16
+        # columns into 8 and stretches 6 rows into 8 - re-imposing in feature space exactly the
+        # horizontal squash that cropping to the true aspect ratio was meant to remove. So the
+        # grid is carried as (H, W): pass a single int for the legacy square behaviour, or an
+        # (H, W) pair to keep the encoder's native rectangular layout.
+        if isinstance(vision_grid, (tuple, list)):
+            gh, gw = int(vision_grid[0]), int(vision_grid[1])
+        else:
+            gh = gw = self.vision_grid
+        self.vision_grid_hw = (gh, gw)
+        self.num_vision_tokens = 1 if min(gh, gw) <= 0 else gh * gw
         self.vision_pool = nn.AdaptiveAvgPool2d(
-            (1, 1) if self.vision_grid <= 0 else (self.vision_grid, self.vision_grid)
+            (1, 1) if min(gh, gw) <= 0 else (gh, gw)
         )
         self.vision_proj = nn.Linear(self.encoder.out_channels, self.embed_dim)
         self.speed_proj = nn.Linear(1, self.embed_dim)
@@ -185,6 +200,13 @@ class QwenWorldOnRailsPolicy(nn.Module):
         )
 
         self.controller = PIDController()
+
+        if use_target_speed:
+            from src.models.world_on_rails.aux_heads import TargetSpeedHead
+            # speed + route + command tokens, each embed_dim wide.
+            self.target_speed_head = TargetSpeedHead(self.embed_dim * 3)
+        else:
+            self.target_speed_head = None
 
         trunk_params = sum(p.numel() for p in self.trunk.parameters())
         seq_len = self.num_vision_tokens + 4
@@ -219,27 +241,42 @@ class QwenWorldOnRailsPolicy(nn.Module):
 
     def forward(
         self,
-        rgb: torch.Tensor,
+        rgb: Optional[torch.Tensor],
         speed: torch.Tensor,
         command: torch.Tensor,
-        route: Optional[torch.Tensor] = None
+        route: Optional[torch.Tensor] = None,
+        vision_features: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
-        feats = self.encoder(rgb)
+        """`vision_features`, when given, replaces `self.encoder(rgb)` (rgb may then be
+        None). See WorldOnRailsPolicy.forward's docstring - same cached-feature contract,
+        same reasoning: the frozen backbone's output for an unaugmented frame never
+        changes across epochs, so it need not be recomputed 50 times."""
+        feats = vision_features if vision_features is not None else self.encoder(rgb)
         vision_tok, speed_tok, route_tok, cmd_tok, cmd_idx = self._tokenize_state(feats, speed, command, route)
 
         waypoints, rail_q = self.trunk(vision_tok, speed_tok, route_tok, cmd_tok)
 
-        B = rgb.shape[0]
-        batch_indices = torch.arange(B, device=rgb.device)
+        # B and the device come from feats, not rgb: rgb is None on the cached-feature path.
+        B = feats.shape[0]
+        batch_indices = torch.arange(B, device=feats.device)
         selected_waypoints = waypoints[batch_indices, cmd_idx]
         selected_rail_q = rail_q[batch_indices, cmd_idx]
 
-        return {
+        out = {
             "waypoints": waypoints,
             "rail_q": rail_q,
             "selected_waypoints": selected_waypoints,
             "selected_rail_q": selected_rail_q
         }
+        # Same head, same reasoning as the CNN arm (wor_policy.py). It is fed the concatenated
+        # state tokens rather than a fused vector because that is what this trunk has - keeping
+        # the two arms' target-speed inputs as close as their architectures allow, so the
+        # comparison stays about the trunk and not about what the speed head could see.
+        if self.target_speed_head is not None:
+            state_vec = torch.cat(
+                [speed_tok.squeeze(1), route_tok.squeeze(1), cmd_tok.squeeze(1)], dim=-1)
+            out["target_speed_logits"] = self.target_speed_head(state_vec)
+        return out
 
     @torch.no_grad()
     def act(
