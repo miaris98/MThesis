@@ -29,6 +29,7 @@ class WorldOnRailsAgent:
     route_overlay: bool = False
     backbone_name: str = "resnet34"
     use_target_speed: bool = False
+    route_points: int = 4
 
     def __init__(
         self,
@@ -55,6 +56,7 @@ class WorldOnRailsAgent:
         self.route_overlay = bool(route_overlay)
         self.backbone_name = backbone_name
         self.use_target_speed = False
+        self.route_points = route_points
         if checkpoint_path:
             # Deliberately before the model is built: this can change the backbone family, and
             # constructing the wrong one first would only be detectable as a partial weight load.
@@ -71,7 +73,11 @@ class WorldOnRailsAgent:
             freeze_backbone=True,
             device=self.device,
             policy_arch=policy_arch,
-            route_points=route_points
+            # self.route_points, not the constructor's raw default: _adopt_training_
+            # preprocessing above may have overwritten it from the checkpoint's own
+            # run_config.json, and load_wor_model's own stamp-resolution is the backstop
+            # if this ever disagrees with it, not the primary mechanism.
+            route_points=self.route_points
         )
         self.net.eval()
         self.step_counter = 0
@@ -116,9 +122,15 @@ class WorldOnRailsAgent:
         self.backbone_name = str(cfg.get("backbone", getattr(self, "backbone_name", "resnet34")))
         # Whether the checkpoint carries a target-speed head, so the architecture matches.
         self.use_target_speed = float(cfg.get("target_speed_loss_weight", 0.0)) > 0
+        # The route length is part of the input contract, not just the architecture: the
+        # policy was trained on exactly this many evenly-spaced points, so the evaluator has
+        # to build the same shape. Left unadopted, every eval path used its own default of 4
+        # against a 20-point checkpoint.
+        self.route_points = int(cfg.get("route_points", getattr(self, "route_points", 4)))
         print(f"--> From run_config.json: backbone={self.backbone_name}, "
               f"img_size={self.img_size}, crop_bottom_frac={self.crop_bottom_frac}, "
-              f"route_overlay={self.route_overlay}, target_speed={self.use_target_speed}")
+              f"route_overlay={self.route_overlay}, target_speed={self.use_target_speed}, "
+              f"route_points={self.route_points}")
 
     def sensors(self) -> List[Dict[str, Any]]:
         """

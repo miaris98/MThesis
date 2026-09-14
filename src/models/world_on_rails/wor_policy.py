@@ -19,6 +19,9 @@ from src.models.world_on_rails.pid_controller import PIDController
 # this module outgrew the 500-line limit; see that module's docstring for the seam.
 from src.models.world_on_rails.vision_encoder import (  # noqa: F401
     PretrainedVisionEncoder, build_vision_encoder)
+from src.models.world_on_rails.ray_geometry import (
+    RAY_GEOMETRY_CHANNELS, append_ray_geometry)
+from src.config.camera import DEFAULT_CROP_BOTTOM_FRAC
 
 
 class SpatialQHead(nn.Module):
@@ -31,10 +34,12 @@ class SpatialQHead(nn.Module):
         state_dim: int = 64,
         num_commands: int = 6,
         grid_size: Tuple[int, int] = (16, 16),
-        num_rails: int = 9
+        num_rails: int = 9,
+        use_rail_q: bool = True
     ):
         super().__init__()
         self.grid_size = grid_size
+        self.use_rail_q = use_rail_q
         self.num_commands = num_commands
         self.num_rails = num_rails
 
@@ -48,12 +53,14 @@ class SpatialQHead(nn.Module):
             nn.ReLU(inplace=True)
         )
 
-        # Q-map decoder: outputs (B, num_commands, H_grid, W_grid)
+        # Q-map decoder: outputs (B, num_commands, H_grid, W_grid). Built only when
+        # something trains it - with --q_loss_weight 0 and PDM-Lite's all-zero target_q it
+        # gets no gradient, and act() never reads it.
         self.q_map_head = nn.Sequential(
             nn.Conv2d(128, 64, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(64, num_commands, kernel_size=1)
-        )
+        ) if use_rail_q else None
 
         # Direct rail-path Q-value head: (B, num_commands, num_rails)
         self.rail_head = nn.Sequential(
@@ -62,7 +69,7 @@ class SpatialQHead(nn.Module):
             nn.Linear(128, 128),
             nn.ReLU(inplace=True),
             nn.Linear(128, num_commands * num_rails)
-        )
+        ) if use_rail_q else None
 
         # Waypoint trajectory offset head: (B, num_commands, 5, 2)
         self.waypoint_head = nn.Sequential(
@@ -94,17 +101,27 @@ class SpatialQHead(nn.Module):
         fused = self.fusion_conv(fused)
 
         # Q-map
-        q_map = self.q_map_head(fused)
-        if (H, W) != self.grid_size:
-            q_map = F.interpolate(q_map, size=self.grid_size, mode="bilinear", align_corners=False)
+        q_map = None
+        if self.q_map_head is not None:
+            q_map = self.q_map_head(fused)
+            if (H, W) != self.grid_size:
+                q_map = F.interpolate(q_map, size=self.grid_size, mode="bilinear",
+                                      align_corners=False)
 
         # Discrete Rail Q-values
-        rail_q = self.rail_head(fused).view(B, self.num_commands, self.num_rails)
+        rail_q = (self.rail_head(fused).view(B, self.num_commands, self.num_rails)
+                  if self.rail_head is not None else None)
 
         # Continuous Waypoint offsets (x_forward, y_lateral)
         waypoints = self.waypoint_head(fused).view(B, self.num_commands, 5, 2)
 
-        return q_map, rail_q, waypoints
+        # The globally-pooled fusion output is returned too: it is this head's equivalent of
+        # the transformer's policy token - the one vector that has seen both the features and
+        # the state - and it is what the target-speed head needs in order to see the road at
+        # all. Pooled here rather than by the caller so the two arms stay symmetric.
+        fused_vec = F.adaptive_avg_pool2d(fused, 1).flatten(1)
+
+        return q_map, rail_q, waypoints, fused_vec
 
 
 class WorldOnRailsPolicy(nn.Module):
@@ -124,7 +141,11 @@ class WorldOnRailsPolicy(nn.Module):
         num_rails: int = 9,
         route_points: int = 4,
         pool_vision: bool = False,
-        use_target_speed: bool = False
+        use_target_speed: bool = False,
+        target_speed_input: str = "policy",
+        use_rail_q: bool = True,
+        use_ray_geometry: bool = False,
+        crop_bottom_frac: float = DEFAULT_CROP_BOTTOM_FRAC
     ):
         super().__init__()
         self.num_commands = num_commands
@@ -168,12 +189,19 @@ class WorldOnRailsPolicy(nn.Module):
         )
 
         # 3. Spatial Q-Value and Waypoint Head
+        # Same contract as the qwen arm: geometry arrives as extra channels on the feature
+        # map, so both trunks are handed identical information.
+        self.use_rail_q = bool(use_rail_q)
+        self.use_ray_geometry = bool(use_ray_geometry)
+        self.crop_bottom_frac = float(crop_bottom_frac)
+        geo_ch = RAY_GEOMETRY_CHANNELS if self.use_ray_geometry else 0
         self.q_head = SpatialQHead(
-            in_channels=self.encoder.out_channels,
+            in_channels=self.encoder.out_channels + geo_ch,
             state_dim=state_dim,
             num_commands=num_commands,
             grid_size=grid_size,
-            num_rails=num_rails
+            num_rails=num_rails,
+            use_rail_q=bool(use_rail_q)
         )
 
         # 4. Controller
@@ -181,9 +209,16 @@ class WorldOnRailsPolicy(nn.Module):
 
         # 5. Optional target-speed classifier, reading the same fused state the waypoint head
         # does. Opt-in so it can be ablated against an otherwise identical run.
+        # "policy" reads SpatialQHead's pooled fusion output, which has seen the image.
+        # "state" reads the pre-fusion state embedding, which has not - the original
+        # behaviour, kept only so earlier runs stay reproducible. The comment this replaces
+        # claimed the head read "the same fused state the waypoint head does"; it did not.
+        self.target_speed_input = str(target_speed_input).lower()
         if use_target_speed:
             from src.models.world_on_rails.aux_heads import TargetSpeedHead
-            self.target_speed_head = TargetSpeedHead(state_dim)
+            # 128 is SpatialQHead.fusion_conv's output width.
+            ts_dim = 128 if self.target_speed_input == "policy" else state_dim
+            self.target_speed_head = TargetSpeedHead(ts_dim)
         else:
             self.target_speed_head = None
 
@@ -257,7 +292,9 @@ class WorldOnRailsPolicy(nn.Module):
         state_emb = self.embed_state(speed, command, route)
 
         # 3. Predict Q-maps and waypoints
-        q_map, rail_q, waypoints = self.q_head(feats, state_emb)
+        if self.use_ray_geometry:
+            feats = append_ray_geometry(feats, self.crop_bottom_frac)
+        q_map, rail_q, waypoints, fused_vec = self.q_head(feats, state_emb)
 
         # 4. Gather predictions corresponding to current command
         # B and the device come from feats, not rgb: rgb is None on the cached-feature path.
@@ -269,21 +306,25 @@ class WorldOnRailsPolicy(nn.Module):
 
         batch_indices = torch.arange(B, device=feats.device)
         selected_waypoints = waypoints[batch_indices, cmd_idx]      # (B, 5, 2)
-        selected_rail_q = rail_q[batch_indices, cmd_idx]            # (B, num_rails)
+        selected_rail_q = (rail_q[batch_indices, cmd_idx]           # (B, num_rails)
+                           if rail_q is not None else None)
 
         out = {
-            "q_map": q_map,
-            "rail_q": rail_q,
             "waypoints": waypoints,
             "selected_waypoints": selected_waypoints,
-            "selected_rail_q": selected_rail_q
         }
+        # Omitted rather than zeroed when the rail heads are off - see the qwen arm.
+        if rail_q is not None:
+            out["q_map"] = q_map
+            out["rail_q"] = rail_q
+            out["selected_rail_q"] = selected_rail_q
         # Longitudinal intent as an explicit output rather than something the PID infers from
         # waypoint spacing. Spacing can express "slow" but only approaches "stopped" in the
         # limit, so a policy that should brake hard instead creeps - and "stationary while
         # steering", which is how PDM-Lite solves ParkingExit, is not expressible at all.
         if self.target_speed_head is not None:
-            out["target_speed_logits"] = self.target_speed_head(state_emb)
+            out["target_speed_logits"] = self.target_speed_head(
+                fused_vec if self.target_speed_input == "policy" else state_emb)
         return out
 
     @torch.no_grad()
@@ -355,8 +396,25 @@ class WorldOnRailsPolicy(nn.Module):
         except Exception:
             wps = wps_tensor.tolist()
 
+        # Longitudinal intent, when the policy has a head for it. Without this the
+        # controller falls back to PIDController.target_speed - a CONSTANT 20 km/h that
+        # nothing in this repo ever writes to - so the waypoints steered and the car
+        # cruised at a fixed speed regardless of red lights, lead vehicles or turns.
+        # The head was trained but its output was discarded here.
+        target_speed_kmh = None
+        if self.target_speed_head is not None and "target_speed_logits" in out:
+            # expected_speed returns m/s (TARGET_SPEEDS is in m/s); the PID wants km/h,
+            # and this is the one place that knows both - same convention as speed above.
+            target_speed_kmh = 3.6 * float(
+                self.target_speed_head.expected_speed(
+                    out["target_speed_logits"])[0].item())
+            # Published so the eval HUD and telemetry report the live decision rather
+            # than the unchanging default (see eval_wor.py's target_speed_kmh read).
+            self.controller.target_speed = target_speed_kmh
+
         steer, throttle, brake = self.controller.control_from_waypoints(
             waypoints=wps,
-            current_speed_kmh=current_speed_kmh
+            current_speed_kmh=current_speed_kmh,
+            target_speed_kmh=target_speed_kmh
         )
         return steer, throttle, brake

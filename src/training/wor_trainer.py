@@ -107,6 +107,7 @@ class WorldOnRailsTrainer:
         crop_bottom_frac: float = 0.0,
         route_overlay: bool = False,
         feature_cache_tag: Optional[str] = None,
+        val_every: int = 1,
         max_batches: int = 0,
         target_speed_loss_weight: float = 0.0,
         grad_clip: float = 5.0,
@@ -179,9 +180,22 @@ class WorldOnRailsTrainer:
             "fold": fold,
             "num_folds": num_folds,
             "split_seed": split_seed,
-            "vision_grid": getattr(model, "vision_grid", None),
+            # The (H, W) pair, not the scalar. `model.vision_grid` collapses a rectangular
+            # grid to its height - so a 6x16 run stamped "6", and the loader rebuilt a 6x6
+            # 36-token trunk whose vision_pos cannot accept the checkpoint's 96 rows.
+            # Every v2 qwen checkpoint is rectangular, so this was fatal at evaluation.
+            "vision_grid": list(getattr(model, "vision_grid_hw", None)
+                                or []) or getattr(model, "vision_grid", None),
             "pool_vision": getattr(model, "pool_vision", None),
-            "num_vision_tokens": getattr(model, "num_vision_tokens", None)
+            "num_vision_tokens": getattr(model, "num_vision_tokens", None),
+            # Each of these changes a tensor shape, so evaluation must rebuild with the
+            # same value or load_state_dict raises on a size mismatch - which is the loud
+            # failure we want, but only if the value is recorded here to rebuild from.
+            "use_target_speed": getattr(model, "target_speed_head", None) is not None,
+            "target_speed_input": getattr(model, "target_speed_input", None),
+            "use_rail_q": getattr(model, "use_rail_q", None),
+            "use_ray_geometry": getattr(model, "use_ray_geometry", None),
+            "crop_bottom_frac": getattr(model, "crop_bottom_frac", None)
         }
         self.train_start_time = time.time()
 
@@ -234,6 +248,12 @@ class WorldOnRailsTrainer:
         # epoch. 0 means no cap. Stored rather than applied here so both the train and eval
         # loops can honour it consistently.
         self.max_batches = max_batches
+        # Validate every Nth epoch instead of every epoch. TF++ uses 5. The cost is real
+        # (~10% of an epoch here), but it changes what `best_model.pth` can mean: best is
+        # only ever selected among epochs that were actually validated, so a coarser N
+        # means a coarser choice. The final epoch is always validated regardless, so a run
+        # never ends on an unvalidated model.
+        self.val_every = max(1, int(val_every))
         base_ds = getattr(self.train_loader.dataset, "dataset", self.train_loader.dataset)
         if len(self.train_loader.dataset) == 0 or getattr(base_ds, "is_synthetic", False):
             print(f"[Warning] Training on SYNTHETIC data - no real frames were indexed under {data_dir}.")
@@ -415,7 +435,10 @@ class WorldOnRailsTrainer:
                         "recovering from a transient overflow. Let the watchdog resume "
                         "from the latest model_epoch_*.pth instead of continuing here."
                     )
-            num_samples += rgb.shape[0]
+            # Counted off `speed` rather than `rgb`: with feature caching on, the batch
+            # carries "vision_features" and no "rgb" at all, so rgb is legitimately None
+            # here. `speed` is present on both paths and is always batch-sized.
+            num_samples += speed.shape[0]
 
             # CUDA work is async, so the compute window has to be closed on a sync or
             # its cost would silently land in the next iteration's data-wait bucket.
@@ -521,8 +544,12 @@ class WorldOnRailsTrainer:
 
         for epoch in range(start_epoch, num_epochs + 1):
             metrics = self.train_epoch(epoch)
-            metrics.update(self.validate())
-            is_best = metrics[select_on] < best_loss
+            if self.val_loader is not None and (epoch % self.val_every == 0
+                                                or epoch == num_epochs):
+                metrics.update(self.validate())
+            # `select_on` is absent from metrics on a skipped-validation epoch, which is
+            # exactly when no checkpoint should be promoted to best - not a failure case.
+            is_best = select_on in metrics and metrics[select_on] < best_loss
 
             # Checkpointing. One CPU snapshot of the trained heads is shared by every
             # file written this epoch, and the serialization itself runs in a thread,

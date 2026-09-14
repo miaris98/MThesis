@@ -10,6 +10,7 @@ import torch.nn as nn
 
 from src.models.world_on_rails.wor_policy import WorldOnRailsPolicy
 from src.models.world_on_rails.qwen_wor_policy import QwenWorldOnRailsPolicy
+from src.config.camera import DEFAULT_CROP_BOTTOM_FRAC
 
 
 # The actual pretrained-WoR checkpoints live in the MasoudJTehrani/PCLA HuggingFace
@@ -126,24 +127,50 @@ def load_wor_model(
     resolved_ts = bool(_resolve("use_target_speed", use_target_speed,
                                 bool(stored_ts) if stored_ts is not None else False))
 
+
+    # These three change tensor shapes, so a checkpoint must be rebuilt with the values it
+    # was trained under. The defaults are the pre-stamp behaviour, so older checkpoints -
+    # which carry none of these keys - still rebuild exactly as they always did.
+    # The checkpoint wins over the caller here, unlike the flags above. route_points sizes
+    # route_proj, and every evaluation entry point passes its own default (4) rather than the
+    # trained value - which is stamped but was never read - so a --route_points 20 checkpoint
+    # was rebuilt with Linear(8) and died on a size mismatch. There is no legitimate reason
+    # to evaluate a checkpoint at a route length it was not trained on.
+    resolved_route_points = int(_resolve("route_points", None, route_points))
+    if resolved_route_points != route_points:
+        print(f"--> route_points={resolved_route_points} from the checkpoint "
+              f"(caller asked for {route_points}); the route fed in must match.")
+    resolved_ts_input = str(_resolve("target_speed_input", None, "state"))
+    resolved_rail_q = bool(_resolve("use_rail_q", None, True))
+    resolved_ray_geo = bool(_resolve("use_ray_geometry", None, False))
+    resolved_crop = float(_resolve("crop_bottom_frac", None, DEFAULT_CROP_BOTTOM_FRAC))
+
     if policy_arch == "cnn":
         model = WorldOnRailsPolicy(
             backbone_name=backbone_name,
             pretrained=pretrained_backbone,
             freeze_backbone=freeze_backbone,
-            route_points=route_points,
+            route_points=resolved_route_points,
             pool_vision=bool(_resolve("pool_vision", pool_vision, False)),
-            use_target_speed=resolved_ts
+            use_target_speed=resolved_ts,
+            target_speed_input=resolved_ts_input,
+            use_rail_q=resolved_rail_q,
+            use_ray_geometry=resolved_ray_geo,
+            crop_bottom_frac=resolved_crop
         )
     else:
         model = QwenWorldOnRailsPolicy(
             backbone_name=backbone_name,
             pretrained=pretrained_backbone,
             freeze_backbone=freeze_backbone,
-            route_points=route_points,
+            route_points=resolved_route_points,
             model_size=policy_arch.replace("qwen", ""),
             vision_grid=_resolve("vision_grid", vision_grid, 8),
-            use_target_speed=resolved_ts
+            use_target_speed=resolved_ts,
+            target_speed_input=resolved_ts_input,
+            use_rail_q=resolved_rail_q,
+            use_ray_geometry=resolved_ray_geo,
+            crop_bottom_frac=resolved_crop
         )
 
     if checkpoint_path and os.path.exists(checkpoint_path):

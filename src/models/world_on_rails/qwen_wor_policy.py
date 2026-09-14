@@ -21,6 +21,9 @@ import torch.nn as nn
 from src.models.world_on_rails.wor_policy import (
     PretrainedVisionEncoder, PIDController, build_vision_encoder)
 from src.models.transformer.layers import RMSNorm, QwenTransformerBlock
+from src.models.world_on_rails.ray_geometry import (
+    RAY_GEOMETRY_CHANNELS, append_ray_geometry)
+from src.config.camera import DEFAULT_CROP_BOTTOM_FRAC
 
 # Trunk sizes. The 10m/30m entries exist because the offline dataset is ~9,600 frames:
 # at 100m the trunk carries roughly 11,000 trainable parameters per training sample and
@@ -49,8 +52,10 @@ class QwenWaypointTransformer(nn.Module):
     """
 
     def __init__(self, embed_dim: int, depth: int, num_heads: int, ffn_dim: int,
-                 num_commands: int = 6, num_rails: int = 9, num_vision_tokens: int = 64):
+                 num_commands: int = 6, num_rails: int = 9, num_vision_tokens: int = 64,
+                 use_rail_q: bool = True):
         super().__init__()
+        self.use_rail_q = use_rail_q
         self.num_commands = num_commands
         self.num_rails = num_rails
         self.num_vision_tokens = num_vision_tokens
@@ -77,17 +82,22 @@ class QwenWaypointTransformer(nn.Module):
             nn.GELU(),
             nn.Linear(256, num_commands * 5 * 2)
         )
+        # Built only when something trains it. With --q_loss_weight 0 (this project's
+        # default) and PDM-Lite's all-zero target_q, this head receives no gradient at all
+        # and act() never reads its output - dead weight feeding a `Q Loss` column that
+        # nothing optimises.
         self.rail_head = nn.Sequential(
             nn.Linear(embed_dim, 128),
             nn.GELU(),
             nn.Linear(128, num_commands * num_rails)
-        )
+        ) if use_rail_q else None
         nn.init.trunc_normal_(self.policy_token, std=0.02)
         nn.init.trunc_normal_(self.vision_pos, std=0.02)
         nn.init.trunc_normal_(self.type_embed, std=0.02)
 
     def forward(self, vision_tok: torch.Tensor, speed_tok: torch.Tensor,
-                route_tok: torch.Tensor, cmd_tok: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+                route_tok: torch.Tensor, cmd_tok: torch.Tensor
+                ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         """`vision_tok` is (B, N, D) with N >= 1 - one token per retained feature-map
         cell, or a single token in the legacy globally-pooled configuration."""
         B, N, _ = vision_tok.shape
@@ -116,9 +126,13 @@ class QwenWaypointTransformer(nn.Module):
         policy_repr = tokens[:, 0]
 
         waypoints = self.waypoint_head(policy_repr).float().view(B, self.num_commands, 5, 2)
-        rail_q = self.rail_head(policy_repr).float().view(B, self.num_commands, self.num_rails)
+        rail_q = (self.rail_head(policy_repr).float().view(B, self.num_commands, self.num_rails)
+                  if self.rail_head is not None else None)
 
-        return waypoints, rail_q
+        # policy_repr is returned rather than discarded: it is the only tensor here that has
+        # attended over the vision tokens, and the target-speed head needs exactly that.
+        # See QwenWorldOnRailsPolicy.__init__'s target_speed_input.
+        return waypoints, rail_q, policy_repr
 
 
 class QwenWorldOnRailsPolicy(nn.Module):
@@ -139,7 +153,11 @@ class QwenWorldOnRailsPolicy(nn.Module):
         route_points: int = 4,
         model_size: str = "100m",
         vision_grid: int = 8,
-        use_target_speed: bool = False
+        use_target_speed: bool = False,
+        target_speed_input: str = "policy",
+        use_rail_q: bool = True,
+        use_ray_geometry: bool = False,
+        crop_bottom_frac: float = DEFAULT_CROP_BOTTOM_FRAC
     ):
         super().__init__()
         self.num_commands = num_commands
@@ -188,7 +206,14 @@ class QwenWorldOnRailsPolicy(nn.Module):
         self.vision_pool = nn.AdaptiveAvgPool2d(
             (1, 1) if min(gh, gw) <= 0 else (gh, gw)
         )
-        self.vision_proj = nn.Linear(self.encoder.out_channels, self.embed_dim)
+        # Ray geometry rides in as extra channels on each vision token rather than as extra
+        # tokens, so the sequence length - and the attention cost - is unchanged. Both arms
+        # take it the same way, which is what keeps the head-to-head about the trunk.
+        self.use_rail_q = bool(use_rail_q)
+        self.use_ray_geometry = bool(use_ray_geometry)
+        self.crop_bottom_frac = float(crop_bottom_frac)
+        geo_ch = RAY_GEOMETRY_CHANNELS if self.use_ray_geometry else 0
+        self.vision_proj = nn.Linear(self.encoder.out_channels + geo_ch, self.embed_dim)
         self.speed_proj = nn.Linear(1, self.embed_dim)
         self.cmd_embed = nn.Embedding(num_commands, self.embed_dim)
         self.route_proj = nn.Linear(route_points * 2, self.embed_dim)
@@ -196,15 +221,22 @@ class QwenWorldOnRailsPolicy(nn.Module):
         self.trunk = QwenWaypointTransformer(
             embed_dim=self.embed_dim, depth=cfg["depth"], num_heads=cfg["num_heads"],
             ffn_dim=cfg["ffn_dim"], num_commands=num_commands, num_rails=num_rails,
-            num_vision_tokens=self.num_vision_tokens
+            num_vision_tokens=self.num_vision_tokens, use_rail_q=bool(use_rail_q)
         )
 
         self.controller = PIDController()
 
+        # "policy" feeds the trunk's post-attention policy token, which has attended over
+        # the vision tokens. "state" is the original speed+route+command concatenation, kept
+        # so earlier runs stay reproducible - but under "state" this head is structurally
+        # unable to see a red light or a lead vehicle, so it can only regress target speed
+        # from route curvature, while its gradient still pulls on the shared projections.
+        self.target_speed_input = str(target_speed_input).lower()
         if use_target_speed:
             from src.models.world_on_rails.aux_heads import TargetSpeedHead
-            # speed + route + command tokens, each embed_dim wide.
-            self.target_speed_head = TargetSpeedHead(self.embed_dim * 3)
+            ts_dim = (self.embed_dim if self.target_speed_input == "policy"
+                      else self.embed_dim * 3)
+            self.target_speed_head = TargetSpeedHead(ts_dim)
         else:
             self.target_speed_head = None
 
@@ -223,7 +255,12 @@ class QwenWorldOnRailsPolicy(nn.Module):
         # (B, C, H, W) -> (B, N, C) -> (B, N, embed_dim), one token per retained cell.
         # N is 1 in the legacy globally-pooled configuration, so the rest of the
         # pipeline is shape-identical either way.
-        vis = self.vision_pool(feats).flatten(2).transpose(1, 2)
+        pooled = self.vision_pool(feats)
+        if self.use_ray_geometry:
+            # After pooling, not before: the geometry has to describe the grid the trunk
+            # actually receives, which is vision_grid_hw and not necessarily the encoder's.
+            pooled = append_ray_geometry(pooled, self.crop_bottom_frac)
+        vis = pooled.flatten(2).transpose(1, 2)
         vision_tok = self.vision_proj(vis)
 
         speed_tok = self.speed_proj(speed.view(-1, 1).float()).unsqueeze(1)
@@ -254,28 +291,34 @@ class QwenWorldOnRailsPolicy(nn.Module):
         feats = vision_features if vision_features is not None else self.encoder(rgb)
         vision_tok, speed_tok, route_tok, cmd_tok, cmd_idx = self._tokenize_state(feats, speed, command, route)
 
-        waypoints, rail_q = self.trunk(vision_tok, speed_tok, route_tok, cmd_tok)
+        waypoints, rail_q, policy_repr = self.trunk(vision_tok, speed_tok, route_tok, cmd_tok)
 
         # B and the device come from feats, not rgb: rgb is None on the cached-feature path.
         B = feats.shape[0]
         batch_indices = torch.arange(B, device=feats.device)
         selected_waypoints = waypoints[batch_indices, cmd_idx]
-        selected_rail_q = rail_q[batch_indices, cmd_idx]
 
         out = {
             "waypoints": waypoints,
-            "rail_q": rail_q,
             "selected_waypoints": selected_waypoints,
-            "selected_rail_q": selected_rail_q
         }
+        # Omitted entirely rather than emitted as zeros when the rail head is off: a
+        # missing key is caught by the one consumer (waypoint_losses), whereas a zero
+        # tensor would silently report a meaningless q_loss of 0.0 forever.
+        if rail_q is not None:
+            out["rail_q"] = rail_q
+            out["selected_rail_q"] = rail_q[batch_indices, cmd_idx]
         # Same head, same reasoning as the CNN arm (wor_policy.py). It is fed the concatenated
         # state tokens rather than a fused vector because that is what this trunk has - keeping
         # the two arms' target-speed inputs as close as their architectures allow, so the
         # comparison stays about the trunk and not about what the speed head could see.
         if self.target_speed_head is not None:
-            state_vec = torch.cat(
-                [speed_tok.squeeze(1), route_tok.squeeze(1), cmd_tok.squeeze(1)], dim=-1)
-            out["target_speed_logits"] = self.target_speed_head(state_vec)
+            if self.target_speed_input == "policy":
+                ts_in = policy_repr
+            else:
+                ts_in = torch.cat(
+                    [speed_tok.squeeze(1), route_tok.squeeze(1), cmd_tok.squeeze(1)], dim=-1)
+            out["target_speed_logits"] = self.target_speed_head(ts_in)
         return out
 
     @torch.no_grad()
@@ -335,8 +378,25 @@ class QwenWorldOnRailsPolicy(nn.Module):
         except Exception:
             wps = wps_tensor.tolist()
 
+        # Longitudinal intent, when the policy has a head for it. Without this the
+        # controller falls back to PIDController.target_speed - a CONSTANT 20 km/h that
+        # nothing in this repo ever writes to - so the waypoints steered and the car
+        # cruised at a fixed speed regardless of red lights, lead vehicles or turns.
+        # The head was trained but its output was discarded here.
+        target_speed_kmh = None
+        if self.target_speed_head is not None and "target_speed_logits" in out:
+            # expected_speed returns m/s (TARGET_SPEEDS is in m/s); the PID wants km/h,
+            # and this is the one place that knows both - same convention as speed above.
+            target_speed_kmh = 3.6 * float(
+                self.target_speed_head.expected_speed(
+                    out["target_speed_logits"])[0].item())
+            # Published so the eval HUD and telemetry report the live decision rather
+            # than the unchanging default (see eval_wor.py's target_speed_kmh read).
+            self.controller.target_speed = target_speed_kmh
+
         steer, throttle, brake = self.controller.control_from_waypoints(
             waypoints=wps,
-            current_speed_kmh=current_speed_kmh
+            current_speed_kmh=current_speed_kmh,
+            target_speed_kmh=target_speed_kmh
         )
         return steer, throttle, brake

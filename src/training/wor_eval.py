@@ -76,7 +76,12 @@ def waypoint_losses(
     target_wp = torch.nan_to_num(target_wp, nan=0.0, posinf=1e4, neginf=-1e4)
     pred_wp = torch.nan_to_num(pred_wp, nan=0.0, posinf=1e4, neginf=-1e4)
 
-    loss_q = F.mse_loss(out["selected_rail_q"], target_q)
+    # Absent when the policy was built without rail heads (use_rail_q=False): nothing
+    # trains them under this project's q_loss_weight=0, so they are not always built.
+    # Zero here is honest - the term genuinely contributes nothing - unlike a zero coming
+    # from an untrained head, which is what the reported q_loss used to be.
+    loss_q = (F.mse_loss(out["selected_rail_q"], target_q)
+              if "selected_rail_q" in out else pred_wp.sum() * 0.0)
     loss_wp_x = F.l1_loss(pred_wp[..., 0], target_wp[..., 0])
     loss_wp_y = F.l1_loss(pred_wp[..., 1], target_wp[..., 1])
     loss_wp = loss_wp_x + lateral_loss_weight * loss_wp_y

@@ -99,6 +99,33 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=0, help="Master seed for weight initialization, dropout and data order. Nothing in this pipeline was seeded before, which is fine for one run and fatal for a comparison: an ablation cannot attribute a difference to a component until the spread between two identical runs is known. Vary this to measure that spread")
     parser.add_argument("--deterministic", type=int, default=0, help="Additionally pin cuDNN kernel selection and refuse nondeterministic CUDA kernels, for bitwise reproducibility (1=True, 0=False). Costs throughput - it disables the cuDNN autotuner - so use it to reproduce one run, not to run a sweep")
     parser.add_argument("--run_label", type=str, default=None, help="Human-readable name for this run, recorded in run_config.json and used by compare_wor_runs.py to group repeats of the same configuration. Defaults to the save_dir basename")
+    parser.add_argument("--target_speed_input", type=str, default="policy",
+                        choices=["policy", "state"],
+                        help="What the target-speed head reads. policy = the trunk post-attention "
+                             "representation, which has seen the image. state = the legacy "
+                             "speed+route+command vector, which has not, so it cannot see a red "
+                             "light or a lead vehicle. Kept only to reproduce earlier runs.")
+    parser.add_argument("--use_rail_q", type=int, default=0,
+                        help="Build the rail-Q / Q-map heads. They only train when --q_loss_weight "
+                             "> 0 and the dataset carries real q_values; PDM-Lite target_q is all "
+                             "zeros, so at the defaults they get no gradient, are never read by "
+                             "act(), and the reported Q Loss means nothing (1=True, 0=False).")
+    parser.add_argument("--ray_geometry", type=int, default=0,
+                        help="Append per-cell camera geometry (ray bearing/elevation and the "
+                             "flat-ground intersection) to the vision features, derived from "
+                             "src/config/camera.py. No new data, one cached tensor, and identical "
+                             "for both arms (1=True, 0=False).")
+    parser.add_argument("--val_every", type=int, default=1,
+                        help="Run held-out validation every Nth epoch instead of every epoch (TF++ uses 5). "
+                             "Saves ~10%% of epoch wall time, at the cost of coarsening which checkpoint "
+                             "best_model.pth can select - best is only chosen among validated epochs. "
+                             "The final epoch is always validated.")
+    parser.add_argument("--feature_cache_tag", type=str, default=None,
+                        help="Read the frozen backbone's output from the sidecar cache built by "
+                             "build_feature_cache.py instead of running the encoder every step. Pass the "
+                             "backbone name (e.g. regnety_032); it must match the --backbone/--img_size/"
+                             "--crop_bottom_frac/--route_overlay the cache was built with, and every frame "
+                             "must already be cached - a miss is a hard error, never a silent fallback.")
     parser.add_argument("--compile_model", type=int, default=0, help="Wrap the policy in torch.compile - trades a one-off compilation on the first epoch for faster steps afterwards, so it only pays off over a long run (1=True, 0=False)")
     parser.add_argument("--kill_stale", type=int, default=1, help="On startup, terminate SUSPENDED train_wor.py processes still pinning VRAM (what Ctrl+Z leaves behind). Running instances are reported but never killed (1=True, 0=False)")
     parser.add_argument("--auto_batch_size", type=int, default=0, help="Probe the largest batch size that fits in available VRAM instead of using --batch_size directly (1=True, 0=False)")
@@ -117,6 +144,16 @@ def main():
     # feature-grid line, and the trainer itself. It used to be parsed only at the trainer call
     # and assumed to be 256x256 everywhere else, which was true until --img_size existed.
     img_h, img_w = _parse_img_size(args.img_size)
+
+    # --use_rail_q now defaults off, so asking for a Q loss without the heads that produce it
+    # would silently train nothing: the term would be absent from the output and contribute a
+    # flat zero. Refuse rather than let a run report a q_loss that means nothing - which is
+    # exactly what the old always-built heads did.
+    if args.q_loss_weight > 0 and not args.use_rail_q:
+        raise SystemExit(
+            f"--q_loss_weight {args.q_loss_weight} needs --use_rail_q 1: the rail-Q heads are "
+            "not built by default. Note PDM-Lite carries no q_values, so target_q is all "
+            "zeros and this loss has nothing to learn from on that dataset.")
 
     if args.device == "cuda":
         # Every batch is a fixed {img_h}x{img_w} image, so cuDNN can safely autotune the
@@ -216,7 +253,11 @@ def main():
             weights_path=args.weights_path,
             route_points=args.route_points,
             pool_vision=bool(args.pool_vision),
-            use_target_speed=args.target_speed_loss_weight > 0
+            use_target_speed=args.target_speed_loss_weight > 0,
+            target_speed_input=args.target_speed_input,
+            use_rail_q=bool(args.use_rail_q),
+            use_ray_geometry=bool(args.ray_geometry),
+            crop_bottom_frac=args.crop_bottom_frac
         )
     else:
         policy = QwenWorldOnRailsPolicy(
@@ -227,7 +268,11 @@ def main():
             route_points=args.route_points,
             model_size=args.policy_arch.replace("qwen", ""),
             vision_grid=_parse_vision_grid(args.vision_grid),
-            use_target_speed=args.target_speed_loss_weight > 0
+            use_target_speed=args.target_speed_loss_weight > 0,
+            target_speed_input=args.target_speed_input,
+            use_rail_q=bool(args.use_rail_q),
+            use_ray_geometry=bool(args.ray_geometry),
+            crop_bottom_frac=args.crop_bottom_frac
         )
 
     # 2. Initialize Trainer
@@ -252,6 +297,8 @@ def main():
         synthetic_samples=args.synthetic_samples,
         cache_decoded=bool(args.cache_decoded),
         compile_model=bool(args.compile_model),
+        feature_cache_tag=args.feature_cache_tag,
+        val_every=args.val_every,
         route_points=args.route_points,
         img_size=(img_h, img_w),
         crop_bottom_frac=args.crop_bottom_frac,

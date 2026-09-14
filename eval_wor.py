@@ -40,6 +40,7 @@ except ImportError:
     GlobalRoutePlanner = None
 
 from src.agents.wor_agent import WorldOnRailsAgent
+from src.config.camera import PDM_LITE_CAMERA
 
 # Must match WorldOnRailsDataset.route_points / _subsample_route exactly - the model
 # was trained on a fixed-length, evenly-subsampled route, so eval has to feed it the
@@ -147,10 +148,19 @@ def _subsample_route(route, n=WOR_ROUTE_POINTS):
     return arr[idx, :2].tolist()
 
 
-def _build_global_route(world, origin_loc, sampling_resolution=2.0):
+def _build_global_route(world, origin_loc, sampling_resolution=1.0):
     """Traces a route from origin to the farthest spawn point using CARLA's own
     GlobalRoutePlanner (the same tool carla_garage/PDM-Lite used to author the
-    training routes), and returns it as a flat list of carla.Location waypoints."""
+    training routes), and returns it as a flat list of carla.Location waypoints.
+
+    sampling_resolution=1.0, not the 2.0 this used to default to: PDM-Lite's own `route`
+    field in every measurement file (the one WorldOnRailsDataset subsamples from) measures
+    at ~1.0 m spacing - 20 points, ~19 m of lookahead - checked across 8 routes spanning 6
+    towns, never 2.0 m. With WOR_ROUTE_LOOKAHEAD=20 raw points, 2.0 m spacing fed the policy
+    a ~38-40 m window at eval time against the ~19 m window it was trained on: the same
+    class of silent train/eval geometry mismatch as the camera (11.4), on the route input
+    rather than the pixels.
+    """
     grp = GlobalRoutePlanner(world.get_map(), sampling_resolution)
     spawn_points = world.get_map().get_spawn_points()
     destination = max(spawn_points, key=lambda sp: sp.location.distance(origin_loc))
@@ -158,7 +168,7 @@ def _build_global_route(world, origin_loc, sampling_resolution=2.0):
     return [wp.transform.location for wp, _ in route]
 
 
-def _ego_frame_route(ego_vehicle, route_locations, last_idx):
+def _ego_frame_route(ego_vehicle, route_locations, last_idx, route_points=WOR_ROUTE_POINTS):
     """Projects the upcoming global-route waypoints into the vehicle's current local
     frame, matching the ego_matrix convention _index_pdm_lite_route trains on:
     inv(ego_world_matrix) @ world_point gives [x_forward, y_lateral] in meters.
@@ -166,6 +176,13 @@ def _ego_frame_route(ego_vehicle, route_locations, last_idx):
     Tracks progress with `last_idx` and only searches forward from it, so a route
     that briefly loops near itself (a roundabout, a tight corner) can't make the
     car's "nearest point" jump backward.
+
+    `route_points` must be the length the policy was actually trained on (the agent's
+    own `route_points`, adopted from its checkpoint's run_config.json), not this
+    module's WOR_ROUTE_POINTS default - a v2 checkpoint trained on 20 points fed a
+    4-point route here would put `route_proj` out of distribution silently, since the
+    tensor shape (route_points, 2) matches whatever was requested regardless of whether
+    it matches training.
     """
     ego_tf = ego_vehicle.get_transform()
     ego_loc = ego_tf.location
@@ -188,7 +205,7 @@ def _ego_frame_route(ego_vehicle, route_locations, last_idx):
         local_pts.append([float(local[0]), float(local[1])])
 
     reached_end = best_idx >= len(route_locations) - 1
-    return _subsample_route(local_pts), best_idx, reached_end
+    return _subsample_route(local_pts, n=route_points), best_idx, reached_end
 
 
 def run_carla_evaluation(args, agent: WorldOnRailsAgent):
@@ -267,12 +284,24 @@ def run_carla_evaluation(args, agent: WorldOnRailsAgent):
             print(f"[WARNING] Ego vehicle collided with '{collision_log['first']}' during spawn settling "
                   f"({collision_log['count']} contacts) - it may be wedged against geometry.")
 
-        # 2. Spawn Front RGB Camera for Agent (256x256)
+        # 2. Spawn Front RGB Camera for Agent.
+        #
+        # From PDM_LITE_CAMERA, not hardcoded here: this function spawns its own camera rather
+        # than calling agent.sensors() (which WorldOnRailsAgent already gets right - see its
+        # docstring), so it never received the camera-parity fix (11.4) and was, until now,
+        # still spawning the exact broken geometry that fix's own docstring describes as
+        # already resolved: x=1.3, z=1.3, fov=100, 256x256, against the true data-collection
+        # camera at x=-1.5, z=2.0, fov=110, 1024x512. Every video this function ever recorded
+        # was through that wrong camera - agent.run_step's own preprocess_rgb crop/resize is
+        # only the other half of parity and cannot fix a frame rendered from the wrong pose.
         cam_agent_bp = blueprint_lib.find("sensor.camera.rgb")
-        cam_agent_bp.set_attribute("image_size_x", "256")
-        cam_agent_bp.set_attribute("image_size_y", "256")
-        cam_agent_bp.set_attribute("fov", "100")
-        cam_agent_transform = carla.Transform(carla.Location(x=1.3, z=1.3))
+        cam_agent_bp.set_attribute("image_size_x", str(PDM_LITE_CAMERA["width"]))
+        cam_agent_bp.set_attribute("image_size_y", str(PDM_LITE_CAMERA["height"]))
+        cam_agent_bp.set_attribute("fov", str(PDM_LITE_CAMERA["fov"]))
+        cam_agent_transform = carla.Transform(
+            carla.Location(x=PDM_LITE_CAMERA["x"], y=PDM_LITE_CAMERA["y"], z=PDM_LITE_CAMERA["z"]),
+            carla.Rotation(roll=PDM_LITE_CAMERA["roll"], pitch=PDM_LITE_CAMERA["pitch"],
+                           yaw=PDM_LITE_CAMERA["yaw"]))
         cam_agent = world.spawn_actor(cam_agent_bp, cam_agent_transform, attach_to=ego_vehicle)
         actor_list.append(cam_agent)
 
@@ -282,9 +311,11 @@ def run_carla_evaluation(args, agent: WorldOnRailsAgent):
         # (true RGB) frames, so feeding it BGR here means every eval run sees the world
         # through red/blue-swapped colors relative to training - sky-as-red, cars painted
         # in complementary colors, etc. - which is very plausibly part of why steering
-        # looked so degenerate.
+        # looked so degenerate. Reshape uses the camera's own (height, width) - CARLA images
+        # are row-major (H, W, C) - not the stale 256x256 this used to be paired with.
         agent_rgb_buffer = {"data": None}
-        cam_agent.listen(lambda img: agent_rgb_buffer.update({"data": np.frombuffer(img.raw_data, dtype=np.uint8).reshape((256, 256, 4))[:, :, [2, 1, 0]]}))
+        _cam_h, _cam_w = PDM_LITE_CAMERA["height"], PDM_LITE_CAMERA["width"]
+        cam_agent.listen(lambda img: agent_rgb_buffer.update({"data": np.frombuffer(img.raw_data, dtype=np.uint8).reshape((_cam_h, _cam_w, 4))[:, :, [2, 1, 0]]}))
 
         # 3. Spawn Third-Person Video Recording Camera (1280x720)
         cam_video_bp = blueprint_lib.find("sensor.camera.rgb")
@@ -326,11 +357,15 @@ def run_carla_evaluation(args, agent: WorldOnRailsAgent):
             speed_kmh = float(3.6 * np.sqrt(vel.x**2 + vel.y**2 + vel.z**2))
 
             if route_locations:
-                route, route_idx, reached_end = _ego_frame_route(ego_vehicle, route_locations, route_idx)
+                # agent.route_points: the length WorldOnRailsAgent adopted from this
+                # checkpoint's run_config.json, not the module default - see
+                # _ego_frame_route's docstring.
+                route, route_idx, reached_end = _ego_frame_route(
+                    ego_vehicle, route_locations, route_idx, route_points=agent.route_points)
                 if reached_end and step % 50 == 0:
                     print(f"  [Step {step:04d}/{args.max_steps:04d}] Reached end of planned route.")
             else:
-                route = [[0.0, 0.0] for _ in range(WOR_ROUTE_POINTS)]
+                route = [[0.0, 0.0] for _ in range(agent.route_points)]
 
             sensor_data = {
                 "rgb_front": (step, agent_rgb_buffer["data"]),

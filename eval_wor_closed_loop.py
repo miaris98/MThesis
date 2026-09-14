@@ -74,6 +74,7 @@ from agents.navigation.global_route_planner import GlobalRoutePlanner  # noqa: E
 from src.agents.wor_agent import WorldOnRailsAgent  # noqa: E402
 from src.eval.driving_metrics import DrivingMetrics, TerminationReason, aggregate  # noqa: E402
 from src.eval.rollout_video import RouteVideoRecorder  # noqa: E402
+from src.config.camera import PDM_LITE_CAMERA  # noqa: E402
 
 # Imported rather than re-derived: these define the exact ego-frame route encoding the
 # policy was trained on, and a second copy of them here would be free to drift out of
@@ -84,9 +85,13 @@ from eval_wor import (  # noqa: E402
     WOR_LANEFOLLOW_COMMAND,
 )
 
-# Route planner sampling. 2.0 m matches eval_wor.py; route completion is computed as an
-# index fraction, which is only a distance fraction because this spacing is uniform.
-ROUTE_SAMPLING_RESOLUTION = 2.0
+# Route planner sampling - matches eval_wor.py's _build_global_route, and must match PDM-Lite's
+# own route field: measured at ~1.0 m spacing (20 points, ~19 m lookahead) across 8 routes
+# spanning 6 towns, never the 2.0 m this used to be. At 2.0 m the policy was evaluated on a
+# ~38-40 m route window against the ~19 m one it trained on - the camera-parity class of bug
+# (11.4), on the route input. Route completion is computed as an index fraction, which is only
+# a distance fraction because this spacing is uniform.
+ROUTE_SAMPLING_RESOLUTION = 1.0
 # A route must be at least this long to be worth scoring - two adjacent spawn points
 # would otherwise produce a "route" the car completes by rolling forward three metres.
 MIN_ROUTE_LENGTH_M = 100.0
@@ -433,20 +438,34 @@ def run_route(world, client, agent, route_spec, spawn_points, grp, args, route_i
         col_sensor.listen(lambda e: collision_events.append(
             (e.other_actor.type_id, e.other_actor.id)))
 
+        # From PDM_LITE_CAMERA, not hardcoded here: this function spawns its own camera rather
+        # than calling agent.sensors() (which WorldOnRailsAgent gets right - see its docstring),
+        # so it never received the camera-parity fix (11.4) and was, until now, still spawning
+        # the exact broken geometry that fix's own docstring describes as already resolved:
+        # x=1.3, z=1.3, fov=100, 256x256, against the true data-collection camera at x=-1.5,
+        # z=2.0, fov=110, 1024x512. Every route score this function has ever produced was
+        # measured through that wrong camera, regardless of run_config.json's crop/resize
+        # settings - agent.run_step's preprocess_rgb is only the other half of parity and
+        # cannot correct a frame rendered from the wrong sensor pose.
         cam_bp = bp_lib.find("sensor.camera.rgb")
-        cam_bp.set_attribute("image_size_x", "256")
-        cam_bp.set_attribute("image_size_y", "256")
-        cam_bp.set_attribute("fov", "100")
-        cam = world.spawn_actor(cam_bp, carla.Transform(carla.Location(x=1.3, z=1.3)),
-                                attach_to=ego)
+        cam_bp.set_attribute("image_size_x", str(PDM_LITE_CAMERA["width"]))
+        cam_bp.set_attribute("image_size_y", str(PDM_LITE_CAMERA["height"]))
+        cam_bp.set_attribute("fov", str(PDM_LITE_CAMERA["fov"]))
+        cam = world.spawn_actor(cam_bp, carla.Transform(
+            carla.Location(x=PDM_LITE_CAMERA["x"], y=PDM_LITE_CAMERA["y"], z=PDM_LITE_CAMERA["z"]),
+            carla.Rotation(roll=PDM_LITE_CAMERA["roll"], pitch=PDM_LITE_CAMERA["pitch"],
+                           yaw=PDM_LITE_CAMERA["yaw"])), attach_to=ego)
         actors.append(cam)
         # BGRA -> true RGB via an explicit channel swap. A plain [:, :, :3] alpha-drop
         # leaves the frame in BGR and the policy was trained on RGB; eval_wor.py carries
         # the same note because that exact bug produced degenerate steering once already.
+        # Reshape uses the camera's own (height, width), not the stale 256x256 this used to
+        # be paired with - CARLA images are row-major (H, W, C).
         rgb_buf = {"data": None}
+        _cam_h, _cam_w = PDM_LITE_CAMERA["height"], PDM_LITE_CAMERA["width"]
         cam.listen(lambda img: rgb_buf.update({
             "data": np.frombuffer(img.raw_data, dtype=np.uint8)
-                      .reshape((256, 256, 4))[:, :, [2, 1, 0]]}))
+                      .reshape((_cam_h, _cam_w, 4))[:, :, [2, 1, 0]]}))
 
         if record_video:
             video_dir = args.video_dir or (os.path.splitext(args.out)[0] + "_videos")
@@ -479,7 +498,11 @@ def run_route(world, client, agent, route_spec, spawn_points, grp, args, route_i
             vel = ego.get_velocity()
             speed_mps = float(np.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2))
 
-            ego_route, route_idx, reached_end = _ego_frame_route(ego, route_locations, route_idx)
+            # agent.route_points: adopted from the checkpoint's own run_config.json by
+            # WorldOnRailsAgent, not the WOR_ROUTE_POINTS module default passed at
+            # construction above - see _ego_frame_route's docstring.
+            ego_route, route_idx, reached_end = _ego_frame_route(
+                ego, route_locations, route_idx, route_points=agent.route_points)
 
             off_road = world_map.get_waypoint(
                 tf.location, project_to_road=False,

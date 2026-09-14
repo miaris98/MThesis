@@ -48,11 +48,13 @@ from eval_wor import (  # noqa: E402
 
 # `_ego_frame_route` takes a fixed *number* of upcoming points (WOR_ROUTE_LOOKAHEAD = 20), so
 # the lookahead *distance* it represents is set entirely by the spacing of the route list it
-# is handed. Everything else in this project feeds it a GlobalRoutePlanner route sampled at
-# 2.0 m, i.e. ~40 m of lookahead. Bench2Drive's plan has its own spacing, so it is resampled
-# to this value before use - otherwise the policy would silently receive a route on a
-# different scale than the one it was trained on.
-ROUTE_SPACING_M = 2.0
+# is handed. This used to be 2.0 m (~40 m of lookahead) on the belief that it matched
+# training - it did not: PDM-Lite's own `route` field measures at ~1.0 m spacing (20 points,
+# ~19 m lookahead), checked across 8 routes spanning 6 towns. Bench2Drive's plan has its own
+# spacing regardless, so it is resampled to this value before use - otherwise the policy would
+# silently receive a route on a different scale than the one it was trained on, the same class
+# of mismatch the camera-parity fix (11.4) addressed for the pixels.
+ROUTE_SPACING_M = 1.0
 
 
 def get_entry_point():
@@ -171,8 +173,12 @@ class WorB2DAgent(AutonomousAgent):
         if rgb.shape[-1] == 4:
             rgb = rgb[:, :, [2, 1, 0]]  # BGRA -> RGB, not a bare alpha drop
 
+        # self._inner.route_points: adopted by WorldOnRailsAgent from the checkpoint's
+        # own run_config.json - see _ego_frame_route's docstring for why this must not
+        # be the module's WOR_ROUTE_POINTS default.
         route, self._route_idx, _ = _ego_frame_route(
-            hero, self._route_locations, self._route_idx)
+            hero, self._route_locations, self._route_idx,
+            route_points=self._inner.route_points)
 
         return self._inner.run_step({
             "rgb_front": rgb,

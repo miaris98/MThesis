@@ -121,7 +121,10 @@ def test_checkpoint_records_vision_geometry(tmp_path):
     trainer.train(num_epochs=1, save_freq=1)
 
     ckpt = torch.load(str(save_dir / "latest_model.pth"), map_location="cpu")
-    assert ckpt["config"]["vision_grid"] == 4
+    # Stamped as (H, W) rather than a scalar: the scalar form silently dropped the width of
+    # a rectangular grid, so a 6x16 run was recorded as "6" and rebuilt as 6x6. Square grids
+    # like this one round-trip identically either way, which is why that went unnoticed.
+    assert ckpt["config"]["vision_grid"] == [4, 4]
     assert ckpt["config"]["num_vision_tokens"] == 16
 
     # The caller does not have to remember the geometry - it is read back off disk.
