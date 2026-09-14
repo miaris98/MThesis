@@ -35,8 +35,14 @@ class CheckpointWriter:
     def __init__(self, model: nn.Module, save_dir: str, freeze_backbone: bool):
         self.model = model
         self.save_dir = save_dir
+        # torch.compile wraps state_dict keys as "_orig_mod.encoder...." rather than
+        # "encoder....". Missing that prefix here silently made frozen_keys empty for every
+        # compiled run: no exception, no frozen_backbone.pth, and every per-epoch checkpoint
+        # quietly grew from heads-only to the full model (encoder included) instead - found
+        # 2026-09-14 comparing checkpoint file sizes against an uncompiled run's.
         self.frozen_keys: FrozenSet[str] = frozenset(
-            k for k in model.state_dict() if k.startswith("encoder.")
+            k for k in model.state_dict()
+            if k.startswith("encoder.") or k.startswith("_orig_mod.encoder.")
         ) if freeze_backbone else frozenset()
         self._thread: Optional[threading.Thread] = None
 

@@ -9,10 +9,12 @@ then load through `load_wor_model` and require a clean load and identical predic
 Group 11.4 in this project is a catalogue of evaluation quietly running something other than
 what was trained. This is that check for the architecture itself.
 """
+import pytest
 import torch
 
 from src.models.world_on_rails import QwenWorldOnRailsPolicy, WorldOnRailsPolicy
 from src.models.world_on_rails.wor_loader import load_wor_model
+from src.training.wor_checkpoint import CheckpointWriter
 
 IMG = (192, 512)
 
@@ -128,3 +130,23 @@ def test_rectangular_vision_grid_survives_the_stamp():
         vision_grid=(6, 16), use_target_speed=False)
     assert m.num_vision_tokens == 96
     assert _stamp(m, "qwen10m")["vision_grid"] == [6, 16]
+
+
+@pytest.mark.skipif(not hasattr(torch, "compile"), reason="torch.compile needs torch>=2.0")
+def test_frozen_keys_survive_torch_compiles_orig_mod_prefix():
+    """Regression, found 2026-09-14: torch.compile's state_dict keys are prefixed
+    "_orig_mod.encoder...." instead of "encoder....". CheckpointWriter used to match only the
+    unprefixed form, so frozen_keys came back empty for every compiled run - no exception, just
+    a silently un-split checkpoint (no frozen_backbone.pth, and every per-epoch save quietly
+    ballooned from heads-only to the full model). Caught by comparing checkpoint file sizes
+    between a compiled and an uncompiled run of the same architecture."""
+    m = WorldOnRailsPolicy(backbone_name="resnet34", pretrained=False, route_points=4,
+                           freeze_backbone=True)
+    uncompiled_keys = CheckpointWriter(m, "/tmp", freeze_backbone=True).frozen_keys
+    assert uncompiled_keys, "sanity: the uncompiled model must find frozen encoder keys at all"
+
+    compiled = torch.compile(m)
+    compiled_keys = CheckpointWriter(compiled, "/tmp", freeze_backbone=True).frozen_keys
+    assert compiled_keys, (
+        "frozen_keys was empty for a compiled model - the _orig_mod. prefix broke the match")
+    assert len(compiled_keys) == len(uncompiled_keys)
