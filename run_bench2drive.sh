@@ -70,10 +70,23 @@ AGENT_PYTHONPATH=""
 # CarlaUE4.sh drops privileges and adds the -vulkan/-quality-level flags used everywhere
 # else here. Safe because CARLA_ROOT is read in exactly one place in the evaluator (that
 # launch path); the PythonAPI paths below still point at the real install.
-mkdir -p "$SHIM"
-cat > "$SHIM/CarlaUE4.sh" <<'SHIMEOF'
+#
+# 2026-09-15: both the shim path and its XDG_RUNTIME_DIR are now keyed by LABEL. They used to be
+# one shared /workspace/carla_shim/CarlaUE4.sh with no XDG_RUNTIME_DIR override at all, which is
+# fine for one arm at a time but not for two: run_leaderboard_official.sh's own history records
+# two CARLA processes sharing one XDG_RUNTIME_DIR corrupting each other's Vulkan ICD/session
+# state. This script never needed the fix before because it had never actually been run to
+# completion (see the other 2026-09-15 fixes above) - now that it works, running TF++/cnn/qwen
+# concurrently to cut the Bench2Drive comparison's wall time is the whole point, so isolation
+# has to hold from the first concurrent run, not be bolted on after a corrupted run explains why.
+SHIM="$SHIM/$LABEL"
+XDG_RUNTIME_DIR="/tmp/runtime-carlauser-b2d-${LABEL}"
+mkdir -p "$SHIM" "$XDG_RUNTIME_DIR"
+chown carlauser:carlauser "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+cat > "$SHIM/CarlaUE4.sh" <<SHIMEOF
 #!/usr/bin/env bash
-exec su carlauser -c "/workspace/carla/CarlaUE4.sh $* -vulkan -quality-level=Low"
+exec su carlauser -c "export XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR; /workspace/carla/CarlaUE4.sh \$* -vulkan -quality-level=Low"
 SHIMEOF
 chmod +x "$SHIM/CarlaUE4.sh"
 
