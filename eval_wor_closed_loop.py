@@ -36,6 +36,7 @@ USAGE
 """
 import argparse
 import glob
+import importlib.util
 import json
 import os
 import random
@@ -70,11 +71,28 @@ except ImportError:
             sys.path.insert(0, _p)
     import carla  # noqa: E402
 from agents.navigation.global_route_planner import GlobalRoutePlanner  # noqa: E402
+from agents.navigation.local_planner import RoadOption  # noqa: E402
 
-from src.agents.wor_agent import WorldOnRailsAgent  # noqa: E402
+# 2026-09-15: this is what unifies Tier 1 (this script) with Tier 2 (run_bench2drive.sh) and
+# Tier 3 (run_leaderboard_official.sh) into "the same harness, three route sets" instead of
+# three independently-implemented pipelines. Before this, run_route() spawned its own camera
+# and handed the policy a hand-rolled dict, which meant only WorldOnRailsAgent (accessed via
+# its route_points/net.controller internals directly, not through the Leaderboard contract)
+# could run here at all - a reference model like TransFuser++ had no way in. AgentWrapper,
+# SensorInterface's CallBack plumbing, GameTime and the GPS route conversion below are the
+# exact mechanism leaderboard_evaluator.py itself uses; reusing them (rather than
+# re-implementing a parallel version) is what makes a Tier 1 score comparable in kind to a
+# Tier 2/3 score from the same agent, and what makes any leaderboard-contract agent - not
+# just WoR - runnable on Tier 1's cheap short routes at all. See eval_tiers_design.md.
+from leaderboard.autoagents.agent_wrapper import AgentWrapper  # noqa: E402
+from leaderboard.utils.route_manipulation import (  # noqa: E402
+    location_route_to_gps, _get_latlon_ref,
+)
+from srunner.scenariomanager.carla_data_provider import CarlaDataProvider  # noqa: E402
+from srunner.scenariomanager.timer import GameTime  # noqa: E402
+
 from src.eval.driving_metrics import DrivingMetrics, TerminationReason, aggregate  # noqa: E402
 from src.eval.rollout_video import RouteVideoRecorder  # noqa: E402
-from src.config.camera import PDM_LITE_CAMERA  # noqa: E402
 
 # Imported rather than re-derived: these define the exact ego-frame route encoding the
 # policy was trained on, and a second copy of them here would be free to drift out of
@@ -82,7 +100,6 @@ from src.config.camera import PDM_LITE_CAMERA  # noqa: E402
 from eval_wor import (  # noqa: E402
     _ego_frame_route,
     WOR_ROUTE_POINTS,
-    WOR_LANEFOLLOW_COMMAND,
 )
 
 # Route planner sampling - matches eval_wor.py's _build_global_route, and must match PDM-Lite's
@@ -118,8 +135,11 @@ def parse_args():
     p = argparse.ArgumentParser(description="Closed-loop CARLA evaluation of a WoR policy")
     p.add_argument("--checkpoint", type=str, required=True, help="Path to the .pth to evaluate")
     p.add_argument("--policy_arch", type=str, default="qwen30m",
-                   choices=["cnn", "qwen10m", "qwen30m", "qwen100m", "qwen500m", "qwen900m"],
-                   help="Must match the --policy_arch this checkpoint was trained with")
+                   help="Must match the --policy_arch this checkpoint was trained with. Only "
+                        "meaningful for the default agent (bench2drive_agent.py), which uses it "
+                        "to build 'arch:checkpoint' as the default --agent-config; a run that "
+                        "sets --agent/--agent-config explicitly (e.g. TF++) ignores this "
+                        "entirely, so it is no longer restricted to WoR's own arch names")
     p.add_argument("--backbone", type=str, default="resnet34")
     p.add_argument("--host", type=str, default="127.0.0.1")
     p.add_argument("--port", type=int, default=2000)
@@ -175,8 +195,43 @@ def parse_args():
     p.add_argument("--video_routes", type=int, default=3,
                    help="Record only the first N routes, so a 20-route run does not "
                         "produce 20 videos nobody watches")
-    p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
+                   help="Only takes effect for the default agent (bench2drive_agent.py) via "
+                        "WOR_BACKBONE env passthrough of --backbone; WorldOnRailsAgent's own "
+                        "device default already matches this flag's default, so it only "
+                        "matters if forcing --device cpu on a CUDA-available box. A custom "
+                        "--agent (e.g. TF++) reads device from its own config, not from here - "
+                        "same limitation Tiers 2/3 already have, not new to this refactor")
+    p.add_argument("--agent", type=str, default="",
+                   help="Path to a Leaderboard AutonomousAgent .py file (default: this "
+                        "project's own bench2drive_agent.py, sibling to this script). Passing "
+                        "carla_garage/team_code/sensor_agent.py runs TransFuser++ instead - "
+                        "the whole point of driving every tier through this one contract is "
+                        "that a reference model with a published score can run on the same "
+                        "cheap routes as our own checkpoints (see eval_tiers_design.md)")
+    p.add_argument("--agent-config", type=str, default="",
+                   help="String passed to agent.setup(). Default (empty): "
+                        "'<policy_arch>:<checkpoint>', which is what bench2drive_agent.py "
+                        "expects. For a different agent (e.g. TF++'s sensor_agent.py) this "
+                        "must be set explicitly - see run_leaderboard_official.sh's "
+                        "EVAL_AGENT_CONFIG for the equivalent on Tiers 2/3")
     return p.parse_args()
+
+
+def load_agent_class(agent_path: str):
+    """Loads a Leaderboard agent module by path and returns its entry-point class.
+
+    Mirrors run_leaderboard_official.sh's preflight (which imports the agent this same way,
+    by path rather than a hardcoded module name, specifically so it checks whatever agent will
+    actually run) and leaderboard_evaluator.py's own loader - `get_entry_point()` is the
+    convention every Leaderboard-contract agent file (bench2drive_agent.py, TF++'s
+    sensor_agent.py) already implements, so nothing agent-specific lives here.
+    """
+    spec = importlib.util.spec_from_file_location("_eval_agent_module", agent_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["_eval_agent_module"] = module
+    spec.loader.exec_module(module)
+    return getattr(module, module.get_entry_point())
 
 
 def build_route_manifest(world, num_routes: int, seed: int) -> List[Dict]:
@@ -372,12 +427,24 @@ class RedLightWatcher:
         return violated
 
 
-def run_route(world, client, agent, route_spec, spawn_points, grp, args, route_index: int,
-              record_video: bool = False) -> Dict:
-    """Drives one route and returns its metrics record."""
+def run_route(world, client, agent_cls, agent_config, route_spec, spawn_points, grp, args,
+              route_index: int, record_video: bool = False) -> Dict:
+    """Drives one route and returns its metrics record.
+
+    Builds a FRESH agent instance for this route rather than reusing one across routes -
+    matching what leaderboard_evaluator.py itself does. This is not incidental: `sensors()`
+    re-registers each sensor's id with `agent.sensor_interface` on every AgentWrapper.setup_
+    sensors() call, and SensorInterface.register_sensor() raises SensorConfigurationInvalid on
+    a duplicate tag. A shared agent across routes could only be made to work by also resetting
+    its sensor_interface by hand, which is more fragile than just building the object the same
+    way the real evaluator does.
+    """
     bp_lib = world.get_blueprint_library()
     actors = []
     recorder = None
+    agent = None
+    agent_wrapper = None
+    ego = None  # referenced in finally; must exist even if the try block raises before spawning
 
     # A pure function of route_index, not of policy_arch/checkpoint/wall-clock, so every
     # arm sees the identical weather for the identical manifest position - see
@@ -438,34 +505,16 @@ def run_route(world, client, agent, route_spec, spawn_points, grp, args, route_i
         col_sensor.listen(lambda e: collision_events.append(
             (e.other_actor.type_id, e.other_actor.id)))
 
-        # From PDM_LITE_CAMERA, not hardcoded here: this function spawns its own camera rather
-        # than calling agent.sensors() (which WorldOnRailsAgent gets right - see its docstring),
-        # so it never received the camera-parity fix (11.4) and was, until now, still spawning
-        # the exact broken geometry that fix's own docstring describes as already resolved:
-        # x=1.3, z=1.3, fov=100, 256x256, against the true data-collection camera at x=-1.5,
-        # z=2.0, fov=110, 1024x512. Every route score this function has ever produced was
-        # measured through that wrong camera, regardless of run_config.json's crop/resize
-        # settings - agent.run_step's preprocess_rgb is only the other half of parity and
-        # cannot correct a frame rendered from the wrong sensor pose.
-        cam_bp = bp_lib.find("sensor.camera.rgb")
-        cam_bp.set_attribute("image_size_x", str(PDM_LITE_CAMERA["width"]))
-        cam_bp.set_attribute("image_size_y", str(PDM_LITE_CAMERA["height"]))
-        cam_bp.set_attribute("fov", str(PDM_LITE_CAMERA["fov"]))
-        cam = world.spawn_actor(cam_bp, carla.Transform(
-            carla.Location(x=PDM_LITE_CAMERA["x"], y=PDM_LITE_CAMERA["y"], z=PDM_LITE_CAMERA["z"]),
-            carla.Rotation(roll=PDM_LITE_CAMERA["roll"], pitch=PDM_LITE_CAMERA["pitch"],
-                           yaw=PDM_LITE_CAMERA["yaw"])), attach_to=ego)
-        actors.append(cam)
-        # BGRA -> true RGB via an explicit channel swap. A plain [:, :, :3] alpha-drop
-        # leaves the frame in BGR and the policy was trained on RGB; eval_wor.py carries
-        # the same note because that exact bug produced degenerate steering once already.
-        # Reshape uses the camera's own (height, width), not the stale 256x256 this used to
-        # be paired with - CARLA images are row-major (H, W, C).
-        rgb_buf = {"data": None}
-        _cam_h, _cam_w = PDM_LITE_CAMERA["height"], PDM_LITE_CAMERA["width"]
-        cam.listen(lambda img: rgb_buf.update({
-            "data": np.frombuffer(img.raw_data, dtype=np.uint8)
-                      .reshape((_cam_h, _cam_w, 4))[:, :, [2, 1, 0]]}))
+        # register_actor() alone is NOT enough for get_hero_actor() to find this actor: it only
+        # populates _actor_velocity_map/_actor_location_map, while get_hero_actor() (which
+        # WorB2DAgent._get_hero() calls, and any other agent may too) searches
+        # _carla_actor_pool - a THIRD, separate dict that only CarlaDataProvider.
+        # request_new_actor()/request_new_batch_actors() populate. This function spawns the ego
+        # directly via world.try_spawn_actor() (needed for exact route-origin placement, which
+        # request_new_actor's spawn-point-list API doesn't give), so nothing else ever adds it
+        # to that pool. Do both, matching what request_new_actor does internally.
+        CarlaDataProvider.register_actor(ego)
+        CarlaDataProvider._carla_actor_pool[ego.id] = ego
 
         if record_video:
             video_dir = args.video_dir or (os.path.splitext(args.out)[0] + "_videos")
@@ -480,7 +529,59 @@ def run_route(world, client, agent, route_spec, spawn_points, grp, args, route_i
         for _ in range(20):
             world.tick()
         collision_events.clear()
-        agent.destroy()  # resets the PID's internal state between routes
+
+        # Reset the sim-time clock BEFORE building the agent, not after - not cosmetic. GNSS/
+        # IMU/speedometer are pseudo-sensors (leaderboard.envs.sensor_interface.BaseReader):
+        # each spawns a background thread whose run() captures `latest_time =
+        # GameTime.get_time()` ONCE, at thread-start, and only fires its next reading once
+        # GameTime advances past that captured value. On route 1 GameTime is already at 0 from
+        # process start, so this is harmless - but on route 2+, if these threads start (inside
+        # setup_sensors(), a few lines down) BEFORE the clock is reset, they capture route N-1's
+        # high ending game-time as `latest_time`; restarting the clock immediately afterward
+        # then makes `current_time - latest_time` negative for most of route N, so the pseudo-
+        # sensor never fires again and SensorInterface.get_data() times out waiting for it -
+        # this was reproduced exactly (route 1 succeeds, route 2 times out with
+        # SensorReceivedNoData) with GameTime.restart() placed after setup_sensors() instead of
+        # before it.
+        GameTime.restart()
+        agent = agent_cls(args.host, args.port)
+        agent.setup(agent_config)
+
+        # The plan is built from THIS function's own route_locations (GlobalRoutePlanner's
+        # trace, resampled at ROUTE_SAMPLING_RESOLUTION), not re-derived by the agent - the
+        # same route both scores the drive and steers it, so there is exactly one route per
+        # trial rather than two independently-computed ones that could silently disagree.
+        # RoadOption.LANEFOLLOW throughout: this project's routes are point-to-point traces
+        # with no scripted lane changes, matching WOR_LANEFOLLOW_COMMAND used elsewhere.
+        # location_route_to_gps (leaderboard's own vendored helper, unmodified) does
+        # `transform.location` on the first tuple element - it wants a real carla.Transform,
+        # not a bare carla.Location. route_locations holds Locations (this function only ever
+        # needed the position, not an orientation), so wrap each one rather than pass it raw;
+        # WorB2DAgent._build_route_locations() accepts either form, but the vendored helper does
+        # not, and it fails with a plain AttributeError rather than a type check.
+        global_plan_world_coord = [(carla.Transform(loc), RoadOption.LANEFOLLOW)
+                                    for loc in route_locations]
+        lat_ref, lon_ref = _get_latlon_ref(world)
+        global_plan_gps = location_route_to_gps(global_plan_world_coord, lat_ref, lon_ref)
+        agent.set_global_plan(global_plan_gps, global_plan_world_coord)
+
+        # AgentWrapper.setup_sensors() spawns exactly what agent.sensors() declares and wires
+        # each sensor's callback into agent.sensor_interface - this is the mechanism that lets
+        # a LiDAR-equipped agent (TF++) and a camera-only agent (WoR) both run here unchanged,
+        # with no branching: whatever the agent asks for is what it gets. See the note at this
+        # file's import block for why this is the real Leaderboard plumbing, not a lookalike.
+        # Known, checked, harmless upstream quirk: AgentWrapper._sensors_list is declared as a
+        # CLASS attribute (not built in __init__), so setup_sensors() on a fresh instance
+        # mutates the same list every prior route's wrapper touched, until cleanup() shadows
+        # it with `self._sensors_list = []` as an instance attribute. cleanup() nulls each
+        # entry it destroys before that reassignment, so nothing is ever double-destroyed and
+        # no sensor from route N-1 is mistaken for a live one in route N - the only effect is
+        # the shared list accumulating None placeholders across routes within one process,
+        # which is inert at the route counts this project runs. Not patched: it is vendored
+        # third-party code, not ours.
+        agent_wrapper = AgentWrapper(agent)
+        agent_wrapper.setup_sensors(ego)
+        GameTime.restart()  # fresh sim-time clock per route, matching the real evaluator
 
         world_map = world.get_map()
         red_watcher = RedLightWatcher()
@@ -489,20 +590,22 @@ def run_route(world, client, agent, route_spec, spawn_points, grp, args, route_i
 
         for step in range(1, args.max_steps + 1):
             world.tick()
+            GameTime.on_carla_tick(world.get_snapshot().timestamp)
             t_s = step * 0.05
-
-            if rgb_buf["data"] is None:
-                continue
 
             tf = ego.get_transform()
             vel = ego.get_velocity()
             speed_mps = float(np.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2))
 
-            # agent.route_points: adopted from the checkpoint's own run_config.json by
-            # WorldOnRailsAgent, not the WOR_ROUTE_POINTS module default passed at
-            # construction above - see _ego_frame_route's docstring.
-            ego_route, route_idx, reached_end = _ego_frame_route(
-                ego, route_locations, route_idx, route_points=agent.route_points)
+            # This is OUR progress yardstick, independent of whatever route representation the
+            # agent computed for itself from set_global_plan - route_points only sizes the
+            # (unused, here) returned local-frame window, never route_idx/reached_end (see
+            # _ego_frame_route's body), so the module default is correct for every agent, not
+            # just WoR ones. The three-argument return's first element is discarded: this call
+            # no longer feeds the policy (the agent already has its own plan), it only tracks
+            # how far along route_locations the ego has progressed.
+            _, route_idx, reached_end = _ego_frame_route(
+                ego, route_locations, route_idx, route_points=WOR_ROUTE_POINTS)
 
             off_road = world_map.get_waypoint(
                 tf.location, project_to_road=False,
@@ -528,18 +631,32 @@ def run_route(world, client, agent, route_spec, spawn_points, grp, args, route_i
                 metrics.terminate(TerminationReason.ROUTE_DEVIATION)
                 break
 
-            control = agent.run_step({
-                "rgb_front": (step, rgb_buf["data"]),
-                "speed": (step, speed_mps),
-                "command": WOR_LANEFOLLOW_COMMAND,
-                "route": ego_route,
-            })
+            # agent_wrapper() == AutonomousAgent.__call__(): pulls this tick's sensor data out
+            # of agent.sensor_interface (fed by the CallBacks AgentWrapper.setup_sensors()
+            # wired up), calls agent.run_step(input_data, timestamp), and prints the same
+            # "=== [Agent] -- Wallclock = ... Ratio = ...x" line Tiers 2/3 print - the
+            # sim-to-wall ratio numbers used throughout eval_tiers_design.md and
+            # struggle-solutions.md come from this exact call on every tier now, not a
+            # lookalike computed separately per tier.
+            control = agent_wrapper()
             ego.apply_control(control)
 
             if recorder is not None:
+                # target_speed is WoR's own controller internal, not part of the Leaderboard
+                # contract - TF++ (or any other agent) has no `.net.controller`, so this is
+                # display-only telemetry and degrades to "unknown" rather than crashing.
+                inner_net = getattr(agent, "net", None) or getattr(
+                    getattr(agent, "_inner", None), "net", None)
+                target_speed_kmh = (getattr(inner_net.controller, "target_speed", None)
+                                     if inner_net is not None else None)
+                if target_speed_kmh is None:
+                    # draw_eval_hud formats this as %.1f unconditionally - None would crash it.
+                    # No separate target to show for a non-WoR agent, so show "target ==
+                    # current" rather than crash.
+                    target_speed_kmh = speed_mps * 3.6
                 recorder.capture(
                     speed_kmh=speed_mps * 3.6,
-                    target_speed_kmh=agent.net.controller.target_speed,
+                    target_speed_kmh=target_speed_kmh,
                     steer=control.steer, throttle=control.throttle, brake=control.brake,
                     step=step, max_steps=args.max_steps,
                     command_name="LANEFOLLOW",
@@ -559,6 +676,30 @@ def run_route(world, client, agent, route_spec, spawn_points, grp, args, route_i
         return record
 
     finally:
+        # agent_wrapper.cleanup() must run before the actor loop below: it stops+destroys the
+        # sensors AgentWrapper.setup_sensors() spawned (camera, LiDAR, IMU, GNSS - whatever
+        # agent.sensors() declared), which are not in this function's own `actors` list.
+        # agent.destroy() is a fresh instance every route (see run_route's docstring), so this
+        # only ever tears down what THIS route's agent built - nothing carries over.
+        if agent_wrapper is not None:
+            try:
+                agent_wrapper.cleanup()
+            except Exception:
+                pass
+        if agent is not None:
+            try:
+                agent.destroy()
+            except Exception:
+                pass
+        # get_hero_actor() returns the FIRST actor_id (dict insertion order) whose role_name
+        # is 'hero' - it does not know this actor is about to be destroyed. Leaving it in
+        # _carla_actor_pool means route N+1's hero lookup would keep returning route N's
+        # already-destroyed ego forever (every 'hero' entry after the first is simply never
+        # reached), not the new one just registered above. Must be removed explicitly: nothing
+        # else in this pool's lifecycle does it, since this function never spawned the ego via
+        # request_new_actor() in the first place (see the registration comment above).
+        if ego is not None:
+            CarlaDataProvider._carla_actor_pool.pop(ego.id, None)
         # Sensors must be stopped before they are destroyed. A listening sensor delivers
         # its callback on a C++ worker thread, and one that fires against an actor which
         # has just been destroyed raises an exception nowhere Python can catch it - it
@@ -608,6 +749,11 @@ def main():
     world.apply_settings(settings)
     world.tick()
 
+    # Required before AgentWrapper.setup_sensors() (uses CarlaDataProvider.get_world()) or
+    # CarlaDataProvider.register_actor() will operate against a stale/absent world reference.
+    CarlaDataProvider.set_client(client)
+    CarlaDataProvider.set_world(world)
+
     traffic_actors, tm = [], None
     try:
         if args.route_source == "official":
@@ -628,13 +774,19 @@ def main():
         print(f"✓ Traffic: {len(traffic_actors)} actors (tm seed {args.route_seed}, "
               f"tm_port {tm_port})")
 
-        agent = WorldOnRailsAgent(
-            checkpoint_path=args.checkpoint,
-            backbone_name=args.backbone,
-            device=args.device,
-            policy_arch=args.policy_arch,
-            route_points=WOR_ROUTE_POINTS,
-        )
+        # WOR_BACKBONE / --backbone / --device are WorldOnRailsAgent-specific and only reach
+        # it via bench2drive_agent.py's own os.environ.get("WOR_BACKBONE", ...) read and its
+        # config-string parsing - NOT plumbed through generically, because a generic agent
+        # (TF++) has none of these concepts and takes its device/backbone from its own
+        # config.json instead. --backbone/--device stay as CLI flags only for the
+        # WorB2DAgent default path's benefit.
+        if args.backbone:
+            os.environ.setdefault("WOR_BACKBONE", args.backbone)
+        agent_path = args.agent or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "bench2drive_agent.py")
+        agent_config = args.agent_config or f"{args.policy_arch}:{args.checkpoint}"
+        agent_cls = load_agent_class(agent_path)
+        print(f"✓ Agent: {agent_path} (config: {agent_config})")
 
         spawn_points = world.get_map().get_spawn_points()
         grp = GlobalRoutePlanner(world.get_map(), ROUTE_SAMPLING_RESOLUTION)
@@ -642,7 +794,8 @@ def main():
         records = []
         t_start = time.time()
         for k, spec in enumerate(manifest, 1):
-            rec = run_route(world, client, agent, spec, spawn_points, grp, args, k,
+            rec = run_route(world, client, agent_cls, agent_config, spec, spawn_points, grp,
+                            args, k,
                             record_video=bool(args.record_video) and k <= args.video_routes)
             records.append(rec)
             print(f"  [{k:03d}/{len(manifest)}] {spec['route_id']}  "

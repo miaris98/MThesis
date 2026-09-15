@@ -42,14 +42,32 @@ PORT="${6:-2030}"
 
 MTHESIS=/workspace/MThesis
 REAL_CARLA=/workspace/carla
+GARAGE=/workspace/carla_garage
 OUT=/workspace/fast_eval_out
-PY=/workspace/venv_carla/bin/python
 mkdir -p "$OUT"
 
-# Same guard as the official script: these heads were trained on a frozen backbone and the loader
-# only finds those weights as a sibling of the checkpoint. Without it the run still "works" and
-# silently scores a different perception stack.
-if [ ! -f "$(dirname "$CKPT")/frozen_backbone.pth" ]; then
+# 2026-09-15: same pluggable-agent mechanism as run_leaderboard_official.sh's EVAL_AGENT /
+# EVAL_AGENT_CONFIG / EVAL_PYTHON, added when eval_wor_closed_loop.py was refactored onto the
+# real Leaderboard AgentWrapper/SensorInterface contract instead of a hand-rolled camera+dict.
+# Default: our own bench2drive_agent.py, config "<arch>:<ckpt>" - unchanged behaviour for every
+# existing caller. Point EVAL_AGENT at carla_garage/team_code/sensor_agent.py (with
+# EVAL_PYTHON=/workspace/venv_tfpp/bin/python, EVAL_AGENT_CONFIG=<pretrained_models dir>) to run
+# TF++ on these same cheap routes instead - the whole reason Tier 1 needed this refactor.
+EVAL_AGENT="${EVAL_AGENT:-}"
+EVAL_AGENT_CONFIG="${EVAL_AGENT_CONFIG:-}"
+EVAL_PYTHON="${EVAL_PYTHON:-/workspace/venv_carla/bin/python}"
+PY="$EVAL_PYTHON"
+if [ ! -x "$PY" ]; then
+  echo "FATAL: EVAL_PYTHON=$PY is not executable."
+  exit 1
+fi
+
+# The frozen-backbone guard only means something for our own default agent - WorB2DAgent's
+# loader finds those weights as a sibling of the checkpoint (wor_loader.py:150), and a
+# checkpoint copied out of its directory silently runs different vision weights. TF++ (or any
+# other --agent) has no such file and no such loader, so the check would be a false FATAL for
+# every non-default agent - skip it whenever EVAL_AGENT overrides the default.
+if [ -z "$EVAL_AGENT" ] && [ ! -f "$(dirname "$CKPT")/frozen_backbone.pth" ]; then
   echo "FATAL: no frozen_backbone.pth beside $CKPT"; exit 1
 fi
 
@@ -71,7 +89,15 @@ case "$PRESET" in
 esac
 
 export WOR_BACKBONE="${WOR_BACKBONE:-regnety_032}"
-export PYTHONPATH="$MTHESIS:$REAL_CARLA/PythonAPI:$REAL_CARLA/PythonAPI/carla${PYTHONPATH:+:$PYTHONPATH}"
+# leaderboard/scenario_runner roots are new as of the AgentWrapper refactor - eval_wor_closed_
+# loop.py now imports leaderboard.autoagents.agent_wrapper and srunner.scenariomanager.*
+# directly, which it never needed under the old hand-rolled sensor path. TF++'s own flat
+# imports (model, config, data, ...) need team_code importable too, and go FIRST: those names
+# are generic enough ("model", "config") that whichever entry wins first decides the import,
+# and $MTHESIS must not shadow them for a run that actually wants TF++'s.
+AGENT_PYTHONPATH=""
+[ -n "$EVAL_AGENT" ] && AGENT_PYTHONPATH="$GARAGE/team_code"
+export PYTHONPATH="${AGENT_PYTHONPATH:+$AGENT_PYTHONPATH:}$MTHESIS:$REAL_CARLA/PythonAPI:$REAL_CARLA/PythonAPI/carla:$GARAGE/leaderboard:$GARAGE/scenario_runner${PYTHONPATH:+:$PYTHONPATH}"
 cd "$MTHESIS"
 
 # "Ready" means the RPC server answers, not that the TCP port is open. CarlaUE4 binds the port
@@ -141,8 +167,13 @@ else
   fi
 fi
 
+EXTRA_ARGS=()
+[ -n "$EVAL_AGENT" ] && EXTRA_ARGS+=(--agent="$EVAL_AGENT")
+[ -n "$EVAL_AGENT_CONFIG" ] && EXTRA_ARGS+=(--agent-config="$EVAL_AGENT_CONFIG")
+
 RESULT="$OUT/${LABEL}.json"
 echo "=== fast eval: $LABEL ($ARCH) preset=$PRESET town=$TOWN routes=$ROUTES seed=$SEED ==="
+[ -n "$EVAL_AGENT" ] && echo "=== reference agent: $EVAL_AGENT (config $EVAL_AGENT_CONFIG) ==="
 START=$(date +%s)
 "$PY" "$MTHESIS/eval_wor_closed_loop.py" \
   --checkpoint="$CKPT" \
@@ -156,7 +187,8 @@ START=$(date +%s)
   --num_walkers=0 \
   --port="$PORT" \
   --tm_port=$((PORT + 8000)) \
-  --out="$RESULT"
+  --out="$RESULT" \
+  "${EXTRA_ARGS[@]}"
 STATUS=$?
 ELAPSED=$(( $(date +%s) - START ))
 

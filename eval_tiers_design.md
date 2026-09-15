@@ -217,6 +217,76 @@ drive a search. Caveat: an epoch ladder only proves the proxy tracks *training p
 ladder must span architectures (it does: cnn + qwen) because a search varies LR, architecture and
 loss weights.
 
+## Stage 2: DONE - Tier 1 refactored onto the real agent contract
+
+`eval_wor_closed_loop.py` no longer spawns its own camera or hand-rolls a policy-input dict.
+`run_route()` now builds a FRESH agent per route via `load_agent_class(--agent)` +
+`agent_cls(host, port)` + `agent.setup(agent_config)`, converts its own `route_locations` into a
+Leaderboard-format plan (`location_route_to_gps` + `RoadOption.LANEFOLLOW`, matching
+`leaderboard_evaluator.py`'s own mechanism) and calls `agent.set_global_plan(...)`, spawns
+whatever `agent.sensors()` declares via `AgentWrapper.setup_sensors(ego)`, and drives by calling
+`agent_wrapper()` each tick - exactly `AutonomousAgent.__call__()`, which pulls sensor data via
+`SensorInterface.get_data(GameTime.get_frame())` and prints the same `Ratio = ...x` line Tiers
+2/3 already print. `run_fast_eval.sh` gained the same `EVAL_AGENT` / `EVAL_AGENT_CONFIG` /
+`EVAL_PYTHON` triple as Tier 3.
+
+**Regression-validated against our own model before trusting it for anything else.** Same
+checkpoint (v3 cnn), same `smoke` preset (3 routes, seed 0), old hand-rolled path vs new
+contract-based path:
+
+| | old (hand-rolled camera+dict) | new (real AgentWrapper contract) |
+| --- | --- | --- |
+| Driving Score | 0.309 | 0.300 |
+| Route Completion | 0.542 | 0.542 (identical) |
+| route r002 | DS=0.700 RC=1.000 IP=0.700 completed | **identical** |
+
+Within noise of itself - the refactor preserves driving/scoring behaviour while now running
+through code the Leaderboard evaluator itself uses, not a lookalike.
+
+**Four real bugs found by actually running it, not by review:**
+1. `run_fast_eval.sh`'s `PYTHONPATH` never included `leaderboard`/`scenario_runner` (Tier 1 never
+   needed them under the old hand-rolled path) - `ModuleNotFoundError: No module named
+   'leaderboard'` on the very first import.
+2. `location_route_to_gps` (leaderboard's own vendored helper) requires `carla.Transform`
+   objects (`transform.location`), not bare `carla.Location` - `route_locations` only ever held
+   Locations. Fixed by wrapping: `carla.Transform(loc)`.
+3. `CarlaDataProvider.get_hero_actor()` - which `WorB2DAgent._get_hero()` calls - searches
+   `_carla_actor_pool`, a THIRD dict distinct from the one `register_actor()` populates
+   (`_actor_velocity_map`/`_actor_location_map`). Only `request_new_actor()` populates the pool
+   normally; this function spawns the ego directly via `world.try_spawn_actor()` for exact
+   route-origin placement, so nothing else ever added it. Fixed by registering into the pool
+   manually, and explicitly removing it on cleanup (`get_hero_actor()` returns the FIRST
+   dict-order match, so a stale entry from route N-1 would shadow route N's hero forever if left
+   in place).
+4. **The subtle one**: `GameTime.restart()` called AFTER `AgentWrapper.setup_sensors()` instead
+   of before it. GNSS/IMU/speedometer are pseudo-sensors
+   (`leaderboard.envs.sensor_interface.BaseReader`) backed by a background thread that captures
+   `latest_time = GameTime.get_time()` ONCE, at thread-start (inside `setup_sensors()`), and only
+   fires again once `GameTime` advances past that captured value. Route 1 worked (GameTime was
+   already at 0 from process start). Route 2 reproducibly failed with
+   `SensorReceivedNoData: A sensor took too long to send their data`: the pseudo-sensor thread
+   captured route 1's high ending game-time as `latest_time`, then the clock was reset to 0
+   immediately after, so `current_time - latest_time` stayed negative for nearly the whole route.
+   Fixed by moving `GameTime.restart()` to before agent construction/sensor setup, so every
+   route's pseudo-sensor threads start against an already-reset clock, matching route 1's
+   (accidentally correct) behaviour exactly.
+
+**TF++ ran end-to-end through Tier 1** immediately after, no further code changes needed - proof
+the contract is genuinely agent-agnostic, not agent-agnostic-for-WoR-only. `smoke` preset (3
+routes, Town01, seed 0), `town13_withheld` weights: DS 0.1275, RC 0.2054, IP 0.6742, all 3 routes
+`timeout` (none reached the destination within 600 steps / 30s). **Wall time: 775 s for 3
+routes** (~13 min) - against the ~6-12 h estimated for TF++ on `routes_devtest.xml`'s full-length
+Town12 routes. This is the entire point of Stage 2: TF++ went from impractical to a routine
+calibration check.
+
+**Do not read the DS numbers above as a TF++-vs-ours comparison yet.** 3 routes is far below the
+~20 Stage 3 found necessary to resolve a real difference between two policies, and TF++'s three
+`timeout` terminations at a 30 s cap plausibly reflect a careful/slower driving style meeting a
+short cap tuned for our own models, not a quality signal - IP=0.674 (clean driving, not crashing)
+is consistent with that reading, but 3 routes cannot distinguish it from TF++ genuinely
+underperforming here. Re-run at the `hp` preset (more routes, larger `max_steps`) before drawing
+any conclusion.
+
 ## Status
 
 **Established (measured):**
@@ -236,8 +306,13 @@ reference; budget whole routes, not whole benchmarks.
 **Explicitly not yet established:**
 - That Tier 1 correlates with Tier 2 or Tier 3 at all.
 - That Tier 2 correlates with Tier 3 (Stage 4's reference-tier substitution assumes it).
-- That our harness reproduces any *published* TF++ number - only that TF++ runs in it. The
-  numeric comparison is still ahead.
+- That our harness reproduces any *published* TF++ number - only that TF++ runs in it, on both
+  Tier 1 (cheap, validated end-to-end) and Tier 2/3 (expensive, plumbing-only validated - the
+  devtest run was killed before finishing for being too slow, never reached a score). The
+  numeric comparison against a published figure is still ahead.
+- Any TF++-vs-ours ranking. The one data point that exists (Stage 2's TF++ smoke run) is 3
+  routes, an order of magnitude below Stage 3's ~20-route resolving threshold, and must not be
+  treated as a comparison.
 
 Until that last point passes, `run_fast_eval.sh` output is a development signal only and must not
 appear in the thesis as a driving score.
