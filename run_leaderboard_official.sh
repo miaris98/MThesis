@@ -38,8 +38,53 @@ if [ ! -f "$(dirname "$CKPT")/frozen_backbone.pth" ]; then
   exit 1
 fi
 
+export SCENARIO_RUNNER_ROOT="$GARAGE/scenario_runner"
+export LEADERBOARD_ROOT="$GARAGE/leaderboard"
+export MTHESIS_ROOT="$MTHESIS"
+
+# Note what is NOT on this path: carla-0.9.15-py3.7-linux-x86_64.egg, which
+# leaderboard/scripts/run_evaluation.sh would append. venv_carla is Python 3.10 with carla
+# installed from pip; putting a py3.7 egg ahead of that shadows a working client with one
+# whose compiled extension segfaults on first use rather than failing to import (11.7, 1.9).
+export PYTHONPATH="$MTHESIS:$REAL_CARLA/PythonAPI:$REAL_CARLA/PythonAPI/carla:$LEADERBOARD_ROOT:$SCENARIO_RUNNER_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+
+# 2026-09-15: a fresh box's venv_carla had carla/torch/timm but none of the vanilla
+# leaderboard/scenario_runner runtime deps (six, py-trees, opencv, ...) - checking "torch and
+# timm import" was not the same as checking "the evaluator itself imports", so both arms
+# spent a full CARLA cold-start (60-100s) only to crash instantly on `from six import
+# iteritems`. Import the real entry points *before* paying that cost, and if it fails, install
+# the known dependency set and re-check once - never assume a fresh box already has these just
+# because the training venv did (they are two separate venvs: /venv/main vs venv_carla).
+cd "$MTHESIS"
+PREFLIGHT_LOG=/tmp/eval_preflight_${LABEL}.log
+preflight_ok() {
+  /workspace/venv_carla/bin/python -c "
+import leaderboard.leaderboard_evaluator
+import bench2drive_agent
+" >"$PREFLIGHT_LOG" 2>&1
+}
+echo "=== preflight: verifying venv_carla can import the evaluator + agent ==="
+if ! preflight_ok; then
+  echo "preflight failed - installing known eval dependencies into venv_carla (see $PREFLIGHT_LOG)"
+  /workspace/venv_carla/bin/pip install -q six "py-trees==0.8.3" Shapely xmlschema ephem \
+    tabulate opencv-python matplotlib psutil pygame pexpect dictor transforms3d \
+    simple-watchdog-timer requests
+  if ! preflight_ok; then
+    echo "FATAL: venv_carla still cannot import the evaluator/agent after installing the known"
+    echo "dependency set - a NEW missing module, not one of the ones this script already knows"
+    echo "about. See $PREFLIGHT_LOG:"
+    cat "$PREFLIGHT_LOG"
+    exit 1
+  fi
+  echo "preflight fixed by installing the known dependency set"
+fi
+echo "=== preflight OK ==="
+
 echo "=== starting CARLA on port $PORT ==="
-export XDG_RUNTIME_DIR=/tmp/runtime-carlauser
+# Keyed by LABEL, not a fixed path: two arms launched concurrently (different ports, same
+# carlauser account) would otherwise share one XDG_RUNTIME_DIR and corrupt each other's
+# Vulkan ICD/session state - this only surfaced once someone tried running two arms at once.
+export XDG_RUNTIME_DIR="/tmp/runtime-carlauser-${LABEL}"
 mkdir -p "$XDG_RUNTIME_DIR"
 chown carlauser:carlauser "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
@@ -48,6 +93,33 @@ setsid su carlauser -c "ulimit -n 65536 2>/dev/null; export XDG_RUNTIME_DIR=$XDG
   $REAL_CARLA/CarlaUE4.sh -carla-rpc-port=$PORT -carla-streaming-port=0 \
   -RenderOffScreen -nosound -vulkan -quality-level=Low" \
   </dev/null >"$OUT/carla_${LABEL}.log" 2>&1 &
+
+# This script starts a simulator, so it owns killing it on EVERY exit path - including the
+# `exit 1` below when the port never opens, and including an OOM that takes out the evaluator.
+# It used to trap only the results-watchdog, and on 2026-09-15 that leaked a CarlaUE4 server
+# holding 5.7GB of VRAM for over an hour after its arm died. Worse, eval_watchdog.sh was at the
+# same time refusing to relaunch that very arm because free VRAM was below MIN_FREE_MIB - the
+# arm was blocked by its own leaked server. A resource gate needs a matching reaper.
+#
+# Matching on the comm *prefix* via /proc is deliberate, and neither obvious alternative works:
+#   - `pkill -f "carla-rpc-port=$PORT"` matches any command line containing that string,
+#     including the shell running this cleanup, and kills the caller.
+#   - `pgrep -x CarlaUE4-Linux-Shipping` never matches: the kernel truncates /proc/PID/comm to
+#     15 chars, so the name is "CarlaUE4-Linux-" and the exact match silently finds nothing.
+# A shell's comm is bash/sh, never CarlaUE4*, so this cannot match the caller. The trailing
+# space in the port test stops port 2000 matching 20000.
+WATCHDOG=""
+cleanup() {
+  [ -n "$WATCHDOG" ] && kill "$WATCHDOG" 2>/dev/null
+  local pid cmd
+  for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+    [ -r "/proc/$pid/comm" ] || continue
+    case "$(cat "/proc/$pid/comm" 2>/dev/null)" in CarlaUE4*) ;; *) continue ;; esac
+    cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null) "
+    case "$cmd" in *"carla-rpc-port=$PORT "*) kill -9 "$pid" 2>/dev/null ;; esac
+  done
+}
+trap cleanup EXIT INT TERM
 
 # Wait on the port actually accepting connections rather than a fixed sleep: cold-starting
 # this server takes 60-100s here, and the probe that concluded "this box cannot run CARLA"
@@ -66,16 +138,6 @@ if ! (echo > "/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
 fi
 sleep 15  # the port opens slightly before the server will answer RPCs
 
-export SCENARIO_RUNNER_ROOT="$GARAGE/scenario_runner"
-export LEADERBOARD_ROOT="$GARAGE/leaderboard"
-export MTHESIS_ROOT="$MTHESIS"
-
-# Note what is NOT on this path: carla-0.9.15-py3.7-linux-x86_64.egg, which
-# leaderboard/scripts/run_evaluation.sh would append. venv_carla is Python 3.10 with carla
-# installed from pip; putting a py3.7 egg ahead of that shadows a working client with one
-# whose compiled extension segfaults on first use rather than failing to import (11.7, 1.9).
-export PYTHONPATH="$MTHESIS:$REAL_CARLA/PythonAPI:$REAL_CARLA/PythonAPI/carla:$LEADERBOARD_ROOT:$SCENARIO_RUNNER_ROOT${PYTHONPATH:+:$PYTHONPATH}"
-
 export CHALLENGE_TRACK_CODENAME=SENSORS
 export SAVE_PATH="$OUT/$LABEL/"
 mkdir -p "$SAVE_PATH"
@@ -86,7 +148,6 @@ if [ -n "$ROUTES_SUBSET" ]; then
 fi
 
 echo "=== evaluating $LABEL: $ARCH @ $CKPT on $(basename "$ROUTES") ==="
-cd "$MTHESIS"
 
 # A crashed agent is not an error to this evaluator: it catches AgentError, tags the route
 # "Agent crashed", scores it 0 and carries on, and compute_global_statistics() does not
@@ -108,7 +169,8 @@ RESULTS="$OUT/${LABEL}.json"
   done
 ) &
 WATCHDOG=$!
-trap 'kill $WATCHDOG 2>/dev/null' EXIT
+# The EXIT/INT/TERM trap installed right after the CARLA launch already reaps both this
+# watchdog and the simulator, so it is deliberately not re-installed (and not narrowed) here.
 
 /workspace/venv_carla/bin/python "$LEADERBOARD_ROOT/leaderboard/leaderboard_evaluator.py" \
   --routes="$ROUTES" \
