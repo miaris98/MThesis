@@ -287,6 +287,121 @@ is consistent with that reading, but 3 routes cannot distinguish it from TF++ ge
 underperforming here. Re-run at the `hp` preset (more routes, larger `max_steps`) before drawing
 any conclusion.
 
+## Stage 1, revised: Town13-validation is not a credible calibration target - Bench2Drive is
+
+Stage 1's original plan (line 154) was to compare our harness's TF++ score against "the published
+LB2 technical report figures" on `routes_validation.xml`/Town13. That plan is retired as of
+2026-09-15: **the public checkpoint's own Town13-validation performance is independently
+documented as low and noisy**, so a mismatch there would not tell us anything about our harness.
+
+### What triggered this: diagnosing why Tier 1's TF++ smoke score looked bad
+
+The user asked whether the 13-minute Tier 1 proxy "is actually robust... does the tf++ provide
+similar results to the official leaderboard". Investigating meant adding real diagnostics rather
+than guessing - `carla_garage/team_code/sensor_agent.py`'s stuck/creep-recovery logging was
+extended (tracked as `patches/carla_garage_sensor_agent_diagnostics.patch`, since `Carla-utils/`
+is gitignored and the vendored clone is its own nested git repo; auto-applied by
+`setup_tfpp_env.sh`) to print, on every "Creeping stopped by safety box" tick: the LiDAR point
+count inside the box, the box's near-boundary coordinates, and the nearest tracked
+vehicle/walker actor + distance. `eval_wor_closed_loop.py` now also prints every counted
+collision/red-light infraction live (route_idx, timestamp, actor), not only at the end in the
+JSON.
+
+**Town01 smoke test (3 routes, `max_steps=3000`):**
+- r000 **permanently deadlocked** in TF++'s own creep-recovery safety-box check: 981 consecutive
+  "Creeping stopped" events, 0 successful recoveries, over the full 150 s cap. The LiDAR points
+  filling the box sat at x = 2.4508-2.4513 m - matching `config.ego_extent_x =
+  2.4508416652679443` to 5 significant figures, i.e. the box's own near boundary - while the
+  nearest tracked actor was 10-15 m away and receding, eventually "none within 15 m". A **self-hit
+  signature**, not a real obstruction.
+- r001: 3 vehicle collisions + 5 red-light violations + 1 static collision, in just 410 m driven.
+  Zero safety-box/stop-sign involvement - a genuine driving failure, unrelated to r000's deadlock.
+- r002: DS = 1.0, clean.
+- Aggregate: **16.9 infractions/km** over 0.71 km driven.
+
+**Town12 smoke test (same config, TF++'s actual training town; route manifest mean length 4963 m
+- so RC is capped by the 150 s time budget on this huge map regardless of driving quality, and
+DS is not comparable to Town01's on that axis):**
+- r000 `blocked`, but on a **different, legitimate** mechanism: `nearest_actor=
+  vehicle.mitsubishi.fusorosa at 7.18m`, consistently, tick after tick - a real bus, physically
+  plausible geometry for a ~12 m vehicle to have LiDAR-visible surface points closer than its
+  reported center distance. This followed an actual collision with that same bus at t=65 s: TF++
+  crashed into it, then correctly refused to creep forward into it. Working as intended, not a
+  bug - and structurally unlike r000 on Town01.
+- r001, r002: clean - one red-light violation each, zero collisions, zero safety-box events.
+- Aggregate: **1.81 infractions/km** over 2.21 km driven - **~9x lower** than Town01.
+- The self-hit signature never recurred once on Town12's 3 routes.
+
+This is consistent with distribution shift (`routes_training.xml`/`routes_validation.xml`
+confirm TF++ never sees Town01 - only Town12 and Town13), but before spending more routes chasing
+that theory, the more decisive check was to look at what TF++'s own community reports.
+
+### External corroboration: the public checkpoint is known to be low-scoring and noisy on Town13
+
+- **[carla_garage issue #120](https://github.com/autonomousvision/carla_garage/issues/120)**
+  (opened 2026-08-10, still open, no maintainer response): an independent reproduction using the
+  **exact same checkpoint** we run (`town13_withheld/model_0030_0`), on the actual
+  `routes_validation_split` benchmark, via the standard vanilla evaluator on CARLA 0.9.15. Result:
+  "average driving score was below 1, with an average route completion of roughly 37%", most runs
+  ending "Agent got blocked" - collisions with dynamic objects "despite apparent detection" and
+  difficulty recovering when stuck behind an obstacle. The same symptom cluster we found,
+  independently, on TF++'s own validation town.
+- **Hidden Biases of End-to-End Driving Datasets** (arXiv 2412.09602, Table 5): TF++ on Town13
+  validation reports **RC 50.2%, Infraction Score 0.10, DS 1.08** (of 100) - and the paper notes
+  "identical agents yielding results that differ by more than 1 DS", i.e. the benchmark is
+  documented as highly noisy run-to-run even for a fixed checkpoint.
+
+**Conclusion:** `routes_validation.xml`/Town13 is not a usable calibration target for *anyone*
+running the public checkpoint right now, including us. A mismatch there indicts the benchmark's
+known instability before it indicts our harness. This is a stronger and more useful conclusion
+than "Town01 is out of distribution" - it means chasing exact agreement on Town13 validation was
+never going to succeed regardless of which town Tier 1 defaults to.
+
+### The credible replacement: Bench2Drive's published table
+
+Bench2Drive ([NeurIPS 2024 D&B track](https://proceedings.neurips.cc/paper_files/paper/2024/file/017761f94a1cd66d01c041aff85492c4-Paper-Datasets_and_Benchmarks_Track.pdf))
+is cross-validated by many independent follow-up papers reporting on the same 220-route table,
+which Town13-validation is not:
+
+| model | Driving Score | Success Rate |
+| --- | --- | --- |
+| AD-MLP | 18.05 | 0.00% |
+| TCP | 40.70 | 15.00% |
+| VAD | 42.35 | 15.00% |
+| UniAD | 45.81 | 16.36% |
+| ThinkTwice | 62.44 | 31.23% |
+| DriveAdapter | 64.22 | 33.08% |
+| **TF++ (Baseline)** | **84.21** | **67.27%** |
+| TF++ w/ VLAAD-MIL (SOTA) | 86.97 | 71.97% |
+| **PDM-Lite (Expert)** | **97.02** | **92.27%** |
+
+Two reasons this is structurally more usable than Town13 validation, not just better-documented:
+
+1. Bench2Drive's 220 routes are **short (~150 m) with exactly one scripted scenario each**,
+   distributed across all CARLA towns. That is the same order of magnitude as Tier 1's own
+   Town01 routes, and it starves the failure mode found above: the creep-recovery deadlock needs
+   ~55 s of continuous near-zero velocity (`stuck_threshold=1100` ticks) before it can even
+   engage, which a ~150 m route very often finishes or fails before reaching.
+2. **PDM-Lite is a privileged, rule-based expert** (not a learned policy), already vendored at
+   `carla_garage/team_code/autopilot.py` and `Bench2Drive/leaderboard/team_code/autopilot.py`. Its
+   published 97.02 DS / 92.27% SR is a near-ceiling anchor that isolates a different question than
+   TF++ does: does **our scoring/harness plumbing** reproduce a near-perfect number, independent
+   of any learned model's generalization noise? TF++ tests "does a learned reference model
+   transfer through our pipeline"; PDM-Lite tests "is the pipeline itself correct". Both are
+   useful and they fail in different ways if something is wrong.
+
+**Practical gap:** `run_bench2drive.sh` (Tier 2) does not yet have the `EVAL_AGENT` /
+`EVAL_AGENT_CONFIG` / `EVAL_PYTHON` pluggable-agent mechanism that `run_fast_eval.sh` and
+`run_leaderboard_official.sh` already received this session - it is still hardcoded to
+`bench2drive_agent.py`. That is the next piece of work before TF++ or PDM-Lite can actually run
+through Tier 2.
+
+**Revised Stage 1:** compare our harness's TF++ and PDM-Lite scores against the Bench2Drive table
+above (84.21 DS / 67.27% SR for TF++; 97.02 DS / 92.27% SR for PDM-Lite), not against
+`routes_validation.xml`. `routes_training.xml`/Town12 remains useful for Tier 3 as the *training*
+protocol check (no withheld-town concern), but Town13 validation is retired as a target until (if
+ever) the upstream noise issue in #120 is resolved.
+
 ## Status
 
 **Established (measured):**
@@ -308,11 +423,19 @@ reference; budget whole routes, not whole benchmarks.
 - That Tier 2 correlates with Tier 3 (Stage 4's reference-tier substitution assumes it).
 - That our harness reproduces any *published* TF++ number - only that TF++ runs in it, on both
   Tier 1 (cheap, validated end-to-end) and Tier 2/3 (expensive, plumbing-only validated - the
-  devtest run was killed before finishing for being too slow, never reached a score). The
-  numeric comparison against a published figure is still ahead.
+  devtest run was killed before finishing for being too slow, never reached a score). The target
+  for this comparison changed 2026-09-15 (see "Stage 1, revised" above): `routes_validation.xml`
+  is retired as a calibration target (independently documented as low-scoring and noisy for this
+  exact checkpoint, not just by us), replaced by Bench2Drive's published table
+  (TF++ 84.21 DS / 67.27% SR, PDM-Lite 97.02 DS / 92.27% SR). `run_bench2drive.sh` still needs
+  the `EVAL_AGENT` pluggability fix before this comparison can actually be run.
 - Any TF++-vs-ours ranking. The one data point that exists (Stage 2's TF++ smoke run) is 3
   routes, an order of magnitude below Stage 3's ~20-route resolving threshold, and must not be
   treated as a comparison.
+- Whether the Town01 self-hit deadlock (found 2026-09-15) recurs systematically or was one unlucky
+  spawn - not re-tested after the Town12 run showed a structurally different `blocked` cause
+  (a real post-collision obstruction). Lower priority now that Town13-validation-style long routes
+  are no longer the calibration target; Bench2Drive's short routes are far less exposed to it.
 
 Until that last point passes, `run_fast_eval.sh` output is a development signal only and must not
 appear in the thesis as a driving score.
