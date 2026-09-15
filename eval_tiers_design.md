@@ -165,13 +165,50 @@ timestamp)`. Unifies the two agent classes: `bench2drive_agent.py` becomes the s
 `CarlaDataProvider` to be initialised, `SpeedometerReader` needs the ego registered, and
 `set_global_plan` needs GPS-converted plans.
 
-**Stage 3 - establish the proxy's usable resolution.** Before any correlation claim:
-- *Repeatability*: same checkpoint, several `FAST_EVAL_SEED` values -> score variance. carla_garage
-  warns evaluation variance "is quite high" and recommends 3 seed repetitions even at Tier 3.
-  Early Tier 1 data shows per-route DS spanning 0.05-0.42 for one model, so this is the binding
-  constraint on how many routes a preset needs.
-- *Separation*: does Tier 1 reproduce the pilot's cnn > qwen DS ordering, in the specific case
-  where DS disagrees with "drives better"? That is the sharpest single test available.
+**Stage 3 - establish the proxy's usable resolution. DONE, and the answer is negative.**
+Ran the `hp` preset (12 routes, Town01, `max_steps=1500`, 30 traffic actors, `route_seed=0`) on
+v3 cnn and v3 qwen. Because the seed is fixed, both drove **identical** routes - a paired
+comparison, the most favourable design available. cnn: 12 routes, 4069 s wall (contended), DS
+0.2775 / RC 0.6908 / IP 0.3840, 9 of 12 routes ending in `timeout`.
+
+*Separation - can it rank two models?* **No.**
+
+| paired, 8 common routes | cnn - qwen | SE | distance from 0 |
+| --- | --- | --- | --- |
+| Driving Score | -0.023 | 0.105 | **0.22 SE** |
+| Route Completion | -0.014 | 0.132 | **0.10 SE** |
+
+Roughly 2 SE is needed to claim a difference; this is 0.22. Pairing did **not** rescue it,
+because the two models fail on *different* routes - route difficulty is not a shared latent
+factor that cancels in the difference. Resolving the observed ~0.08 DS gap at SE 0.02 would need
+**~220 routes, about 18 h per model**, which is no longer a fast eval.
+
+*Which metric is least noisy?* Measured, not assumed:
+
+| run | metric | mean | sd | CV = sd/mean |
+| --- | --- | --- | --- | --- |
+| cnn | DS | 0.2625 | 0.2770 | **1.06** |
+| cnn | RC | 0.6962 | 0.2719 | **0.39** |
+| qwen | DS | 0.3446 | 0.1369 | 0.40 |
+| qwen | RC | 0.7161 | 0.2778 | **0.39** |
+
+cnn's Driving Score has a **standard deviation larger than its mean**. Route Completion sits at
+CV 0.39 for *both* models, because it is bounded in [0,1] while DS multiplies it by a penalty
+exponential in infraction count, which is heavy-tailed by construction. **RC is ~2.7x less noisy
+than DS** - the "do not search on DS" argument above is now measured, not just principled.
+
+Also: qwen (0.345) scored *above* cnn (0.263) here, while the official pilot had cnn above qwen.
+Opposite ordering. Neither result is significant, so this is not evidence the proxy is wrong -
+but it is emphatically not evidence that it is right.
+
+**Consequence: Tier 1 is a screening tool, not a ranking tool.** It will reject a
+catastrophically broken configuration - a bad learning rate, a broken loss weight - which is most
+of what an early search needs to discard. It will not order two decent candidates and must never
+be used to pick a winner. Anything surviving the screen is promoted to Tier 2.
+
+Before spending routes to buy resolution, test variance reduction: **9 of 12 cnn routes ended in
+`timeout`**, i.e. episodes cut off mid-drive at `max_steps`, which injects variance directly into
+both RC and IP. Letting routes actually finish may buy more than more routes would.
 
 **Stage 4 - rank correlation.** Ladder of ~10 checkpoints spanning capability (full8town epochs
 005-050 and v3 epochs 005-031 exist for both arms, plus TF++ as a high anchor). Reference tier =
@@ -180,11 +217,27 @@ drive a search. Caveat: an epoch ladder only proves the proxy tracks *training p
 ladder must span architectures (it does: cnn + qwen) because a search varies LR, architecture and
 loss weights.
 
-## What is explicitly not yet established
+## Status
 
-- That Tier 1 correlates with Tier 2 or Tier 3 at all. **Nothing** has been validated yet.
+**Established (measured):**
+- Tier 1 at 12 routes cannot separate v3 cnn from v3 qwen - 0.22 SE on a paired comparison
+  (Stage 3). It is a screen, not a ranker.
+- RC is ~2.7x less noisy than DS and is the better search objective.
+- The DS metric flaw is real and reproduces in our own harness.
+- Stage 1 *plumbing* works: TF++ runs through `run_leaderboard_official.sh` unchanged, with its
+  own venv and its own sensor set including LiDAR.
+
+**Measured cost of TF++ as a reference:** it drives at a **0.040x** sim-to-wall ratio on Town12
+(775 s of wall time bought 32.8 s of simulation), against 1.27x for our camera-only WoR arms on
+the same town - roughly 30x more expensive per tick, from LiDAR raycasting plus a much larger
+model. TF++ is therefore viable as a **one-off calibration anchor** and not as a routine
+reference; budget whole routes, not whole benchmarks.
+
+**Explicitly not yet established:**
+- That Tier 1 correlates with Tier 2 or Tier 3 at all.
 - That Tier 2 correlates with Tier 3 (Stage 4's reference-tier substitution assumes it).
-- That our harness reproduces any published number (Stage 1).
+- That our harness reproduces any *published* TF++ number - only that TF++ runs in it. The
+  numeric comparison is still ahead.
 
-Until Stage 1 passes, `run_fast_eval.sh` output is a development signal only and must not appear
-in the thesis as a driving score.
+Until that last point passes, `run_fast_eval.sh` output is a development signal only and must not
+appear in the thesis as a driving score.
