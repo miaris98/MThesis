@@ -28,14 +28,55 @@ MTHESIS=/workspace/MThesis
 OUT=/workspace/leaderboard_official_out
 mkdir -p "$OUT"
 
-# The heads are useless without the vision weights they were trained on, and the loader only
-# finds those as a sibling of the checkpoint (wor_loader.py:150). A checkpoint copied out of
-# its directory still loads, still drives, and silently runs a different perception stack
-# (11.10) - so refuse to start rather than produce a plausible wrong number.
-if [ ! -f "$(dirname "$CKPT")/frozen_backbone.pth" ]; then
-  echo "FATAL: no frozen_backbone.pth beside $CKPT - these heads were trained on a frozen"
-  echo "backbone and would silently run on freshly initialized vision weights."
+# Agent selection. The default is this project's WoR agent; EVAL_AGENT / EVAL_AGENT_CONFIG
+# override it so a *reference* model - TransFuser++, whose numbers on these benchmarks are
+# published - can be run through the byte-identical harness. That is the only way to answer
+# "does our pipeline reproduce a known number?", and until it does, nothing this pipeline
+# produces about our own models can be trusted either (see eval_tiers_design.md, Stage 1).
+#
+# Both agents satisfy the same Leaderboard AutonomousAgent contract, so nothing below branches
+# on which one is in use except the pre-flight checks, whose *failure modes* genuinely differ.
+AGENT="${EVAL_AGENT:-$MTHESIS/bench2drive_agent.py}"
+AGENT_CONFIG="${EVAL_AGENT_CONFIG:-${ARCH}:${CKPT}}"
+# The interpreter is part of the agent's environment, not a global. TF++ cannot run in
+# venv_carla at all (carla_garage pins numpy==1.26.4; imgaug calls np.sctypes, removed in
+# NumPy 2.0) and is given venv_tfpp by setup_tfpp_env.sh. The evaluator imports the agent
+# in-process, so this one variable selects both.
+EVAL_PYTHON="${EVAL_PYTHON:-/workspace/venv_carla/bin/python}"
+if [ ! -x "$EVAL_PYTHON" ]; then
+  echo "FATAL: EVAL_PYTHON=$EVAL_PYTHON is not executable."
+  echo "For TransFuser++, build its environment first: bash setup_tfpp_env.sh"
   exit 1
+fi
+
+if [ "$AGENT" = "$MTHESIS/bench2drive_agent.py" ]; then
+  # The heads are useless without the vision weights they were trained on, and the loader only
+  # finds those as a sibling of the checkpoint (wor_loader.py:150). A checkpoint copied out of
+  # its directory still loads, still drives, and silently runs a different perception stack
+  # (11.10) - so refuse to start rather than produce a plausible wrong number.
+  if [ ! -f "$(dirname "$CKPT")/frozen_backbone.pth" ]; then
+    echo "FATAL: no frozen_backbone.pth beside $CKPT - these heads were trained on a frozen"
+    echo "backbone and would silently run on freshly initialized vision weights."
+    exit 1
+  fi
+else
+  # TF++'s setup() takes a *directory* containing config.json (which it loads with jsonpickle)
+  # plus the model_*.pth weights - not a path to a .pth. Passing the .pth is an easy mistake
+  # that fails deep inside the agent rather than here.
+  if [ ! -f "$AGENT_CONFIG/config.json" ]; then
+    echo "FATAL: $AGENT_CONFIG/config.json not found. EVAL_AGENT_CONFIG must be the directory"
+    echo "holding config.json and model_*.pth (e.g. .../pretrained_models/town13_withheld),"
+    echo "not a checkpoint file."
+    exit 1
+  fi
+  # team_code holds TF++'s own flat imports (model, config, data, nav_planner,
+  # transfuser_utils, scenario_logger) - it imports them as top-level modules, so the
+  # directory itself has to be importable, not just its parent. It is prepended to PYTHONPATH
+  # below rather than exported here: those module names are generic enough ("model", "config",
+  # "data") that whichever path entry comes first decides the winner, and the main export below
+  # would otherwise put $MTHESIS ahead of it.
+  AGENT_PYTHONPATH="$GARAGE/team_code"
+  echo "=== reference agent: $AGENT (config $AGENT_CONFIG) ==="
 fi
 
 export SCENARIO_RUNNER_ROOT="$GARAGE/scenario_runner"
@@ -46,7 +87,7 @@ export MTHESIS_ROOT="$MTHESIS"
 # leaderboard/scripts/run_evaluation.sh would append. venv_carla is Python 3.10 with carla
 # installed from pip; putting a py3.7 egg ahead of that shadows a working client with one
 # whose compiled extension segfaults on first use rather than failing to import (11.7, 1.9).
-export PYTHONPATH="$MTHESIS:$REAL_CARLA/PythonAPI:$REAL_CARLA/PythonAPI/carla:$LEADERBOARD_ROOT:$SCENARIO_RUNNER_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="${AGENT_PYTHONPATH:+$AGENT_PYTHONPATH:}$MTHESIS:$REAL_CARLA/PythonAPI:$REAL_CARLA/PythonAPI/carla:$LEADERBOARD_ROOT:$SCENARIO_RUNNER_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 # 2026-09-15: a fresh box's venv_carla had carla/torch/timm but none of the vanilla
 # leaderboard/scenario_runner runtime deps (six, py-trees, opencv, ...) - checking "torch and
@@ -57,20 +98,35 @@ export PYTHONPATH="$MTHESIS:$REAL_CARLA/PythonAPI:$REAL_CARLA/PythonAPI/carla:$L
 # because the training venv did (they are two separate venvs: /venv/main vs venv_carla).
 cd "$MTHESIS"
 PREFLIGHT_LOG=/tmp/eval_preflight_${LABEL}.log
+# Import the agent that will actually run, by path, rather than a hardcoded module name: the
+# whole point of EVAL_AGENT is that it may not be bench2drive_agent, and a pre-flight that
+# checks a different module than the run uses is not a pre-flight at all. Executing the module
+# is what catches TF++'s heavier dependency set (jsonpickle, ujson, scipy, filterpy) before a
+# CARLA cold start is paid for.
 preflight_ok() {
-  /workspace/venv_carla/bin/python -c "
+  "$EVAL_PYTHON" -c "
+import importlib.util, sys
 import leaderboard.leaderboard_evaluator
-import bench2drive_agent
+spec = importlib.util.spec_from_file_location('_eval_agent_probe', '$AGENT')
+mod = importlib.util.module_from_spec(spec)
+sys.modules['_eval_agent_probe'] = mod
+spec.loader.exec_module(mod)
 " >"$PREFLIGHT_LOG" 2>&1
 }
-echo "=== preflight: verifying venv_carla can import the evaluator + agent ==="
+echo "=== preflight: verifying $EVAL_PYTHON can import the evaluator + $(basename "$AGENT") ==="
 if ! preflight_ok; then
-  echo "preflight failed - installing known eval dependencies into venv_carla (see $PREFLIGHT_LOG)"
-  /workspace/venv_carla/bin/pip install -q six "py-trees==0.8.3" Shapely xmlschema ephem \
+  echo "preflight failed - installing known eval dependencies into $EVAL_PYTHON (see $PREFLIGHT_LOG)"
+  # The first line is the vanilla leaderboard/scenario_runner set (2026-09-15, S-011). The
+  # second is TransFuser++'s: it runs an Unscented Kalman Filter over IMU/GNSS (filterpy,
+  # scipy) and loads its config with jsonpickle/ujson. They are installed unconditionally
+  # because a venv that can run only one of the two agents is exactly the split-brain state
+  # this pre-flight exists to prevent.
+  "$EVAL_PYTHON" -m pip install -q six "py-trees==0.8.3" Shapely xmlschema ephem \
     tabulate opencv-python matplotlib psutil pygame pexpect dictor transforms3d \
-    simple-watchdog-timer requests
+    simple-watchdog-timer requests \
+    jsonpickle ujson scipy filterpy
   if ! preflight_ok; then
-    echo "FATAL: venv_carla still cannot import the evaluator/agent after installing the known"
+    echo "FATAL: $EVAL_PYTHON still cannot import the evaluator/agent after installing the known"
     echo "dependency set - a NEW missing module, not one of the ones this script already knows"
     echo "about. See $PREFLIGHT_LOG:"
     cat "$PREFLIGHT_LOG"
@@ -159,7 +215,7 @@ echo "=== evaluating $LABEL: $ARCH @ $CKPT on $(basename "$ROUTES") ==="
 RESULTS="$OUT/${LABEL}.json"
 (
   while sleep 60; do
-    /workspace/venv_carla/bin/python "$MTHESIS/check_leaderboard_results.py" \
+    "$EVAL_PYTHON" "$MTHESIS/check_leaderboard_results.py" \
         "$RESULTS" --abort-after 3 --quiet
     if [ $? -eq 3 ]; then
       echo "=== WATCHDOG: aborting $LABEL, see above ==="
@@ -172,14 +228,14 @@ WATCHDOG=$!
 # The EXIT/INT/TERM trap installed right after the CARLA launch already reaps both this
 # watchdog and the simulator, so it is deliberately not re-installed (and not narrowed) here.
 
-/workspace/venv_carla/bin/python "$LEADERBOARD_ROOT/leaderboard/leaderboard_evaluator.py" \
+"$EVAL_PYTHON" "$LEADERBOARD_ROOT/leaderboard/leaderboard_evaluator.py" \
   --routes="$ROUTES" \
   --repetitions=1 \
   --track=SENSORS \
   --checkpoint="$OUT/${LABEL}.json" \
   --debug-checkpoint="$OUT/${LABEL}_live.txt" \
-  --agent="$MTHESIS/bench2drive_agent.py" \
-  --agent-config="${ARCH}:${CKPT}" \
+  --agent="$AGENT" \
+  --agent-config="$AGENT_CONFIG" \
   --debug=0 \
   --resume=True \
   --timeout=600 \
@@ -193,7 +249,7 @@ kill $WATCHDOG 2>/dev/null
 # something". Gate the result on every recorded route being a real driving outcome, so a
 # contaminated file cannot be quietly picked up and reported as a score.
 echo "=== $LABEL finished with status $STATUS; validating results ==="
-/workspace/venv_carla/bin/python "$MTHESIS/check_leaderboard_results.py" "$OUT/${LABEL}.json"
+"$EVAL_PYTHON" "$MTHESIS/check_leaderboard_results.py" "$OUT/${LABEL}.json"
 VALID=$?
 if [ $VALID -ne 0 ]; then
   echo "=== $LABEL: results at $OUT/${LABEL}.json are NOT a usable measurement (see above) ==="
