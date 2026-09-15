@@ -1,1 +1,3 @@
 graphify-out/graph.json merge=graphify
+# git apply needs byte-exact LF patches; Windows autocrlf must not touch these.
+patches/*.patch -text eol=lf

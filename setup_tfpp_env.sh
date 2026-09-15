@@ -81,6 +81,19 @@ echo "=== installing leaderboard/scenario_runner runtime deps ==="
 echo "=== installing the CARLA python client ==="
 "$VENV/bin/pip" install -q "carla==0.9.15"
 
+# $GARAGE is a plain checkout of autonomousvision/carla_garage, not cloned by this script and
+# not something we push local commits to (it's a nested git repo of its own). The diagnostic
+# instrumentation added to sensor_agent.py's stuck/creep-recovery logging on 2026-09-15 - lidar
+# point counts in the safety box, nearest tracked actor, edge-triggered stop-sign logging - lives
+# only in this project's tracked patches/ dir (Carla-utils/ itself is gitignored) and has to be
+# re-applied to every fresh $GARAGE checkout by hand.
+PATCH="$(dirname "$0")/patches/carla_garage_sensor_agent_diagnostics.patch"
+if [ -f "$PATCH" ] && ! grep -q '_nearest_actor_summary' "$AGENT" 2>/dev/null; then
+  echo "=== applying $PATCH to $AGENT ==="
+  git -C "$GARAGE" apply "$PATCH" \
+    || echo "WARNING: patch did not apply cleanly - sensor_agent.py has diverged, apply by hand"
+fi
+
 echo "=== verifying the TF++ agent imports ==="
 OUT="$(probe)"
 echo "$OUT" | tail -15

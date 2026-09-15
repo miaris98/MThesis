@@ -615,11 +615,21 @@ def run_route(world, client, agent_cls, agent_config, route_spec, spawn_points, 
 
             while collision_events:
                 type_id, actor_id = collision_events.pop(0)
-                metrics.add_collision(t_s, type_id, actor_id)
+                counted = metrics.add_collision(t_s, type_id, actor_id)
+                # 2026-09-15: infractions previously only surfaced in the final JSON, so a run
+                # that failed badly gave no way to tell *why* without waiting for it to finish
+                # (or, worse, re-running it under a debugger). Print as they happen instead -
+                # only when add_collision actually counted it, so sustained contact against the
+                # same actor doesn't spam a line every tick.
+                if counted:
+                    print(f'[infraction] collision t={t_s:.2f}s route_idx={route_idx} '
+                          f'actor={type_id}', flush=True)
 
             ran = red_watcher.update(ego, speed_mps)
             if ran is not None:
                 metrics.add_red_light_violation(t_s, ran)
+                print(f'[infraction] red_light t={t_s:.2f}s route_idx={route_idx} '
+                      f'light_id={ran}', flush=True)
 
             if reached_end:
                 metrics.terminate(TerminationReason.COMPLETED)
