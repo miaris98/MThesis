@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import sync_experiments as sx
+from scripts.sync import sync_experiments as sx
 from src.config import paths
 
 

@@ -21,11 +21,14 @@ Reading the source text sidesteps both problems and is exactly as strong a regre
 a bare numeric constant.
 """
 import re
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _extract(path, pattern):
-    with open(path, encoding="utf-8") as fh:
-        text = fh.read()
+    """Pull a numeric constant out of a source file addressed from the repository root."""
+    text = (REPO_ROOT / path).read_text(encoding="utf-8")
     m = re.search(pattern, text)
     assert m, f"pattern {pattern!r} not found in {path}"
     return float(m.group(1))
@@ -42,7 +45,7 @@ def test_measured_pdm_lite_route_spacing_is_documented():
 
 
 def test_eval_wor_default_matches_measured_spacing():
-    v = _extract("eval_wor.py",
+    v = _extract("scripts/eval/eval_wor.py",
                  r"def _build_global_route\([^)]*sampling_resolution=([\d.]+)\)")
     assert v == 1.0, (
         f"eval_wor.py's _build_global_route defaults to {v} m; PDM-Lite's route field "
@@ -50,10 +53,10 @@ def test_eval_wor_default_matches_measured_spacing():
 
 
 def test_eval_wor_closed_loop_constant_matches_measured_spacing():
-    v = _extract("eval_wor_closed_loop.py", r"ROUTE_SAMPLING_RESOLUTION\s*=\s*([\d.]+)")
+    v = _extract("scripts/eval/eval_wor_closed_loop.py", r"ROUTE_SAMPLING_RESOLUTION\s*=\s*([\d.]+)")
     assert v == 1.0
 
 
 def test_bench2drive_constant_matches_measured_spacing():
-    v = _extract("bench2drive_agent.py", r"ROUTE_SPACING_M\s*=\s*([\d.]+)")
+    v = _extract("scripts/eval/bench2drive_agent.py", r"ROUTE_SPACING_M\s*=\s*([\d.]+)")
     assert v == 1.0

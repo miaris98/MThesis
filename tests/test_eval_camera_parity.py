@@ -16,27 +16,32 @@ approach `test_route_lookahead_parity.py` uses and for the same reason.
 """
 import re
 
+from pathlib import Path
+
 from src.config.camera import PDM_LITE_CAMERA
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def _read(path):
-    with open(path, encoding="utf-8") as fh:
-        return fh.read()
+    """Read a source file addressed relative to the repository root."""
+    return (REPO_ROOT / path).read_text(encoding="utf-8")
 
 
 def test_eval_wor_imports_the_canonical_camera():
-    assert "from src.config.camera import" in _read("eval_wor.py")
-    assert "PDM_LITE_CAMERA" in _read("eval_wor.py")
+    assert "from src.config.camera import" in _read("scripts/eval/eval_wor.py")
+    assert "PDM_LITE_CAMERA" in _read("scripts/eval/eval_wor.py")
 
 
 def test_eval_wor_closed_loop_imports_the_canonical_camera():
-    assert "PDM_LITE_CAMERA" in _read("eval_wor_closed_loop.py")
+    assert "PDM_LITE_CAMERA" in _read("scripts/eval/eval_wor_closed_loop.py")
 
 
 def test_neither_file_hardcodes_the_old_broken_geometry():
     """The literal values from the pre-fix camera - if any of these reappear as a spawn
     parameter, someone has reverted to the broken sensor by hand."""
-    for path in ("eval_wor.py", "eval_wor_closed_loop.py"):
+    for path in ("scripts/eval/eval_wor.py", "scripts/eval/eval_wor_closed_loop.py"):
         text = _read(path)
         assert '"image_size_x", "256"' not in text, f"{path} still spawns a 256px-wide camera"
         assert '"fov", "100"' not in text, f"{path} still spawns a 100deg-fov camera"
@@ -45,7 +50,7 @@ def test_neither_file_hardcodes_the_old_broken_geometry():
 
 
 def test_reshape_targets_are_no_longer_the_stale_256_square():
-    for path in ("eval_wor.py", "eval_wor_closed_loop.py"):
+    for path in ("scripts/eval/eval_wor.py", "scripts/eval/eval_wor_closed_loop.py"):
         text = _read(path)
         assert ".reshape((256, 256, 4))" not in text, (
             f"{path} still reshapes the raw buffer as a 256x256 image")
@@ -55,7 +60,7 @@ def test_camera_spawn_parameters_are_read_from_pdm_lite_camera():
     """Pins the actual mechanism, not just the absence of the old literals: the width/height/fov
     passed to set_attribute must trace to PDM_LITE_CAMERA, so a future edit that reads from some
     other, possibly-drifted source is still caught."""
-    for path in ("eval_wor.py", "eval_wor_closed_loop.py"):
+    for path in ("scripts/eval/eval_wor.py", "scripts/eval/eval_wor_closed_loop.py"):
         text = _read(path)
         assert re.search(r'set_attribute\("image_size_x",\s*str\(PDM_LITE_CAMERA\["width"\]\)\)',
                          text), f"{path}'s camera width is not sourced from PDM_LITE_CAMERA"

@@ -4,6 +4,7 @@ pillow
 opencv-python
 torch
 torchvision
+timm
 gymnasium
 tensorboard
 mlflow

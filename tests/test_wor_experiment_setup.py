@@ -208,7 +208,7 @@ def test_compare_runs_reports_seed_spread_as_a_noise_floor(tmp_path):
     """The comparison must group repeats of one configuration and report their spread.
     A component that moves the metric less than that spread has not been shown to do
     anything, and the tool has to say so rather than rank it."""
-    import compare_wor_runs
+    from scripts.analysis import compare_wor_runs
 
     fields = ["epoch", "num_batches", "total_loss", "val_loss", "val_wp_ade_m",
               "val_wp_fde_m", "val_wp_lateral_error_m", "val_wp_longitudinal_error_m",
@@ -260,7 +260,7 @@ def test_compare_runs_reports_seed_spread_as_a_noise_floor(tmp_path):
 def test_compare_runs_splits_appended_runs(tmp_path):
     """Runs append to the same CSV, so one file can hold several - the first shipped
     telemetry file held an 8-epoch run followed by a 50-epoch one."""
-    import compare_wor_runs
+    from scripts.analysis import compare_wor_runs
 
     rows = ([{"epoch": str(e)} for e in range(1, 9)]
             + [{"epoch": str(e)} for e in range(1, 51)])

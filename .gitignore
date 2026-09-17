@@ -1,35 +1,72 @@
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
 __pycache__/
-Carla-utils/
-papers_and_code/
-metrics.csv
-eval_video.mp4
-training_telemetry.csv
-training_telemetry_n3.csv
-eval_video_100k.mp4
-ppo_carla_latest.pth
-wor_eval_video.mp4
-wor_training_telemetry.csv
-wor_training_telemetry_qwen100.csv
-challenges/
+*.py[cod]
+.pytest_cache/
 
+# ---------------------------------------------------------------------------
+# Secrets - never commit. Unanchored on purpose: a stray .env anywhere in the
+# tree is still a secret. scripts/sync/hf_push_*.py read the one at the root.
+# ---------------------------------------------------------------------------
+.env
+
+# ---------------------------------------------------------------------------
+# External checkouts and reference material, vendored beside the repo rather
+# than part of its history.
+# ---------------------------------------------------------------------------
+/Carla-utils/
+/papers_and_code/
+/challenges/
+
+# ---------------------------------------------------------------------------
 # Experiment output. Normally lands on the external disk (E:\MThesis_EXP) or
 # /workspace on vast.ai, but src/config/paths.py falls back to ./experiments
 # when neither is present - never commit any of it.
-experiments/
-mlruns/
-runs/
-results/
-weights/wor_nc.pth
-closed_loop_videos/
+# ---------------------------------------------------------------------------
+/experiments/
+/mlruns/
+/runs/
+/results/
+/checkpoints/
+/closed_loop_videos/
+/output-screenshots/
+/weights/*
+!/weights/*.moved.md
 
-# Raw eval logs and checkpoint JSONs staged locally before moving to E:\MThesis_EXP -
-# same "never commit experiment output" reasoning as above, just pulled from a remote
-# box instead of produced locally.
-bench2drive_results_backup/
+# Raw eval logs and checkpoint JSONs staged locally before moving to
+# E:\MThesis_EXP - same "never commit experiment output" reasoning as above,
+# just pulled from a remote box instead of produced locally.
+/bench2drive_results_backup/
+
+# ---------------------------------------------------------------------------
+# data/ holds small, curated inputs that DO belong in the repo (route subsets,
+# fixed splits). Run telemetry written next to them does not - it is experiment
+# output that happens to land here, so ignore the generated CSVs by name and
+# keep everything else tracked.
+# ---------------------------------------------------------------------------
+/data/metrics.csv
+/data/training_telemetry.csv
+/data/training_telemetry_n3.csv
+/data/wor_training_telemetry.csv
+/data/wor_training_telemetry_qwen100.csv
+
+# Same artifacts when a script writes them to the repo root instead of data/,
+# which is what every run before the 2026-09-17 restructure did.
+/metrics.csv
+/training_telemetry.csv
+/training_telemetry_n3.csv
+/wor_training_telemetry.csv
+/wor_training_telemetry_qwen100.csv
+/eval_video.mp4
+/eval_video_100k.mp4
+/wor_eval_video.mp4
+/ppo_carla_latest.pth
+
+# ---------------------------------------------------------------------------
+# Knowledge graphs - regenerable, and large.
+# ---------------------------------------------------------------------------
 # Added by code-review-graph
 .code-review-graph/
 # graphify knowledge-graph output (regenerable via /graphify --update)
 graphify-out/
-
-# secrets - never commit
-.env
