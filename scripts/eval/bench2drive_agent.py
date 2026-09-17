@@ -107,10 +107,20 @@ class WorB2DAgent(AutonomousAgent):
     def setup(self, path_to_conf_file):
         self.track = Track.SENSORS
 
-        # The evaluator appends '+<save_name>' to whatever TEAM_CONFIG was passed
-        # (leaderboard_evaluator.py: `args.agent_config = args.agent_config + '+' + save_name`),
-        # so strip that suffix back off before parsing our own config out of it.
-        cfg = path_to_conf_file.rsplit("+", 1)[0]
+        # The evaluator appends '+<save_name>' to `args.agent_config` IN PLACE
+        # (leaderboard_evaluator.py: `args.agent_config = args.agent_config + '+' + save_name`)
+        # and that line runs once per route without ever resetting args.agent_config back to
+        # the original string - so by route 2 the value passed here is already
+        # "<arch>:<ckpt>+<route1_save_name>", and rsplit("+", 1) (stripping only the LAST
+        # suffix) leaves "<arch>:<ckpt>+<route1_save_name>" behind, which is not a real file.
+        # os.path.exists() on that then fails, load_wor_model() falls back to a fresh
+        # ImageNet-backbone/random-head model, and every route past the first is silently
+        # evaluated on an untrained policy - discovered when a real eval run showed exactly
+        # one "Merged N frozen backbone tensors" line followed by "ImageNet Pretrained: True"
+        # on every subsequent route setup. Splitting on the FIRST '+' instead is correct
+        # regardless of how many suffixes have accumulated, since our own config string is
+        # built here and never legitimately contains a '+'.
+        cfg = path_to_conf_file.split("+", 1)[0]
         arch, _, checkpoint = cfg.partition(":")
         if not checkpoint:
             raise ValueError(
