@@ -81,16 +81,24 @@ class VectorizedTrajectoryReplayBuffer:
         # Stack all future targets into a single tensor for 1-pass parallel GPU batch encoding: (B, K, C, H, W)
         future_obs_list = [self.obs_buf[idx_arr + k + 1] for k in range(K)]
         target_future_obs = torch.from_numpy(np.stack(future_obs_list, axis=1))  # (B, K, 4, 84, 84)
+        obs_K = torch.from_numpy(self.obs_buf[idx_arr + K])  # (B, 4, 84, 84)
         
         return {
             "obs_0": obs_0,
             "actions_seq": actions_seq,
             "rewards_seq": rewards_seq,
-            "target_future_obs": target_future_obs
+            "target_future_obs": target_future_obs,
+            "obs_K": obs_K,
         }
 
 
-def evaluate_agent(agent: ImpalaGTrXLAgent, env_id: str, device: torch.device, num_episodes: int = 5) -> Tuple[float, float]:
+def evaluate_agent(
+    agent: ImpalaGTrXLAgent,
+    env_id: str,
+    device: torch.device,
+    num_episodes: int = 5,
+    use_lookahead: bool = False
+) -> Tuple[float, float]:
     eval_env_fn = make_atari_env(env_id, seed=999, idx=0, noop_max=0, clip_reward=False, episodic_life=False)
     env = eval_env_fn()
     agent.eval()
@@ -106,8 +114,13 @@ def evaluate_agent(agent: ImpalaGTrXLAgent, env_id: str, device: torch.device, n
         while not done:
             obs_t = torch.as_tensor(obs, device=device).unsqueeze(0)
             with torch.no_grad():
-                logits, _, _ = agent(obs_t)
-                action = torch.argmax(logits, dim=-1).item()
+                if use_lookahead:
+                    q_vals, _ = agent.evaluate_actions_lookahead(obs_t)
+                    logits, _, _ = agent(obs_t)
+                    action = torch.argmax(logits + 0.5 * q_vals, dim=-1).item()
+                else:
+                    logits, _, _ = agent(obs_t)
+                    action = torch.argmax(logits, dim=-1).item()
                 
             current_lives = env.unwrapped.ale.lives()
             if current_lives < last_lives or stuck_counter > 50:
@@ -225,7 +238,7 @@ def train_turbo_gtrxl_ez2(
         obs = next_obs
         global_step += num_envs
         
-        # 2. Fast Batched Multi-Step Gradient Updates
+        # 2. Fast Batched Multi-Step RL & Dynamics Gradient Updates
         for _ in range(replay_ratio):
             batch = buffer.sample_trajectories(batch_size=batch_size)
             
@@ -233,27 +246,63 @@ def train_turbo_gtrxl_ez2(
             b_actions = batch["actions_seq"].to(device)
             b_rewards = batch["rewards_seq"].to(device)
             target_future = batch["target_future_obs"].to(device)  # (B, K, 4, 84, 84)
+            b_obs_K = batch["obs_K"].to(device)  # (B, 4, 84, 84)
             
             with torch.amp.autocast(device_type="cuda", dtype=amp_dtype):
-                # Forward root observation through IMPALA + GTrXL
-                logits_0, value_0, latent_z0 = agent(b_obs_0)
+                # 1. Forward root observation through IMPALA + GTrXL
+                logits_0, value_0, latent_z0 = agent(b_obs_0)  # value_0: (B, 1)
                 
-                # Policy gradient loss on root action
-                act_0 = b_actions[:, 0]
-                policy_loss = F.cross_entropy(logits_0, act_0)
+                # 2. Multi-Step Target Value Bootstrapping: V(s_K)
+                with torch.no_grad():
+                    z_K, _ = agent.encode_observation(b_obs_K)
+                    v_K = agent.critic_head(z_K).squeeze(-1)  # (B,)
+                    
+                    B_sz, K_steps = b_actions.shape
+                    gamma = 0.99
+                    target_returns = torch.zeros(B_sz, K_steps, device=device, dtype=torch.float32)
+                    curr_ret = v_K
+                    for k in reversed(range(K_steps)):
+                        curr_ret = b_rewards[:, k] + gamma * curr_ret
+                        target_returns[:, k] = curr_ret
+                    R_0 = target_returns[:, 0]
                 
-                # Multi-Step EfficientZero v2 Latent Branch Unroll
+                # 3. Root Critic Loss
+                root_value_loss = F.smooth_l1_loss(value_0.squeeze(-1), R_0)
+                
+                # 4. Multi-Step EfficientZero v2 Latent Branch Unroll
                 unroll = agent.unroll_branches(latent_z0, b_actions)
                 
-                # Multi-step reward loss
                 reward_loss = 0.0
+                unroll_value_loss = 0.0
                 for k in range(unroll_steps):
                     pred_r_k = unroll["rewards"][k]
                     true_r_k = b_rewards[:, k]
                     reward_loss += F.smooth_l1_loss(pred_r_k, true_r_k)
+                    
+                    pred_v_k = unroll["values"][k].squeeze(-1)
+                    target_v_k = target_returns[:, k]
+                    unroll_value_loss += F.smooth_l1_loss(pred_v_k, target_v_k)
+                    
                 reward_loss /= unroll_steps
+                unroll_value_loss /= unroll_steps
+                total_value_loss = 0.5 * (root_value_loss + unroll_value_loss)
                 
-                # Batched 1-Pass Consistency Loss (all B x K target future images encoded in parallel)
+                # 5. Advantage-Weighted Policy Gradient with Entropy Regularization
+                act_0 = b_actions[:, 0]
+                with torch.no_grad():
+                    adv_0 = R_0 - value_0.squeeze(-1)
+                    adv_norm = (adv_0 - adv_0.mean()) / (adv_0.std() + 1e-8)
+                    adv_norm = adv_norm.clamp(-5.0, 5.0)
+                
+                log_probs = F.log_softmax(logits_0, dim=-1)
+                act_log_prob = log_probs.gather(1, act_0.unsqueeze(1)).squeeze(1)
+                policy_loss = -(act_log_prob * adv_norm).mean()
+                
+                probs = F.softmax(logits_0, dim=-1)
+                entropy = -(probs * log_probs).sum(dim=-1).mean()
+                policy_loss = policy_loss - 0.01 * entropy
+                
+                # 6. Batched 1-Pass Consistency Loss (SimSiam negative cosine similarity)
                 B, K, C, H, W = target_future.shape
                 flat_targets = target_future.view(B * K, C, H, W)
                 with torch.no_grad():
@@ -268,7 +317,7 @@ def train_turbo_gtrxl_ez2(
                     consistency_loss += agent.predictor.compute_consistency_loss(pred_proj_k, target_proj_k)
                 consistency_loss /= unroll_steps
                 
-                total_loss = policy_loss + 1.0 * reward_loss + 0.5 * consistency_loss
+                total_loss = policy_loss + 0.5 * total_value_loss + 1.0 * reward_loss + 0.5 * consistency_loss
             
             optimizer.zero_grad()
             total_loss.backward()
@@ -278,9 +327,10 @@ def train_turbo_gtrxl_ez2(
         if global_step % 500 < num_envs:
             sps = int(global_step / (time.time() - start_time))
             print(f"Step {global_step:6d}/{total_steps:6d} | SPS: {sps:4d} | TotalLoss: {total_loss.item():.4f} | "
-                  f"PLoss: {policy_loss.item():.4f} | RewLoss: {reward_loss.item():.4f} | SimLoss: {consistency_loss.item():.4f}", flush=True)
+                  f"PLoss: {policy_loss.item():.4f} | VLoss: {total_value_loss.item():.4f} | RewLoss: {reward_loss.item():.4f} | SimLoss: {consistency_loss.item():.4f}", flush=True)
             writer.add_scalar("losses/total", total_loss.item(), global_step)
             writer.add_scalar("losses/policy", policy_loss.item(), global_step)
+            writer.add_scalar("losses/value", total_value_loss.item(), global_step)
             writer.add_scalar("losses/reward", reward_loss.item(), global_step)
             writer.add_scalar("losses/consistency", consistency_loss.item(), global_step)
             writer.add_scalar("charts/SPS", sps, global_step)

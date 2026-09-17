@@ -81,12 +81,14 @@ class TrajectoryReplayBuffer:
             torch.from_numpy(self.obs_buf[idx_arr + k + 1])
             for k in range(K)
         ]
+        obs_K = torch.from_numpy(self.obs_buf[idx_arr + K])
         
         return {
             "obs_0": obs_0,
             "actions_seq": actions_seq,
             "rewards_seq": rewards_seq,
-            "target_future_obs": target_future_obs
+            "target_future_obs": target_future_obs,
+            "obs_K": obs_K,
         }
 
 
@@ -233,24 +235,59 @@ def train_gtrxl_ez2(
             b_obs_0 = batch["obs_0"].to(device)
             b_actions = batch["actions_seq"].to(device)
             b_rewards = batch["rewards_seq"].to(device)
+            b_obs_K = batch["obs_K"].to(device)
             
             # Forward root observation through IMPALA + GTrXL
             logits_0, value_0, latent_z0 = agent(b_obs_0)
             
-            # Policy gradient loss on root action
-            act_0 = b_actions[:, 0]
-            policy_loss = F.cross_entropy(logits_0, act_0)
+            # Multi-Step Target Value Bootstrapping: V(s_K)
+            with torch.no_grad():
+                z_K, _ = agent.encode_observation(b_obs_K)
+                v_K = agent.critic_head(z_K).squeeze(-1)
+                
+                B_sz, K_steps = b_actions.shape
+                gamma = 0.99
+                target_returns = torch.zeros(B_sz, K_steps, device=device, dtype=torch.float32)
+                curr_ret = v_K
+                for k in reversed(range(K_steps)):
+                    curr_ret = b_rewards[:, k] + gamma * curr_ret
+                    target_returns[:, k] = curr_ret
+                R_0 = target_returns[:, 0]
+            
+            # Root Critic Loss
+            root_value_loss = F.smooth_l1_loss(value_0.squeeze(-1), R_0)
             
             # Multi-Step EfficientZero v2 Latent Branch Unroll
             unroll = agent.unroll_branches(latent_z0, b_actions)
             
-            # Multi-step reward loss
             reward_loss = 0.0
+            unroll_value_loss = 0.0
             for k in range(unroll_steps):
                 pred_r_k = unroll["rewards"][k]
                 true_r_k = b_rewards[:, k]
                 reward_loss += F.smooth_l1_loss(pred_r_k, true_r_k)
+                
+                pred_v_k = unroll["values"][k].squeeze(-1)
+                unroll_value_loss += F.smooth_l1_loss(pred_v_k, target_returns[:, k])
+                
             reward_loss /= unroll_steps
+            unroll_value_loss /= unroll_steps
+            total_value_loss = 0.5 * (root_value_loss + unroll_value_loss)
+            
+            # Advantage-Weighted Policy Gradient with Entropy Regularization
+            act_0 = b_actions[:, 0]
+            with torch.no_grad():
+                adv_0 = R_0 - value_0.squeeze(-1)
+                adv_norm = (adv_0 - adv_0.mean()) / (adv_0.std() + 1e-8)
+                adv_norm = adv_norm.clamp(-5.0, 5.0)
+            
+            log_probs = F.log_softmax(logits_0, dim=-1)
+            act_log_prob = log_probs.gather(1, act_0.unsqueeze(1)).squeeze(1)
+            policy_loss = -(act_log_prob * adv_norm).mean()
+            
+            probs = F.softmax(logits_0, dim=-1)
+            entropy = -(probs * log_probs).sum(dim=-1).mean()
+            policy_loss = policy_loss - 0.01 * entropy
             
             # Multi-step Self-Supervised Consistency Loss (SimSiam alignment)
             consistency_loss = 0.0
@@ -264,7 +301,7 @@ def train_gtrxl_ez2(
                 consistency_loss += agent.predictor.compute_consistency_loss(pred_proj_k, target_proj_k)
             consistency_loss /= unroll_steps
             
-            total_loss = policy_loss + 1.0 * reward_loss + 0.5 * consistency_loss
+            total_loss = policy_loss + 0.5 * total_value_loss + 1.0 * reward_loss + 0.5 * consistency_loss
             
             optimizer.zero_grad()
             total_loss.backward()
@@ -274,9 +311,10 @@ def train_gtrxl_ez2(
         if global_step % 100 == 0:
             sps = int(global_step / (time.time() - start_time))
             print(f"Step {global_step:6d}/{total_steps:6d} | SPS: {sps:4d} | TotalLoss: {total_loss.item():.4f} | "
-                  f"PLoss: {policy_loss.item():.4f} | RewLoss: {reward_loss.item():.4f} | SimLoss: {consistency_loss.item():.4f}", flush=True)
+                  f"PLoss: {policy_loss.item():.4f} | VLoss: {total_value_loss.item():.4f} | RewLoss: {reward_loss.item():.4f} | SimLoss: {consistency_loss.item():.4f}", flush=True)
             writer.add_scalar("losses/total", total_loss.item(), global_step)
             writer.add_scalar("losses/policy", policy_loss.item(), global_step)
+            writer.add_scalar("losses/value", total_value_loss.item(), global_step)
             writer.add_scalar("losses/reward", reward_loss.item(), global_step)
             writer.add_scalar("losses/consistency", consistency_loss.item(), global_step)
             writer.add_scalar("charts/SPS", sps, global_step)

@@ -1,5 +1,16 @@
 """Unit tests for IMPALA-CNN + GTrXL + EfficientZero v2 Policy Architecture."""
-import pytest
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+try:
+    import pytest
+except ImportError:
+    pass
+
 import torch
 import torch.nn as nn
 
@@ -85,3 +96,65 @@ def test_impala_gtrxl_agent_end_to_end():
     assert agent.visual_encoder.stage1.conv.weight.grad is not None
     assert agent.blocks[0].gate1.bg.grad is not None
     assert agent.predictor.dynamics.action_embed.weight.grad is not None
+
+
+def test_evaluate_actions_lookahead():
+    B = 2
+    obs = torch.randint(0, 255, (B, 4, 84, 84), dtype=torch.uint8)
+    agent = ImpalaGTrXLAgent(action_dim=4, in_channels=4, embed_dim=64, depth=1, num_heads=2, ffn_dim=128)
+    
+    q_values, latent_z = agent.evaluate_actions_lookahead(obs, gamma=0.99)
+    assert q_values.shape == (B, 4)
+    assert latent_z.shape == (B, 64)
+    assert torch.isfinite(q_values).all()
+
+
+def test_rl_gradient_flow_and_credit_assignment():
+    """Verify that critic_head, predictor.value_head, and actor_head all receive proper RL gradients."""
+    B, K = 4, 3
+    agent = ImpalaGTrXLAgent(action_dim=4, in_channels=4, embed_dim=64, depth=1, num_heads=2, ffn_dim=128, unroll_steps=K)
+    
+    obs_0 = torch.randint(0, 255, (B, 4, 84, 84), dtype=torch.uint8)
+    actions = torch.randint(0, 4, (B, K))
+    rewards = torch.randn(B, K)
+    
+    logits_0, value_0, latent_z0 = agent(obs_0)
+    unroll = agent.unroll_branches(latent_z0, actions)
+    
+    # Value loss: root + unroll
+    R_0 = rewards[:, 0] + 0.99 * torch.randn(B)
+    root_v_loss = nn.functional.smooth_l1_loss(value_0.squeeze(-1), R_0)
+    unroll_v_loss = sum(nn.functional.smooth_l1_loss(unroll["values"][k].squeeze(-1), R_0) for k in range(K)) / K
+    
+    # Advantage-weighted policy loss
+    adv = (R_0 - value_0.squeeze(-1).detach())
+    log_probs = nn.functional.log_softmax(logits_0, dim=-1)
+    act_log_prob = log_probs.gather(1, actions[:, 0].unsqueeze(1)).squeeze(1)
+    pol_loss = -(act_log_prob * adv).mean()
+    
+    total_loss = pol_loss + 0.5 * (root_v_loss + unroll_v_loss)
+    total_loss.backward()
+    
+    # Both actor and critic heads MUST have active gradients
+    assert agent.actor_head[2].weight.grad is not None
+    assert agent.actor_head[2].weight.grad.abs().sum() > 0
+    assert agent.critic_head[2].weight.grad is not None
+    assert agent.critic_head[2].weight.grad.abs().sum() > 0
+    assert agent.predictor.value_head[0].weight.grad is not None
+    assert agent.predictor.value_head[0].weight.grad.abs().sum() > 0
+
+
+if __name__ == "__main__":
+    print("Running test_gru_gating_identity_init()...")
+    test_gru_gating_identity_init()
+    print("Running test_gtrxl_block_forward()...")
+    test_gtrxl_block_forward()
+    print("Running test_efficientzero_v2_predictor_unroll()...")
+    test_efficientzero_v2_predictor_unroll()
+    print("Running test_impala_gtrxl_agent_end_to_end()...")
+    test_impala_gtrxl_agent_end_to_end()
+    print("Running test_evaluate_actions_lookahead()...")
+    test_evaluate_actions_lookahead()
+    print("Running test_rl_gradient_flow_and_credit_assignment()...")
+    test_rl_gradient_flow_and_credit_assignment()
+    print("✓ ALL 6 UNIT TESTS PASSED SUCCESSFULLY!")

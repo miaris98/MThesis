@@ -4,11 +4,17 @@ from atari_qwen.models.visual_encoders import (
     ImpalaCNNEncoder,
     PatchTokenizer
 )
-from atari_qwen.models.qwen_atari_actor_critic import QwenAtariActorCritic
-
-__all__ = [
-    "NatureCNNEncoder",
-    "ImpalaCNNEncoder",
-    "PatchTokenizer",
-    "QwenAtariActorCritic"
-]
+try:
+    from atari_qwen.models.qwen_atari_actor_critic import QwenAtariActorCritic
+    __all__ = [
+        "NatureCNNEncoder",
+        "ImpalaCNNEncoder",
+        "PatchTokenizer",
+        "QwenAtariActorCritic"
+    ]
+except ImportError:
+    __all__ = [
+        "NatureCNNEncoder",
+        "ImpalaCNNEncoder",
+        "PatchTokenizer"
+    ]

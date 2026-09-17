@@ -141,3 +141,26 @@ class ImpalaGTrXLAgent(nn.Module):
     def unroll_branches(self, latent_z: torch.Tensor, actions_seq: torch.Tensor) -> Dict[str, list]:
         """Unrolls future branches in latent space using EfficientZero v2 dynamics."""
         return self.predictor.unroll_trajectory(latent_z, actions_seq)
+
+    def evaluate_actions_lookahead(
+        self,
+        obs: torch.Tensor,
+        gamma: float = 0.99
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        1-step latent tree lookahead for all candidate actions in parallel:
+        Q(s, a) = r(s, a) + gamma * V(s')
+        Returns:
+            q_values: (B, action_dim) estimated Q-values across all discrete actions
+            latent_z: (B, embed_dim) root latent state
+        """
+        latent_z, _ = self.encode_observation(obs)
+        B = obs.shape[0]
+        q_vals = []
+        for a in range(self.action_dim):
+            act_tensor = torch.full((B,), a, dtype=torch.long, device=obs.device)
+            _, r_hat, v_hat = self.predictor.predict_step(latent_z, act_tensor)
+            q_a = r_hat + gamma * v_hat
+            q_vals.append(q_a.unsqueeze(-1))
+        q_values = torch.cat(q_vals, dim=-1)  # (B, action_dim)
+        return q_values, latent_z

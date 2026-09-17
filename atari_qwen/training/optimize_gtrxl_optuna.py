@@ -49,8 +49,10 @@ def objective(
     bg_init = trial.suggest_categorical("bg_init", [1.0, 2.0, 3.0])
     depth = trial.suggest_categorical("depth", [2, 4])
     num_heads = trial.suggest_categorical("num_heads", [2, 4])
+    value_weight = trial.suggest_float("value_weight", 0.25, 1.0)
     consistency_weight = trial.suggest_float("consistency_weight", 0.25, 1.0)
     reward_weight = trial.suggest_float("reward_weight", 0.5, 2.0)
+    ent_coef = trial.suggest_float("ent_coef", 0.005, 0.05, log=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     amp_dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
@@ -118,17 +120,55 @@ def objective(
             b_actions = batch["actions_seq"].to(device)
             b_rewards = batch["rewards_seq"].to(device)
             target_future = batch["target_future_obs"].to(device)
+            b_obs_K = batch["obs_K"].to(device)
 
             with torch.amp.autocast(device_type="cuda", dtype=amp_dtype):
                 logits_0, value_0, latent_z0 = agent(b_obs_0)
-                policy_loss = F.cross_entropy(logits_0, b_actions[:, 0])
+
+                # Multi-Step Target Value Bootstrapping: V(s_K)
+                with torch.no_grad():
+                    z_K, _ = agent.encode_observation(b_obs_K)
+                    v_K = agent.critic_head(z_K).squeeze(-1)
+                    
+                    B_sz, K_steps = b_actions.shape
+                    gamma = 0.99
+                    target_returns = torch.zeros(B_sz, K_steps, device=device, dtype=torch.float32)
+                    curr_ret = v_K
+                    for k in reversed(range(K_steps)):
+                        curr_ret = b_rewards[:, k] + gamma * curr_ret
+                        target_returns[:, k] = curr_ret
+                    R_0 = target_returns[:, 0]
+
+                root_value_loss = F.smooth_l1_loss(value_0.squeeze(-1), R_0)
                 unroll = agent.unroll_branches(latent_z0, b_actions)
 
                 reward_loss = 0.0
+                unroll_value_loss = 0.0
                 for k in range(unroll_steps):
                     reward_loss += F.smooth_l1_loss(unroll["rewards"][k], b_rewards[:, k])
+                    pred_v_k = unroll["values"][k].squeeze(-1)
+                    unroll_value_loss += F.smooth_l1_loss(pred_v_k, target_returns[:, k])
+                    
                 reward_loss /= unroll_steps
+                unroll_value_loss /= unroll_steps
+                total_value_loss = 0.5 * (root_value_loss + unroll_value_loss)
 
+                # Advantage-Weighted Policy Gradient
+                act_0 = b_actions[:, 0]
+                with torch.no_grad():
+                    adv_0 = R_0 - value_0.squeeze(-1)
+                    adv_norm = (adv_0 - adv_0.mean()) / (adv_0.std() + 1e-8)
+                    adv_norm = adv_norm.clamp(-5.0, 5.0)
+
+                log_probs = F.log_softmax(logits_0, dim=-1)
+                act_log_prob = log_probs.gather(1, act_0.unsqueeze(1)).squeeze(1)
+                policy_loss = -(act_log_prob * adv_norm).mean()
+
+                probs = F.softmax(logits_0, dim=-1)
+                entropy = -(probs * log_probs).sum(dim=-1).mean()
+                policy_loss = policy_loss - ent_coef * entropy
+
+                # 1-Pass Target Representation Consistency
                 B, K, C, H, W = target_future.shape
                 flat_targets = target_future.view(B * K, C, H, W)
                 with torch.no_grad():
@@ -141,7 +181,12 @@ def objective(
                     consistency_loss += agent.predictor.compute_consistency_loss(unroll["projections"][k], target_projs[:, k])
                 consistency_loss /= unroll_steps
 
-                total_loss = policy_loss + reward_weight * reward_loss + consistency_weight * consistency_loss
+                total_loss = (
+                    policy_loss
+                    + value_weight * total_value_loss
+                    + reward_weight * reward_loss
+                    + consistency_weight * consistency_loss
+                )
 
             optimizer.zero_grad()
             total_loss.backward()
