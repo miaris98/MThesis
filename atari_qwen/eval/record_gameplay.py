@@ -118,6 +118,22 @@ def record_gameplay(
     action_dim = env.action_space.n
     has_fire = "FIRE" in action_meanings and len(action_meanings) >= 2
     
+    # Load checkpoint metadata if present to set matching architecture
+    ckpt = None
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        print(f"--> Loading checkpoint metadata: {checkpoint_path}")
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        if isinstance(ckpt, dict):
+            if "config" in ckpt and hasattr(ckpt["config"], "model_preset"):
+                model_preset = ckpt["config"].model_preset
+            elif "preset" in ckpt:
+                model_preset = ckpt["preset"]
+            if "config" in ckpt and hasattr(ckpt["config"], "encoder_type"):
+                encoder_type = ckpt["config"].encoder_type
+            elif "encoder_type" in ckpt:
+                encoder_type = ckpt["encoder_type"]
+        print(f"--> Configured model: preset={model_preset}, encoder_type={encoder_type}")
+
     # Load model
     model = QwenAtariActorCritic(
         action_dim=action_dim,
@@ -126,13 +142,10 @@ def record_gameplay(
         encoder_type=encoder_type
     ).to(device)
     
-    if checkpoint_path and os.path.exists(checkpoint_path):
-        print(f"--> Loading weights from checkpoint: {checkpoint_path}")
-        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if ckpt is not None:
         if "model_state_dict" in ckpt:
             model.load_state_dict(ckpt["model_state_dict"])
         elif isinstance(ckpt, dict):
-            # Try direct load
             try:
                 model.load_state_dict(ckpt)
             except Exception as e:

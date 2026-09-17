@@ -107,8 +107,8 @@ def evaluate_checkpoint(
     action_dim = env.action_space.n
 
     # Reconstruct model
-    preset = getattr(config, "model_preset", "tiny") if config else "tiny"
-    encoder_type = getattr(config, "encoder_type", "nature_cnn") if config else "nature_cnn"
+    preset = getattr(config, "model_preset", ckpt.get("preset", "tiny")) if config else ckpt.get("preset", "tiny")
+    encoder_type = getattr(config, "encoder_type", ckpt.get("encoder_type", "nature_cnn")) if config else ckpt.get("encoder_type", "nature_cnn")
 
     model = QwenAtariActorCritic(
         action_dim=action_dim,
