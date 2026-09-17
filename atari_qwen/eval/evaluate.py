@@ -82,7 +82,10 @@ def evaluate_checkpoint(
     else:
         device = torch.device(device_str)
 
-    ckpt = torch.load(checkpoint_path, map_location=device)
+    try:
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    except TypeError:
+        ckpt = torch.load(checkpoint_path, map_location=device)
     config = ckpt.get("config", None)
 
     if env_id is None and config is not None:
