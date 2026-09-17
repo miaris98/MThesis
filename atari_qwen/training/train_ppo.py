@@ -42,6 +42,8 @@ def parse_args() -> AtariConfig:
     parser.add_argument("--log-dir", type=str, default="results/atari_qwen", help="Directory for logs and checkpoints")
     parser.add_argument("--no-amp", action="store_true", help="Disable Automatic Mixed Precision")
     parser.add_argument("--track-mlflow", action="store_true", help="Log metrics to MLflow")
+    parser.add_argument("--pretrained-checkpoint", type=str, default=None, help="Path to pretrained model checkpoint (.pt)")
+    parser.add_argument("--compile", action="store_true", help="Use torch.compile on policy model for maximum GPU speed")
     
     args = parser.parse_args()
     
@@ -65,6 +67,8 @@ def parse_args() -> AtariConfig:
         use_amp=not args.no_amp,
         track_mlflow=args.track_mlflow
     )
+    config.pretrained_checkpoint = args.pretrained_checkpoint
+    config.compile_model = args.compile
     return config
 
 
@@ -205,6 +209,25 @@ def train(config: AtariConfig):
     param_count = sum(p.numel() for p in model.parameters())
     trainable_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"✓ Qwen Atari Policy initialized! Total Params: {param_count:,} ({param_count/1e6:.2f}M), Trainable: {trainable_count:,}")
+
+    # Load Pretrained Weights if specified
+    if getattr(config, "pretrained_checkpoint", None) and os.path.exists(config.pretrained_checkpoint):
+        print(f"--> Loading pretrained weights from: {config.pretrained_checkpoint}")
+        pre_ckpt = torch.load(config.pretrained_checkpoint, map_location=device, weights_only=False)
+        sd = pre_ckpt.get("model_state_dict", pre_ckpt)
+        model.load_state_dict(sd, strict=False)
+        print("✓ Pretrained weights successfully loaded into Qwen policy network!")
+
+    # Optional torch.compile for maximum GPU throughput
+    raw_model = model
+    if getattr(config, "compile_model", False):
+        try:
+            print("--> Compiling Qwen policy with torch.compile(backend='inductor')...")
+            model = torch.compile(model)
+            print("✓ torch.compile successfully enabled!")
+        except Exception as e:
+            print(f"--> Warning: torch.compile failed ({e}), continuing uncompiled.")
+            model = raw_model
 
     # Optimizer & Scaler
     optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate, eps=1e-5, weight_decay=1e-2)
@@ -400,11 +423,12 @@ def train(config: AtariConfig):
             writer.add_scalar("eval/mean_return", eval_mean, global_step)
             writer.add_scalar("eval/std_return", eval_std, global_step)
 
-            # Checkpoint saving
+            # Checkpoint saving (save uncompiled weights for maximum portability)
+            saved_model = getattr(model, "_orig_mod", getattr(model, "module", model))
             latest_path = ckpt_dir / "model_latest.pt"
             torch.save({
                 "global_step": global_step,
-                "model_state_dict": model.state_dict(),
+                "model_state_dict": saved_model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "config": config,
                 "eval_mean": eval_mean
@@ -415,7 +439,7 @@ def train(config: AtariConfig):
                 best_path = ckpt_dir / "model_best.pt"
                 torch.save({
                     "global_step": global_step,
-                    "model_state_dict": model.state_dict(),
+                    "model_state_dict": saved_model.state_dict(),
                     "eval_mean": eval_mean,
                     "config": config
                 }, best_path)

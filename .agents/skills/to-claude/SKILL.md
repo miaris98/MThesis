@@ -26,6 +26,7 @@ Read the user's message after `to-claude` and extract:
 Pull **only** the following — do NOT include the full conversation history:
 - The error or symptom (exact traceback if present).
 - The relevant file snippet (use `view_file` to read ≤60 lines around the error).
+- **Knowledge Graph Context (Memory)**: Query the graphify knowledge graph using `& "C:\Users\miari\anaconda3\envs\graphtools\python.exe" -m graphify explain "<symbol>"` or `query "<problem>"` to pull the exact connected nodes/dependencies.
 - The relevant section of `struggle-solutions.md` if the problem matches a known struggle ID.
 - The active training command (if training-related).
 - Key environment facts: Python env (`carla_py38`), GPU count, CARLA version, Vast.ai.
@@ -38,12 +39,14 @@ Output the prompt as a clean markdown code block the user can copy:
 =========================================================
  CONTEXT FOR EXTERNAL LLM
 =========================================================
-Project: MThesis — Autonomous Driving PPO/WoR on CARLA (Vast.ai GPU instance)
-Environment: Ubuntu 20.04, Python 3.8 (carla_py38 conda), PyTorch 1.13, CARLA 0.9.13
-Repo: github.com/miaris98/MThesis  branch: fix/reward-state-plumbing
+Project: MThesis — Autonomous Driving PPO/WoR on CARLA & Atari Qwen RL
+Repo: github.com/miaris98/MThesis
 
 PROBLEM:
 <one-paragraph summary of the exact problem>
+
+KNOWLEDGE GRAPH MEMORY (Graphify Context):
+<subgraph or dependency summary of relevant components from graphify>
 
 ERROR (verbatim):
 <paste exact error traceback here>
