@@ -271,10 +271,10 @@ def train_gtrxl_ez2(
             nn.utils.clip_grad_norm_(agent.parameters(), 1.0)
             optimizer.step()
             
-        if global_step % 1000 == 0:
+        if global_step % 100 == 0:
             sps = int(global_step / (time.time() - start_time))
             print(f"Step {global_step:6d}/{total_steps:6d} | SPS: {sps:4d} | TotalLoss: {total_loss.item():.4f} | "
-                  f"PLoss: {policy_loss.item():.4f} | RewLoss: {reward_loss.item():.4f} | SimLoss: {consistency_loss.item():.4f}")
+                  f"PLoss: {policy_loss.item():.4f} | RewLoss: {reward_loss.item():.4f} | SimLoss: {consistency_loss.item():.4f}", flush=True)
             writer.add_scalar("losses/total", total_loss.item(), global_step)
             writer.add_scalar("losses/policy", policy_loss.item(), global_step)
             writer.add_scalar("losses/reward", reward_loss.item(), global_step)
@@ -284,7 +284,7 @@ def train_gtrxl_ez2(
         if global_step % eval_interval == 0 or global_step >= total_steps:
             mean_eval, std_eval = evaluate_agent(agent, env_id, device, num_episodes=5)
             hns = compute_hns(mean_eval, env_id)
-            print(f"\n[EVALUATION] Step {global_step:,} | Score: {mean_eval:.2f} +/- {std_eval:.2f} | HNS: {hns*100:.1f}%\n")
+            print(f"\n[EVALUATION] Step {global_step:,} | Score: {mean_eval:.2f} +/- {std_eval:.2f} | HNS: {hns*100:.1f}%\n", flush=True)
             writer.add_scalar("eval/mean_score", mean_eval, global_step)
             writer.add_scalar("eval/hns", hns, global_step)
             
