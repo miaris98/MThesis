@@ -103,12 +103,12 @@ def record_gameplay(
     print(f"--> Output Path: {output_path}")
     print(f"========================================================\n")
     
-    # Build evaluation environment
+    # Build evaluation environment (noop_max=0 so game action starts immediately on frame 1)
     env_fn = make_atari_env(
         env_id=env_id,
         seed=seed,
         idx=0,
-        noop_max=30,
+        noop_max=0,
         frame_stack=4,
         clip_reward=False,
         episodic_life=False
@@ -116,6 +116,7 @@ def record_gameplay(
     env = env_fn()
     action_meanings = env.unwrapped.get_action_meanings()
     action_dim = env.action_space.n
+    has_fire = "FIRE" in action_meanings and len(action_meanings) >= 2
     
     # Load model
     model = QwenAtariActorCritic(
@@ -166,6 +167,9 @@ def record_gameplay(
     episode_score = 0.0
     high_score = 0.0
     lives = getattr(env.unwrapped, "ale", None).lives() if hasattr(env.unwrapped, "ale") else 5
+    last_lives = lives
+    stuck_counter = 0
+    step_in_episode = 0
     current_action_name = "NOOP"
     
     start_wall_time = time.time()
@@ -182,9 +186,27 @@ def record_gameplay(
                 probs = torch.distributions.Categorical(logits=logits)
                 action = probs.sample().item()
                 
+        # 2. Check if ball is unserved (Breakout RAM[99] is ball X coordinate; 0 = unserved)
+        current_lives = env.unwrapped.ale.lives() if hasattr(env.unwrapped, "ale") else lives
+        ball_unserved = False
+        if hasattr(env.unwrapped, "ale"):
+            try:
+                ram = env.unwrapped.ale.getRAM()
+                if len(ram) > 99 and "breakout" in env_id.lower():
+                    ball_unserved = (ram[99] == 0)
+            except Exception:
+                pass
+                
+        # Serve ball immediately on first step, upon life loss, or if ball is unserved / paddle stuck
+        if has_fire and (ball_unserved or current_lives < last_lives or stuck_counter > 20 or step_in_episode < 2):
+            action = 1  # FIRE
+            stuck_counter = 0
+            
+        last_lives = current_lives
+        step_in_episode += 1
         current_action_name = action_meanings[action] if action < len(action_meanings) else f"ACT_{action}"
         
-        # 2. Step environment
+        # 3. Step environment
         step_result = env.step(action)
         if len(step_result) == 5:
             obs, reward, terminated, truncated, info = step_result
@@ -196,7 +218,12 @@ def record_gameplay(
         high_score = max(high_score, episode_score)
         lives = env.unwrapped.ale.lives() if hasattr(env.unwrapped, "ale") else lives
         
-        # 3. Render screen & composite HUD
+        if reward != 0:
+            stuck_counter = 0
+        else:
+            stuck_counter += 1
+        
+        # 4. Render screen & composite HUD
         raw_screen = env.unwrapped.ale.getScreenRGB()
         screen_bgr = cv2.cvtColor(raw_screen, cv2.COLOR_RGB2BGR)
         screen_scaled = cv2.resize(screen_bgr, (w_scaled, h_scaled), interpolation=cv2.INTER_NEAREST)
@@ -227,11 +254,14 @@ def record_gameplay(
             current_episode += 1
             episode_score = 0.0
             obs, info = env.reset(seed=seed + current_episode)
+            step_in_episode = 0
+            stuck_counter = 0
+            last_lives = env.unwrapped.ale.lives() if hasattr(env.unwrapped, "ale") else 5
             
         # Logging heartbeat every 30 seconds
         if frames_written % (30 * fps) < frames_per_agent_step:
             pct = (frames_written / total_frames_target) * 100
-            print(f"--> Recording Progress: {pct:5.1f}% | Time: {current_sec:5.1f}s / {duration_seconds}s | Current Score: {episode_score:.0f}")
+            print(f"--> Recording Progress: {pct:5.1f}% | Time: {current_sec:5.1f}s / {duration_seconds}s | Current Score: {episode_score:.0f} | High: {high_score:.0f}")
             
     writer.release()
     env.close()
