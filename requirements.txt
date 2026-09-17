@@ -4,7 +4,7 @@ pillow
 opencv-python
 torch
 torchvision
-timm
+timm  # required by both venv_train (world_on_rails CARLA encoder) and venv_carla (bench2drive_agent.py loads the same encoder)
 gymnasium
 tensorboard
 mlflow
