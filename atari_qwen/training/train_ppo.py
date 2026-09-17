@@ -416,7 +416,8 @@ def train(config: AtariConfig):
                 torch.save({
                     "global_step": global_step,
                     "model_state_dict": model.state_dict(),
-                    "eval_mean": eval_mean
+                    "eval_mean": eval_mean,
+                    "config": config
                 }, best_path)
                 print(f"✓ Saved new best model: {best_path} (Return: {best_eval_return:.2f})\n")
 

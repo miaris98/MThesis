@@ -2,7 +2,7 @@
 import argparse
 import sys
 from pathlib import Path
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 import numpy as np
 import torch
 
@@ -189,11 +189,27 @@ if __name__ == "__main__":
     parser.add_argument("--env-id", type=str, default=None, help="Atari environment ID (defaults to config)")
     parser.add_argument("--num-episodes", type=int, default=30, help="Number of evaluation episodes")
     parser.add_argument("--stochastic", action="store_true", help="Sample actions instead of argmax")
+    parser.add_argument("--record-video", action="store_true", help="Record gameplay video after evaluation")
+    parser.add_argument("--video-duration", type=int, default=180, help="Duration of video in seconds (default 180s = 3 mins)")
+    parser.add_argument("--video-path", type=str, default="results/atari_qwen/gameplay_3min.mp4", help="Output path for gameplay video")
+    parser.add_argument("--video-fps", type=int, default=30, help="FPS for recorded video")
     args = parser.parse_args()
 
-    evaluate_checkpoint(
+    results = evaluate_checkpoint(
         checkpoint_path=args.checkpoint,
         env_id=args.env_id,
         num_episodes=args.num_episodes,
         deterministic=not args.stochastic
     )
+
+    if args.record_video:
+        from atari_qwen.eval.record_gameplay import record_gameplay
+        record_gameplay(
+            checkpoint_path=args.checkpoint,
+            env_id=args.env_id or "BreakoutNoFrameskip-v4",
+            duration_seconds=args.video_duration,
+            fps=args.video_fps,
+            output_path=args.video_path,
+            deterministic=not args.stochastic
+        )
+
