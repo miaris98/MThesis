@@ -1,6 +1,7 @@
 """Record high-definition Atari gameplay video with professional HUD overlay."""
 import argparse
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -156,8 +157,9 @@ def record_gameplay(
     total_frames_target = duration_seconds * fps
     frames_per_agent_step = max(1, fps // 15)  # 4-skip at 60Hz is 15Hz agent decisions -> 2 frames per step @ 30fps
     
+    raw_path = str(output_path).replace(".mp4", "_raw.mp4")
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    writer = cv2.VideoWriter(str(output_path), fourcc, float(fps), (video_w, video_h))
+    writer = cv2.VideoWriter(raw_path, fourcc, float(fps), (video_w, video_h))
     
     frames_written = 0
     current_episode = 1
@@ -234,15 +236,42 @@ def record_gameplay(
     writer.release()
     env.close()
     
+    # Transcode to web-compatible H.264 format via ffmpeg (standard in CARLA & RL pipelines)
+    final_path = str(output_path)
+    if os.path.exists(raw_path):
+        print("--> Converting raw video to web-compatible H.264 (AVC) MP4 format via ffmpeg...")
+        try:
+            cmd = [
+                "ffmpeg", "-y", "-i", raw_path,
+                "-vcodec", "libx264",
+                "-crf", "23",
+                "-preset", "veryfast",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "faststart",
+                final_path
+            ]
+            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=300)
+            if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
+                os.remove(raw_path)
+                print(f"✓ Successfully finalized H.264 MP4: {final_path}")
+            else:
+                print(f"--> ffmpeg note: {res.stderr}")
+                if not os.path.exists(final_path):
+                    os.rename(raw_path, final_path)
+        except Exception as e:
+            print(f"--> Notice: ffmpeg H.264 conversion note: {e}")
+            if not os.path.exists(final_path):
+                os.rename(raw_path, final_path)
+                
     elapsed = time.time() - start_wall_time
-    file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
+    file_size_mb = os.path.getsize(final_path) / (1024 * 1024) if os.path.exists(final_path) else 0.0
     print(f"\n========================================================")
     print(f"--> Video Recording Successfully Completed!")
-    print(f"--> Output: {output_path} ({file_size_mb:.2f} MB)")
+    print(f"--> Output (H.264): {final_path} ({file_size_mb:.2f} MB)")
     print(f"--> Total Frames Written: {frames_written} @ {fps} fps ({frames_written/fps:.1f}s)")
     print(f"--> Total Elapsed Real Time: {elapsed:.1f}s")
     print(f"========================================================\n")
-    return str(output_path)
+    return final_path
 
 
 if __name__ == "__main__":
