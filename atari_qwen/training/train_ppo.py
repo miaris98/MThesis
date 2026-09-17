@@ -15,7 +15,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.tensorboard import SummaryWriter
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except Exception:
+    class SummaryWriter:
+        def __init__(self, *args, **kwargs): pass
+        def add_scalar(self, *args, **kwargs): pass
+        def close(self): pass
 
 from atari_qwen.config.atari_config import AtariConfig, get_config
 from atari_qwen.envs.atari_wrappers import make_vector_atari_envs, make_atari_env
