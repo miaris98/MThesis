@@ -24,6 +24,41 @@ from torch.utils.data import Dataset
 from src.config.camera import preprocess_rgb
 
 
+def _camera_offset_matrix(translation_y: float, rotation_yaw_deg: float) -> np.ndarray:
+    """4x4 rigid transform mapping a point given in the *augmented* camera's own local
+    frame into the *true* ego's local frame - the same lateral+yaw offset
+    DataAgent.augment_camera (carla_garage/team_code/data_agent.py) applies when it mounts
+    the second camera that renders rgb_augmented/. translation_y is meters along the
+    ego's right axis, rotation_yaw_deg is degrees about the ego's up axis - both are
+    recorded per-frame as measurements['augmentation_translation']/['augmentation_rotation'].
+    Its inverse (a plain transpose+negate for a rigid transform) reprojects a point
+    recorded in the true frame - e.g. an already-computed waypoint or route point - into
+    what the augmented camera would have seen, which is the corrective label recovery
+    augmentation needs. See struggle-solutions.md S-020 for why the label cannot simply be
+    recomputed without this: the image really is a different render, so the target must be
+    re-expressed in that render's own frame, not left as the on-route target.
+    """
+    theta = np.radians(rotation_yaw_deg)
+    c, s = np.cos(theta), np.sin(theta)
+    m = np.eye(4)
+    m[0, 0] = c
+    m[0, 1] = -s
+    m[1, 0] = s
+    m[1, 1] = c
+    m[1, 3] = translation_y
+    return m
+
+
+def _reproject_points(points_xy, offset_matrix_inv: np.ndarray) -> list:
+    """Applies a rigid local-frame transform to a list of [x, y] points (z=0 assumed -
+    waypoints and route points are both stored as ground-plane offsets, never full poses)."""
+    out = []
+    for x, y in points_xy:
+        p = offset_matrix_inv @ np.array([x, y, 0.0, 1.0])
+        out.append([float(p[0]), float(p[1])])
+    return out
+
+
 def feature_cache_path(rgb_path: str, pixel_tag: str, feature_cache_tag: str) -> str:
     """Sidecar path for one frame's cached frozen-backbone output.
 
@@ -56,7 +91,8 @@ class WorldOnRailsDataset(Dataset):
         crop_bottom_frac: float = 0.0,
         route_overlay: bool = False,
         overlay_kwargs: Optional[Dict] = None,
-        feature_cache_tag: Optional[str] = None
+        feature_cache_tag: Optional[str] = None,
+        use_augmented_camera: bool = False
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -101,6 +137,16 @@ class WorldOnRailsDataset(Dataset):
         # would mean some frames in a batch carry "vision_features" and others carry "rgb",
         # which the default collate can't merge into one batch key.
         self.feature_cache_tag = feature_cache_tag
+        # Recovery-data augmentation (struggle-solutions.md S-020/S-021's follow-up): PDM-Lite's
+        # DataAgent renders a second camera per frame at a random per-route lateral+yaw offset
+        # (measurements' augmentation_translation/augmentation_rotation), saved as
+        # rgb_augmented/. Behaviour cloning otherwise never sees an off-center state, since the
+        # expert's own trajectory is centered by construction - closed-loop evaluation showed
+        # this as outside_route_lanes + vehicle_blocked with no recovery (challenges_03 3.15).
+        # Train-only: mixing recovery views into validation would make the held-out metric
+        # measure something other than on-route driving, and stop it being comparable across
+        # runs that don't use this flag.
+        self.use_augmented_camera = bool(use_augmented_camera) and is_train
 
         self.samples = []
         if synthetic_samples > 0:
@@ -171,6 +217,13 @@ class WorldOnRailsDataset(Dataset):
         of the next `pred_len` frames, transformed into the current frame's
         coordinate system (same approach as PlanT's dataset.py). No Q-values are
         available here.
+
+        When self.use_augmented_camera is set, each frame that has a corresponding
+        rgb_augmented/ render also contributes a second sample: the same future
+        trajectory, re-expressed in the augmented camera's own (laterally/yaw offset)
+        frame instead of the true ego frame - a corrective "how to get back onto the
+        route" target, matched to an image that actually shows the off-center view.
+        See _camera_offset_matrix and struggle-solutions.md S-020.
         """
         meas_files = sorted(glob.glob(os.path.join(measurements_dir, "*.json.gz")))
         rgb_dir = os.path.join(route_dir, "rgb")
@@ -194,6 +247,13 @@ class WorldOnRailsDataset(Dataset):
                     # it, so `speed` lags the decision while `target_speed` is the decision.
                     # Falling back to the measured speed keeps older dumps loadable.
                     "target_speed": float(meas.get("target_speed", meas.get("speed", 0.0))),
+                    # Present on PDM-Lite DataAgent dumps that ship rgb_augmented/ (confirmed
+                    # against the released autonomousvision/PDM_Lite_Carla_LB2 archives - see
+                    # struggle-solutions.md S-020); absent, and harmlessly defaulted to no
+                    # offset, on the "wor" native format and any dump collected without
+                    # --augment.
+                    "augmentation_translation": float(meas.get("augmentation_translation", 0.0)),
+                    "augmentation_rotation": float(meas.get("augmentation_rotation", 0.0)),
                 }
             except Exception:
                 parsed[i] = None
@@ -226,6 +286,33 @@ class WorldOnRailsDataset(Dataset):
                 "target_speed": cur["target_speed"],
                 "waypoints": waypoints
             })
+
+            # Recovery-augmentation sample: a second, genuinely re-rendered camera at this
+            # same instant, offset laterally/in yaw from the true ego pose (see
+            # _camera_offset_matrix's docstring and S-020). Only emitted where the frame
+            # actually exists - DataAgent only renders it "at the beginning of the route" per
+            # its own comment, so coverage is partial and checked per-frame, not assumed.
+            if self.use_augmented_camera:
+                aug_rgb_path = os.path.join(route_dir, "rgb_augmented", f"{frame_id}.jpg")
+                if not os.path.exists(aug_rgb_path):
+                    aug_rgb_path = os.path.join(route_dir, "rgb_augmented", f"{frame_id}.png")
+                if os.path.exists(aug_rgb_path):
+                    offset = _camera_offset_matrix(
+                        cur.get("augmentation_translation", 0.0),
+                        cur.get("augmentation_rotation", 0.0))
+                    offset_inv = np.linalg.inv(offset)
+                    aug_waypoints = _reproject_points(waypoints, offset_inv)
+                    aug_route = _reproject_points(cur["route"], offset_inv)
+                    self.samples.append({
+                        "format": "pdm_lite",
+                        "rgb_path": aug_rgb_path,
+                        "speed": cur["speed"],
+                        "command": cur["command"],
+                        "route": aug_route,
+                        "target_speed": cur["target_speed"],
+                        "waypoints": aug_waypoints,
+                        "is_recovery_augmented": True
+                    })
 
     def __len__(self) -> int:
         return len(self.samples)

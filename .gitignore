@@ -21,6 +21,11 @@ runs/
 results/
 weights/wor_nc.pth
 closed_loop_videos/
+
+# Raw eval logs and checkpoint JSONs staged locally before moving to E:\MThesis_EXP -
+# same "never commit experiment output" reasoning as above, just pulled from a remote
+# box instead of produced locally.
+bench2drive_results_backup/
 # Added by code-review-graph
 .code-review-graph/
 # graphify knowledge-graph output (regenerable via /graphify --update)

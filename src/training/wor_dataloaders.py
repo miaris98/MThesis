@@ -56,7 +56,8 @@ def create_wor_dataloader(
     img_size: Tuple[int, int] = (256, 256),
     crop_bottom_frac: float = 0.0,
     route_overlay: bool = False,
-    overlay_kwargs: Optional[Dict] = None
+    overlay_kwargs: Optional[Dict] = None,
+    use_augmented_camera: bool = False
 ) -> DataLoader:
     """Creates a DataLoader for World on Rails training/validation."""
     dataset = WorldOnRailsDataset(
@@ -68,7 +69,8 @@ def create_wor_dataloader(
         img_size=img_size,
         crop_bottom_frac=crop_bottom_frac,
         route_overlay=route_overlay,
-        overlay_kwargs=overlay_kwargs
+        overlay_kwargs=overlay_kwargs,
+        use_augmented_camera=use_augmented_camera
     )
     return _wrap_loader(dataset, batch_size, num_workers, is_train)
 
@@ -144,7 +146,8 @@ def create_wor_train_val_dataloaders(
     crop_bottom_frac: float = 0.0,
     route_overlay: bool = False,
     overlay_kwargs: Optional[Dict] = None,
-    feature_cache_tag: Optional[str] = None
+    feature_cache_tag: Optional[str] = None,
+    use_augmented_camera: bool = False
 ) -> Tuple[DataLoader, Optional[DataLoader]]:
     """Creates the training loader and, when asked for, a held-out validation loader.
 
@@ -164,16 +167,19 @@ def create_wor_train_val_dataloaders(
         cache_decoded=cache_decoded, route_points=route_points,
         img_size=img_size, crop_bottom_frac=crop_bottom_frac,
         route_overlay=route_overlay, overlay_kwargs=overlay_kwargs,
-        feature_cache_tag=feature_cache_tag
+        feature_cache_tag=feature_cache_tag, use_augmented_camera=use_augmented_camera
     )
 
     if val_data_dir:
+        # use_augmented_camera is passed through but is a no-op here: WorldOnRailsDataset
+        # gates it on is_train, and validation should keep measuring on-route driving so the
+        # held-out metric stays comparable to runs that don't use this flag (see S-020).
         val_ds = WorldOnRailsDataset(
             data_dir=val_data_dir, is_train=False, synthetic_samples=0,
             cache_decoded=cache_decoded, route_points=route_points,
             img_size=img_size, crop_bottom_frac=crop_bottom_frac,
             route_overlay=route_overlay, overlay_kwargs=overlay_kwargs,
-            feature_cache_tag=feature_cache_tag
+            feature_cache_tag=feature_cache_tag, use_augmented_camera=use_augmented_camera
         )
         return (_wrap_loader(train_ds, batch_size, num_workers, True, seed),
                 _wrap_loader(val_ds, batch_size, num_workers, False, seed))
