@@ -54,13 +54,19 @@ class GTrXLBlock(nn.Module):
         num_heads: int = 4,
         ffn_dim: int = 1024,
         dropout: float = 0.0,
-        bg_init: float = 2.0
+        bg_init: float = 2.0,
+        # Isolation test per struggle-solutions S-036/S-037: with GRU gating, even bg_init=0.0
+        # still showed the actor's output fully input-invariant at 15k-60k steps. When False,
+        # skip goes back to plain residual addition (x = x + f(x)) instead of learned gating, to
+        # test whether the gating mechanism itself (rather than raw step budget) is the bottleneck.
+        use_gru_gating: bool = True,
     ):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim ** -0.5
+        self.use_gru_gating = use_gru_gating
 
         # Attention sub-layer
         self.norm1 = nn.LayerNorm(dim)
@@ -69,14 +75,16 @@ class GTrXLBlock(nn.Module):
         self.v_proj = nn.Linear(dim, dim, bias=False)
         self.out_proj = nn.Linear(dim, dim, bias=False)
         self.dropout = nn.Dropout(dropout)
-        self.gate1 = GRUGating(dim, bg_init=bg_init)
+        if use_gru_gating:
+            self.gate1 = GRUGating(dim, bg_init=bg_init)
 
         # Feed-forward sub-layer (SwiGLU)
         self.norm2 = nn.LayerNorm(dim)
         self.w_gate = nn.Linear(dim, ffn_dim, bias=False)
         self.w_up = nn.Linear(dim, ffn_dim, bias=False)
         self.w_down = nn.Linear(ffn_dim, dim, bias=False)
-        self.gate2 = GRUGating(dim, bg_init=bg_init)
+        if use_gru_gating:
+            self.gate2 = GRUGating(dim, bg_init=bg_init)
 
     def _attention(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
@@ -103,11 +111,11 @@ class GTrXLBlock(nn.Module):
         return self.w_down(F.silu(self.w_gate(x)) * self.w_up(x))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Pre-LN + Attention + GRU Gating
+        # Pre-LN + Attention + (GRU Gating or plain residual)
         attn_out = self._attention(self.norm1(x))
-        x = self.gate1(x, attn_out)
+        x = self.gate1(x, attn_out) if self.use_gru_gating else x + attn_out
 
-        # Pre-LN + FFN + GRU Gating
+        # Pre-LN + FFN + (GRU Gating or plain residual)
         ffn_out = self._ffn(self.norm2(x))
-        x = self.gate2(x, ffn_out)
+        x = self.gate2(x, ffn_out) if self.use_gru_gating else x + ffn_out
         return x

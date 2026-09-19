@@ -26,7 +26,7 @@ Read the user's message after `to-claude` and extract:
 Pull **only** the following — do NOT include the full conversation history:
 - The error or symptom (exact traceback if present).
 - The relevant file snippet (use `view_file` to read ≤60 lines around the error).
-- **Knowledge Graph Context (Memory)**: Query the graphify knowledge graph using `& "C:\Users\miari\anaconda3\envs\graphtools\python.exe" -m graphify explain "<symbol>"` or `query "<problem>"` to pull the exact connected nodes/dependencies.
+- **Knowledge Graph Context (Memory)**: Query the graphify knowledge graph using `& "C:\Users\miari\anaconda3\envs\graphtools\python.exe" -m graphify explain "<symbol>"` or `query "<problem>"`. If the question involves historical experiments, past checkpoints, or Bench2Drive scores, also check or query the external graph at `E:\MThesis_EXP\graphify-out\graph.json` (`--graph "E:\MThesis_EXP\graphify-out\graph.json"`) or `E:\MThesis_EXP\graphify-out\wiki\index.md`.
 - The relevant section of `struggle-solutions.md` if the problem matches a known struggle ID.
 - The active training command (if training-related).
 - Key environment facts: Python env (`carla_py38`), GPU count, CARLA version, Vast.ai.
@@ -41,6 +41,7 @@ Output the prompt as a clean markdown code block the user can copy:
 =========================================================
 Project: MThesis — Autonomous Driving PPO/WoR on CARLA & Atari Qwen RL
 Repo: github.com/miaris98/MThesis
+RULES: Mandatory MLflow tracking + two-stage sync (E:\MThesis_EXP first -> Hugging Face second via .env). Maximize compute with safe OOM headroom; parallel execution by default.
 
 PROBLEM:
 <one-paragraph summary of the exact problem>

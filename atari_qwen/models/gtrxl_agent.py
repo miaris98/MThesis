@@ -29,12 +29,23 @@ class ImpalaGTrXLAgent(nn.Module):
         ffn_dim: int = 1024,
         dropout: float = 0.0,
         unroll_steps: int = 5,
-        bg_init: float = 2.0
+        # 2.0 (~88% skip per gate, the "Stabilizing Transformers for RL" default) was measured
+        # in struggle-solutions S-035 to still be frozen at init after 15k-60k training steps --
+        # 3-5 orders of magnitude short of the huge step budgets that default was designed for.
+        # 0.0 (~50% skip) lets visual information reach the policy/value heads much sooner.
+        bg_init: float = 0.0,
+        # Isolation test per struggle-solutions S-036/S-037: False replaces every block's GRU
+        # gating with plain residual addition, to test whether the gating mechanism itself
+        # (rather than raw step budget) is why the actor's output stays input-invariant.
+        use_gru_gating: bool = True,
+        # True reproduces the pre-S-038 actor init (gain=0.01 on EVERY actor_head layer) for A/B.
+        legacy_actor_init: bool = False,
     ):
         super().__init__()
         self.action_dim = action_dim
         self.embed_dim = embed_dim
         self.unroll_steps = unroll_steps
+        self.legacy_actor_init = legacy_actor_init
 
         # 1. IMPALA-CNN Visual Tokenizer (84x84 -> 121 spatial tokens of dim embed_dim)
         self.visual_encoder = ImpalaCNNEncoder(
@@ -56,7 +67,8 @@ class ImpalaGTrXLAgent(nn.Module):
                 num_heads=num_heads,
                 ffn_dim=ffn_dim,
                 dropout=dropout,
-                bg_init=bg_init
+                bg_init=bg_init,
+                use_gru_gating=use_gru_gating
             )
             for _ in range(depth)
         ])
@@ -73,6 +85,7 @@ class ImpalaGTrXLAgent(nn.Module):
             nn.GELU(),
             nn.Linear(256, 1)
         )
+        self._actor_linears = [m for m in self.actor_head if isinstance(m, nn.Linear)]
 
         # 5. EfficientZero v2 Multi-Step Branch Predictor
         self.predictor = EfficientZeroV2Predictor(
@@ -88,16 +101,26 @@ class ImpalaGTrXLAgent(nn.Module):
         nn.init.trunc_normal_(self.state_token, std=0.02)
         nn.init.trunc_normal_(self.policy_token, std=0.02)
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
-        for m in self.actor_head.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.orthogonal_(m.weight, gain=0.01)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-        for m in self.critic_head.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.orthogonal_(m.weight, gain=1.0)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
+
+        # The small 0.01 gain belongs on the OUTPUT layer only (near-uniform initial policy);
+        # applying it to hidden layers too compounds to ~1e-4 attenuation, which measurably
+        # crushed the actor's gradient into the shared trunk to ~65x below the critic's and
+        # left the logits input-invariant (struggle-solutions S-038, experiment E1/E2).
+        if self.legacy_actor_init:
+            actor_gains = [0.01] * len(self._actor_linears)
+        else:
+            actor_gains = [2.0 ** 0.5] * (len(self._actor_linears) - 1) + [0.01]
+        for m, gain in zip(self._actor_linears, actor_gains):
+            nn.init.orthogonal_(m.weight, gain=gain)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+        critic_linears = [m for m in self.critic_head.modules() if isinstance(m, nn.Linear)]
+        critic_gains = [2.0 ** 0.5] * (len(critic_linears) - 1) + [1.0]
+        for m, gain in zip(critic_linears, critic_gains):
+            nn.init.orthogonal_(m.weight, gain=gain)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
 
     def encode_observation(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """

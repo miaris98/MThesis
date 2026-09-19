@@ -176,7 +176,9 @@ def train_gtrxl_ez2(
         num_heads=4,
         ffn_dim=1024,
         unroll_steps=unroll_steps,
-        bg_init=2.0
+        # See struggle-solutions S-035: bg_init=2.0 was still frozen at init after 15k-60k steps
+        # in both the turbo trainers, making the actor's output input-invariant. 0.0 opens sooner.
+        bg_init=0.0
     ).to(device)
     
     optimizer = optim.AdamW(agent.parameters(), lr=learning_rate, weight_decay=1e-4)
