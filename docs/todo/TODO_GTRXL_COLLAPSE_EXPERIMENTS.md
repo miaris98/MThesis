@@ -15,10 +15,18 @@ broken encoder, not a generally good recipe, and become harmful once the actual 
 **Conclusion**: the correct go-forward recipe is `cnn_kaiming_init=True` alone at original
 hyperparameters, not the E10 stack. Most of E5-E51's hyperparameter tuning below was chasing
 downstream symptoms of this one missing init call. See struggle-solutions S-043 for full
-results tables and the closing interpretation. **Open follow-up**: S043a's trajectory is
-noisier than I0/I1b's clean climb (late start, peak-then-partial-decay) -- a longer/cleaner
-confirmation run (ideally with GRU gating and EZ2 aux losses re-enabled) is the recommended
-next step before moving on to Atari 100k Benchmark harness work.
+results tables and the closing interpretation.
+
+**CONFIRMED IN FULL PRODUCTION CONFIG (S044a, 2026-09-19)**: re-ran the fix with GRU gating
+AND EZ2 auxiliary losses re-enabled (the actual intended architecture, not the isolated S043
+testbed) -- `probe_logit_rel_std=1.016`, scores stabilizing around `11.0` with a peak of `14.0`
+across 10 checkpoints, no collapse. This is a cleaner, more stable trajectory than S043a's
+isolated-config run. **The investigation is closed** -- no further confirmation needed before
+moving to Atari 100k Benchmark harness work. A companion longer-horizon run (`S044b`, 600k
+steps, isolated config) was launched but not completed before the vast.ai box was destroyed
+mid-run (2026-09-19); low priority to re-run since S044a already confirms stability in the
+real config. All experiment results/logs archived to
+`E:\MThesis_EXP\atari_gtrxl_collapse_investigation_20260919\` before teardown.
 
 **IMPORTANT METHODOLOGICAL CAVEAT (S-042, 2026-09-19)**: the incremental-integration test found
 that even the PROVEN `QwenAtariActorCritic` + `train_ppo.py` baseline (S-029's genuine 0.00->17.00

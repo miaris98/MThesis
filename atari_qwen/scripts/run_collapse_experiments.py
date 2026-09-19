@@ -225,6 +225,21 @@ EXPERIMENTS = {
     "S043b_kaiming_plus_e10_300k": dict(BASE, total_steps=300000, eval_interval_updates=15,
                                          detach_critic=True, ent_coef=0.0, learning_rate=1e-3,
                                          cnn_kaiming_init=True),
+
+    # S044a: confirmation of S043a at the REAL production config -- GRU gating re-enabled and
+    # EZ2 auxiliary losses restored to their defaults (both were zeroed/off in BASE purely to
+    # isolate the encoder-init effect for S043a/b). Tests whether the fix alone is sufficient
+    # once the rest of the intended architecture is switched back on.
+    "S044a_kaiming_full_arch_300k": dict(BASE, total_steps=300000, eval_interval_updates=15,
+                                          cnn_kaiming_init=True, use_gru_gating=True,
+                                          reward_loss_weight=1.0, ez_value_loss_weight=0.25,
+                                          consistency_loss_weight=0.5),
+
+    # S044b: same isolated config as S043a (gating off, aux losses off) but doubled to 600k
+    # steps -- tests whether S043a's post-peak oscillation (18->8->4->7->9) smooths into a
+    # clean climb with more steps, the way I0/I1b did at 300k on the simpler testbed.
+    "S044b_kaiming_alone_600k": dict(BASE, total_steps=600000, eval_interval_updates=15,
+                                      cnn_kaiming_init=True),
 }
 
 
