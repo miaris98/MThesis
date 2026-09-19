@@ -80,6 +80,26 @@ class FireResetEnv(gym.Wrapper):
         return obs, info
 
 
+class StickyActionEnv(gym.Wrapper):
+    """With probability p, repeat the previous action instead of the requested one (Machado et
+    al. 2018 sticky actions) -- breaks the deterministic-emulator looping a constant-action
+    policy exploits to reproduce the same score every eval (TODO_GTRXL_COLLAPSE E36)."""
+    def __init__(self, env: gym.Env, p: float = 0.25):
+        super().__init__(env)
+        self.p = p
+        self._last_action = 0
+
+    def reset(self, **kwargs):
+        self._last_action = 0
+        return self.env.reset(**kwargs)
+
+    def step(self, action):
+        if np.random.random() < self.p:
+            action = self._last_action
+        self._last_action = action
+        return self.env.step(action)
+
+
 class EpisodicLifeEnv(gym.Wrapper):
     """Make end-of-life == end-of-episode, but only reset on true game over."""
     def __init__(self, env: gym.Env):

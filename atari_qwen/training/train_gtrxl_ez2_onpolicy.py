@@ -145,6 +145,42 @@ def train_onpolicy_gtrxl_ez2(
     # E21: near-zero raw advantages divided by a tiny std can itself inject high-variance noise
     # into the policy gradient. False skips the (adv - mean) / std normalization step.
     normalize_advantages: bool = True,
+    # E38: floor the std in (adv - mean) / std at this value instead of the raw 1e-8 epsilon.
+    # With near-zero sparse-reward advantages, std -> 0 makes the epsilon-guarded division blow
+    # up into high-variance noise; clamping the denominator caps how hard that can amplify.
+    adv_norm_std_floor: float = 1e-8,
+    # E35/E36: passed straight through to evaluate_agent (train_gtrxl_ez2_turbo.py).
+    eval_temperature: float = 0.0,
+    eval_sticky_action_p: float = 0.0,
+    # E41/E47/E26: passed straight through to ImpalaGTrXLAgent's constructor.
+    cnn_orthogonal_init: bool = False,
+    single_layer_actor_head: bool = False,
+    norm_policy_repr: bool = True,
+    # S-043: DECISIVE FIX -- see ImpalaGTrXLAgent's cnn_kaiming_init docstring.
+    cnn_kaiming_init: bool = False,
+    # E31: EZ2 aux loss weights (reward_loss_weight, ez_value_loss_weight,
+    # consistency_loss_weight) are scaled by 0.0 until this many env steps have elapsed, then
+    # ramp to their full value over the following aux_warmup_steps -- lets the policy/value
+    # functions establish basic signal before the auxiliary predictive losses (which every prior
+    # run showed pulling the shared trunk toward representation collapse) turn on.
+    aux_warmup_steps: int = 0,
+    # E37: separate learning rate for actor_head params vs everything else (trunk + critic +
+    # predictor), inverting the usual ratio so the actor isn't outpaced by the critic pulling on
+    # the shared trunk. None means "use learning_rate for everything" (previous behavior).
+    actor_lr: float = None,
+    # E33: small per-alive-frame reward shaping bonus added to the clipped env reward, giving a
+    # dense gradient signal before the sparse brick-break reward is ever hit. 0.0 disables it.
+    living_reward: float = 0.0,
+    # PPO-mechanics audit (S-040 follow-up): train_ppo.py (the S-029 run that genuinely climbed
+    # 0.00->17.00 with QwenAtariActorCritic) differs from this trainer in ways nothing in
+    # S-024-S-040 has isolated -- it anneals the LR (cosine by default) instead of holding it
+    # fixed, clips the value loss (PPO2-style) instead of plain MSE, and uses weight_decay=1e-2
+    # instead of 1e-4. None of these were suspects before because the investigation had been
+    # focused on the representation/architecture side; testing them now that E37 shows the
+    # representation itself can be fixed without unlocking eval-score improvement.
+    lr_schedule: str = "constant",  # "constant" (previous behavior), "cosine", "linear"
+    clip_vloss: bool = False,       # False reproduces previous (unclipped) behavior
+    weight_decay: float = 1e-4,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() and device_str == "auto" else device_str)
     run_name = f"gtrxl_ez2_onpolicy_{env_id}_{int(time.time())}"
@@ -179,12 +215,30 @@ def train_onpolicy_gtrxl_ez2(
         bg_init=0.0,
         use_gru_gating=use_gru_gating,
         legacy_actor_init=legacy_actor_init,
+        cnn_orthogonal_init=cnn_orthogonal_init,
+        cnn_kaiming_init=cnn_kaiming_init,
+        single_layer_actor_head=single_layer_actor_head,
+        norm_policy_repr=norm_policy_repr,
     ).to(device)
 
     if ent_coef_end is None:
         ent_coef_end = ent_coef
 
-    optimizer = optim.AdamW(agent.parameters(), lr=learning_rate, eps=1e-5, weight_decay=1e-4)
+    if actor_lr is not None:
+        actor_param_ids = {id(p) for p in agent.actor_head.parameters()}
+        actor_params = [p for p in agent.parameters() if id(p) in actor_param_ids]
+        other_params = [p for p in agent.parameters() if id(p) not in actor_param_ids]
+        optimizer = optim.AdamW(
+            [
+                {"params": actor_params, "lr": actor_lr, "base_lr": actor_lr},
+                {"params": other_params, "lr": learning_rate, "base_lr": learning_rate},
+            ],
+            eps=1e-5, weight_decay=weight_decay,
+        )
+    else:
+        optimizer = optim.AdamW(agent.parameters(), lr=learning_rate, eps=1e-5, weight_decay=weight_decay)
+        for pg in optimizer.param_groups:
+            pg["base_lr"] = learning_rate
     amp_dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
 
     batch_size = num_envs * num_steps
@@ -210,6 +264,16 @@ def train_onpolicy_gtrxl_ez2(
     print(f"--> Starting on-policy PPO+GAE+EZ2 training: {num_updates} updates ({total_steps:,} total steps)...")
 
     for update in range(1, num_updates + 1):
+        # PPO-mechanics audit: anneal LR per param group, same schedule as train_ppo.py's proven
+        # S-029 recipe. Every prior run in this investigation held LR fixed the whole time.
+        lr_frac = 1.0 - (update - 1.0) / num_updates
+        for pg in optimizer.param_groups:
+            if lr_schedule == "cosine":
+                pg["lr"] = pg["base_lr"] * 0.5 * (1.0 + np.cos(np.pi * (1.0 - lr_frac)))
+            elif lr_schedule == "linear":
+                pg["lr"] = lr_frac * pg["base_lr"]
+            # "constant": leave pg["lr"] at its current (base_lr) value.
+
         # ---------------- 1. Collect a temporally continuous on-policy rollout ----------------
         agent.eval()
         for step in range(num_steps):
@@ -235,7 +299,14 @@ def train_onpolicy_gtrxl_ez2(
             else:
                 next_obs_np, reward, done_np, infos = step_result
 
-            rewards_buffer[step] = torch.as_tensor(reward, dtype=torch.float32)
+            step_reward = torch.as_tensor(reward, dtype=torch.float32)
+            if living_reward != 0.0:
+                # E33: dense per-alive-frame bonus so there's gradient signal before the sparse
+                # brick-break reward is ever hit. Skipped on the terminal step of an episode so
+                # it can't be farmed by just staying alive without playing.
+                not_done = torch.as_tensor(1.0 - done_np.astype("float32"))
+                step_reward = step_reward + living_reward * not_done
+            rewards_buffer[step] = step_reward
             next_obs = torch.as_tensor(next_obs_np, device=device)
             next_done = torch.as_tensor(done_np, dtype=torch.float32, device=device)
 
@@ -298,9 +369,10 @@ def train_onpolicy_gtrxl_ez2(
                 mb_logprobs = b_logprobs[mb_inds].to(device)
                 mb_advantages = b_advantages[mb_inds].to(device)
                 mb_returns = b_returns[mb_inds].to(device)
+                mb_values = b_values[mb_inds].to(device)
 
                 if normalize_advantages:
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+                    mb_advantages = (mb_advantages - mb_advantages.mean()) / mb_advantages.std().clamp(min=adv_norm_std_floor)
 
                 with torch.amp.autocast(device_type="cuda", dtype=amp_dtype):
                     logits, value, latent_z = agent(mb_obs)
@@ -324,7 +396,13 @@ def train_onpolicy_gtrxl_ez2(
                         newvalue = agent.critic_head(latent_z.detach()).squeeze(-1)
                     else:
                         newvalue = value.squeeze(-1)
-                    v_loss = 0.5 * ((newvalue - mb_returns) ** 2).mean()
+                    if clip_vloss:
+                        v_loss_unclipped = (newvalue - mb_returns) ** 2
+                        v_clipped = mb_values + torch.clamp(newvalue - mb_values, -clip_coef, clip_coef)
+                        v_loss_clipped = (v_clipped - mb_returns) ** 2
+                        v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+                    else:
+                        v_loss = 0.5 * ((newvalue - mb_returns) ** 2).mean()
                     entropy_loss = entropy.mean()
 
                     reward_loss, unroll_value_loss, consistency_loss, coverage = _ez2_aux_losses(
@@ -332,13 +410,20 @@ def train_onpolicy_gtrxl_ez2(
                         t_idx, env_idx, latent_z, unroll_steps, num_steps, device,
                     )
 
+                    # E31: ramp the EZ2 aux loss weights linearly from 0 at step 0 to their full
+                    # value at aux_warmup_steps, instead of applying them at full strength from
+                    # step 1. Every prior run enabling these losses showed them pulling the
+                    # shared trunk toward representation collapse (S-036/S-038 E11); the idea is
+                    # to let the policy/value functions establish real signal first.
+                    aux_warmup_frac = 1.0 if aux_warmup_steps <= 0 else min(1.0, global_step / aux_warmup_steps)
+
                     total_loss = (
                         pg_loss
                         - ent_coef_now * entropy_loss
                         + vf_coef * v_loss
-                        + reward_loss_weight * reward_loss
-                        + ez_value_loss_weight * unroll_value_loss
-                        + consistency_loss_weight * consistency_loss
+                        + aux_warmup_frac * reward_loss_weight * reward_loss
+                        + aux_warmup_frac * ez_value_loss_weight * unroll_value_loss
+                        + aux_warmup_frac * consistency_loss_weight * consistency_loss
                     )
 
                 optimizer.zero_grad()
@@ -367,7 +452,10 @@ def train_onpolicy_gtrxl_ez2(
         writer.add_scalar("charts/SPS", sps, global_step)
 
         if update % eval_interval_updates == 0 or update == num_updates:
-            mean_eval, std_eval = evaluate_agent(agent, env_id, device, num_episodes=5)
+            mean_eval, std_eval = evaluate_agent(
+                agent, env_id, device, num_episodes=5,
+                eval_temperature=eval_temperature, sticky_action_p=eval_sticky_action_p,
+            )
             hns = compute_hns(mean_eval, env_id)
             print(f"\n[EVALUATION] Step {global_step:,} | Score: {mean_eval:.2f} +/- {std_eval:.2f} | HNS: {hns*100:.1f}%\n", flush=True)
             writer.add_scalar("eval/mean_score", mean_eval, global_step)

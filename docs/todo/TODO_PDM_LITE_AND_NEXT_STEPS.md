@@ -2,6 +2,8 @@
 
 Following completion of the active training runs (Atari Optuna 100k on Box 1 and Qwen-30M Augmented on Box 2), the following sequenced action plan unlocks the full potential of the PDM-Lite dataset and modern transformer policy techniques.
 
+> **Master Experiment Tracker**: For the complete 100-hypothesis experimental matrix covering dataset scaling, spatial perception, sequence modeling, multi-task losses, multimodal fusion, and closed-loop control, see [`TODO_CARLA_EXPERIMENTS.md`](file:///c:/Users/miari/Desktop/MThesis/docs/todo/TODO_CARLA_EXPERIMENTS.md).
+
 ---
 
 ## Phase 1: PDM-Lite Dataset Expansion (Box 2)

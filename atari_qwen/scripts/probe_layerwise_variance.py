@@ -60,7 +60,8 @@ def report(name: str, acts: torch.Tensor, rows: list):
     print(f"{name:<34} abs_std={abs_std:.6f}  scale={scale:.6f}  rel_std={rel_std:.6f}")
 
 
-def probe(ckpt_path: str, env_id: str, use_gru_gating: bool, random_init: bool):
+def probe(ckpt_path: str, env_id: str, use_gru_gating: bool, random_init: bool,
+          single_layer_actor_head: bool = False, norm_policy_repr: bool = True):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     batch, labels = build_inputs(env_id, device)
     action_dim = 4
@@ -69,6 +70,10 @@ def probe(ckpt_path: str, env_id: str, use_gru_gating: bool, random_init: bool):
         action_dim=action_dim, in_channels=4, embed_dim=256, depth=4,
         num_heads=4, ffn_dim=1024, unroll_steps=5, bg_init=0.0,
         use_gru_gating=use_gru_gating,
+        # Must match the checkpoint's architecture (E47/E26) or load_state_dict fails/silently
+        # mismatches shapes.
+        single_layer_actor_head=single_layer_actor_head,
+        norm_policy_repr=norm_policy_repr,
     ).to(device)
 
     if random_init:
@@ -155,7 +160,13 @@ if __name__ == "__main__":
     parser.add_argument("--no-gru-gating", action="store_true")
     parser.add_argument("--random-init", action="store_true",
                         help="Probe a fresh untrained network instead of a checkpoint (E2).")
+    parser.add_argument("--single-layer-actor-head", action="store_true",
+                        help="Match a checkpoint trained with single_layer_actor_head=True (E47).")
+    parser.add_argument("--no-norm-policy-repr", action="store_true",
+                        help="Match a checkpoint trained with norm_policy_repr=False (E26).")
     args = parser.parse_args()
     if not args.random_init and not args.ckpt:
         parser.error("--ckpt is required unless --random-init is given")
-    probe(args.ckpt, args.env_id, use_gru_gating=not args.no_gru_gating, random_init=args.random_init)
+    probe(args.ckpt, args.env_id, use_gru_gating=not args.no_gru_gating, random_init=args.random_init,
+          single_layer_actor_head=args.single_layer_actor_head,
+          norm_policy_repr=not args.no_norm_policy_repr)

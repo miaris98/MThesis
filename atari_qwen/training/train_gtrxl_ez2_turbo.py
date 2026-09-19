@@ -31,7 +31,7 @@ except Exception:
         def add_scalar(self, *args, **kwargs): pass
         def close(self): pass
 
-from atari_qwen.envs.atari_wrappers import make_atari_env, make_vector_atari_envs
+from atari_qwen.envs.atari_wrappers import make_atari_env, make_vector_atari_envs, StickyActionEnv
 from atari_qwen.models.gtrxl_agent import ImpalaGTrXLAgent
 from atari_qwen.eval.evaluate import compute_hns
 
@@ -111,10 +111,21 @@ def evaluate_agent(
     env_id: str,
     device: torch.device,
     num_episodes: int = 5,
-    use_lookahead: bool = False
+    use_lookahead: bool = False,
+    # E35: sample from softmax(logits / temperature) instead of deterministic argmax. Under
+    # argmax, a near-zero (~0.0002) logit gap between actions still locks in a 100%-constant
+    # action; temperature > 0 lets the eval score actually reflect the logit spread. 0 keeps
+    # the original deterministic-argmax behavior.
+    eval_temperature: float = 0.0,
+    # E36: with probability sticky_action_p, repeat the previous action rather than the
+    # requested one (Machado et al. sticky actions) -- breaks the deterministic-emulator
+    # looping a constant-action policy exploits to reproduce the same score every time.
+    sticky_action_p: float = 0.0,
 ) -> Tuple[float, float]:
     eval_env_fn = make_atari_env(env_id, seed=999, idx=0, noop_max=0, clip_reward=False, episodic_life=False)
     env = eval_env_fn()
+    if sticky_action_p > 0.0:
+        env = StickyActionEnv(env, p=sticky_action_p)
     agent.eval()
     scores = []
     action_counts: Dict[int, int] = {}
@@ -146,6 +157,10 @@ def evaluate_agent(
                     q_vals, _ = agent.evaluate_actions_lookahead(obs_t)
                     logits, _, _ = agent(obs_t)
                     action = torch.argmax(logits + 0.5 * q_vals, dim=-1).item()
+                elif eval_temperature > 0.0:
+                    logits, _, _ = agent(obs_t)
+                    probs = F.softmax(logits.float() / eval_temperature, dim=-1)
+                    action = torch.distributions.Categorical(probs=probs).sample().item()
                 else:
                     logits, _, _ = agent(obs_t)
                     action = torch.argmax(logits, dim=-1).item()

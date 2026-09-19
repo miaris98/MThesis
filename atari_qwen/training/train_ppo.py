@@ -209,7 +209,9 @@ def train(config: AtariConfig):
         encoder_type=config.encoder_type,
         patch_size=config.patch_size,
         dropout=config.dropout,
-        use_gradient_checkpointing=config.use_gradient_checkpointing
+        use_gradient_checkpointing=config.use_gradient_checkpointing,
+        block_type=getattr(config, "block_type", "qwen"),
+        impala_kaiming_init=getattr(config, "impala_kaiming_init", False),
     ).to(device)
 
     param_count = sum(p.numel() for p in model.parameters())

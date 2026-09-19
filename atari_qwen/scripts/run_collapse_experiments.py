@@ -99,6 +99,132 @@ EXPERIMENTS = {
     # itself inject high-variance noise into the policy gradient.
     "E21_e10_no_adv_norm": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=1e-3,
                                  normalize_advantages=False),
+
+    # ---- Round 3 (feasible subset): eval-harness and advantage-signal levers on top of E10 ----
+
+    # E35: sample eval actions from softmax(logits / temperature) instead of deterministic
+    # argmax -- under argmax a ~0.0002 logit gap still locks 100% into one action.
+    "E35_e10_eval_temp": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=1e-3,
+                               eval_temperature=1.0),
+
+    # E36: sticky actions (p=0.25) at eval time -- breaks deterministic-emulator looping that
+    # lets a constant-action policy reproduce the same score every eval.
+    "E36_e10_eval_sticky": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=1e-3,
+                                 eval_sticky_action_p=0.25),
+
+    # E38: floor the advantage-normalization std at 0.1 instead of the raw 1e-8 epsilon, so
+    # near-zero sparse-reward advantages can't blow up into high-variance noise.
+    "E38_e10_adv_std_floor": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=1e-3,
+                                   adv_norm_std_floor=0.1),
+
+    # E39a/b: GAE lambda sweep either side of the 0.95 default -- lower lambda should reduce
+    # variance in sparse-reward settings where long unrolls accumulate near-zero bootstrap error.
+    "E39a_e10_lambda080": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=1e-3,
+                                gae_lambda=0.80),
+    "E39b_e10_lambda099": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=1e-3,
+                                gae_lambda=0.99),
+
+    # ---- Round 3 batch 2: cheap architectural levers on top of E10 ----
+
+    # E26: skip the final trunk LayerNorm for policy_repr specifically (latent_z still normed).
+    "E26_e10_no_norm_policy_repr": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=1e-3,
+                                         norm_policy_repr=False),
+
+    # E41: orthogonal_(gain=sqrt(2)) init on the visual encoder instead of default Kaiming-uniform.
+    "E41_e10_cnn_orthogonal_init": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=1e-3,
+                                         cnn_orthogonal_init=True),
+
+    # E47: single Linear(embed_dim, action_dim) actor head instead of Linear-GELU-Linear.
+    "E47_e10_single_layer_actor": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=1e-3,
+                                        single_layer_actor_head=True),
+
+    # ---- Round 3 batch 3: aux-loss warmup, asymmetric LR, reward shaping on top of E10 ----
+
+    # E31: E10 + EZ2 aux losses back on (same weights as E11, which reverted the gain when
+    # applied at full strength from step 1), but ramped in linearly over the first 10k of this
+    # 15k-step run instead of applied at full strength immediately.
+    "E31_e10_aux_warmup": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=1e-3,
+                                reward_loss_weight=1.0, ez_value_loss_weight=0.25,
+                                consistency_loss_weight=0.5, aux_warmup_steps=10000),
+
+    # E37: asymmetric LR -- actor_head at E10's 1e-3, everything else (trunk/critic/predictor)
+    # at a lower 2e-4, inverting the usual ratio so the critic can't outpace the actor into the
+    # shared trunk the way S-038 found it doing under a single shared LR.
+    "E37_e10_asymmetric_lr": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=2e-4,
+                                   actor_lr=1e-3),
+
+    # E33: small living-reward bonus (+0.005/alive-frame) for dense gradient signal before the
+    # sparse brick-break reward is ever hit.
+    "E33_e10_living_reward": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=1e-3,
+                                   living_reward=0.005),
+
+    # ---- Round 3 follow-up: E37 (asymmetric LR) was the one result with a real structural
+    # signal -- policy_repr_rel_std=0.1218, ~4x every other Round 2/3 result including E10 itself
+    # -- but at only 0.0313 logit_rel_std (barely past E10, and eval score was still 0.0). Confirm
+    # it's not a seed fluke, then check whether the representation gain compounds with more steps.
+
+    # E37b: exact E37 config, different seed -- is the 4x policy_repr jump reproducible?
+    "E37b_asymmetric_lr_seed7": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=2e-4,
+                                      actor_lr=1e-3, seed=7),
+
+    # E37c: same recipe, 40k steps (E20 showed E10 doesn't keep climbing at 40k -- does E37?)
+    "E37c_asymmetric_lr_40k": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=2e-4,
+                                    actor_lr=1e-3, total_steps=40000, eval_interval_updates=4),
+
+    # E37d: push the asymmetry further -- actor_lr unchanged, drop the rest to 5e-5 (20x ratio
+    # instead of E37's 5x) to see if more decoupling helps or destabilizes training.
+    "E37d_asymmetric_lr_20x": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=5e-5,
+                                    actor_lr=1e-3),
+
+    # ---- E37d confirmation: seed-42 20x-ratio result (policy_repr_rel_std=0.27571, within 10%
+    # of the healthy 0.307 reference) is the best in the whole investigation but eval score was
+    # still mostly 0.0. Confirm it's not a lucky seed, then check if a real long-horizon budget
+    # (matching E11b's 100k steps) finally turns the representation gain into a climbing score.
+    "E37e_20x_seed7": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=5e-5,
+                            actor_lr=1e-3, seed=7),
+    "E37f_20x_100k": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=5e-5,
+                           actor_lr=1e-3, total_steps=100000, eval_interval_updates=10),
+
+    # ---- E37 ratio sweep: E37 (5x) got 0.1218 policy_repr, E37d/e (20x) got 0.28-0.31 at 15k
+    # but decayed to 0.23 by 100k with a flat 0.0 eval score throughout -- hypothesis is the 20x
+    # ratio starves the critic's value learning, degrading the GAE advantage signal. 10x is the
+    # midpoint: enough decoupling to keep most of the representation gain, less starvation.
+    "E37g_10x_15k": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=1e-4,
+                          actor_lr=1e-3),
+    "E37h_10x_40k": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=1e-4,
+                          actor_lr=1e-3, total_steps=40000, eval_interval_updates=4),
+
+    # ---- PPO-mechanics audit (S-040 follow-up): train_ppo.py (S-029's proven 0.00->17.00 run
+    # with QwenAtariActorCritic) anneals LR (cosine), clips the value loss (PPO2-style), and
+    # uses weight_decay=1e-2 -- none of which this trainer has ever done. Test each in isolation
+    # on E10, then combined with E37g's 10x asymmetric-LR recipe (best representation fix so far
+    # that doesn't show the 20x ratio's decay-at-scale problem).
+
+    "Epp1_e10_lr_cosine": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=1e-3,
+                                lr_schedule="cosine"),
+    "Epp2_e10_clip_vloss": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=1e-3,
+                                 clip_vloss=True),
+    "Epp3_e10_weight_decay": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=1e-3,
+                                   weight_decay=1e-2),
+    "Epp4_e37g10x_all_ppo_fixes": dict(BASE, detach_critic=True, ent_coef=0.0, learning_rate=1e-4,
+                                        actor_lr=1e-3, lr_schedule="cosine", clip_vloss=True,
+                                        weight_decay=1e-2),
+
+    # ---- S-043 DECISIVE TEST: the incremental-integration testbed (I1 vs I1b) proved that
+    # ImpalaCNNEncoder's missing weight init alone reproduces the whole-investigation 0/11
+    # collapse pattern in an otherwise-proven pipeline, and NatureCNNEncoder's own
+    # kaiming_normal_ scheme fully recovers a clean 0->17 climb. Both at 300k steps (S-029's
+    # real budget) on the ACTUAL ImpalaGTrXLAgent + on-policy trainer used throughout S-024-S-042.
+
+    # S043a: the fix ALONE on the S-037 simplified baseline (no gating, no EZ2 aux losses, no
+    # E5-E38 compensating fixes) -- tests whether this one fix is sufficient by itself.
+    "S043a_kaiming_alone_300k": dict(BASE, total_steps=300000, eval_interval_updates=15,
+                                      cnn_kaiming_init=True),
+
+    # S043b: the fix combined with E10's full recipe (best known GTrXL result before this).
+    "S043b_kaiming_plus_e10_300k": dict(BASE, total_steps=300000, eval_interval_updates=15,
+                                         detach_critic=True, ent_coef=0.0, learning_rate=1e-3,
+                                         cnn_kaiming_init=True),
 }
 
 
@@ -132,6 +258,10 @@ def probe_checkpoint(name: str, kwargs: dict, out_root: Path):
     ]
     if not kwargs.get("use_gru_gating", True):
         cmd.append("--no-gru-gating")
+    if kwargs.get("single_layer_actor_head", False):
+        cmd.append("--single-layer-actor-head")
+    if not kwargs.get("norm_policy_repr", True):
+        cmd.append("--no-norm-policy-repr")
     probe_path = out_root / f"{name}.probe.log"
     with open(probe_path, "w") as fh:
         subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT)

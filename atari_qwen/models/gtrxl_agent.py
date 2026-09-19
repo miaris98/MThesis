@@ -40,18 +40,38 @@ class ImpalaGTrXLAgent(nn.Module):
         use_gru_gating: bool = True,
         # True reproduces the pre-S-038 actor init (gain=0.01 on EVERY actor_head layer) for A/B.
         legacy_actor_init: bool = False,
+        # E41: orthogonal init on the visual encoder's Conv2d/Linear layers instead of the
+        # default PyTorch Kaiming-uniform (ImpalaCNNEncoder has no explicit init at all).
+        cnn_orthogonal_init: bool = False,
+        # S-043: DECISIVE FIX confirmed on the incremental-integration testbed (I1 vs I1b) --
+        # ImpalaCNNEncoder's missing weight init alone reproduced the whole-investigation 0/11
+        # collapse pattern in an otherwise-proven pipeline, and NatureCNNEncoder's own
+        # kaiming_normal_ scheme (not E41's orthogonal init) fully recovered a clean 0->17 climb.
+        # Testing whether this alone fixes ImpalaGTrXLAgent itself.
+        cnn_kaiming_init: bool = False,
+        # E47: replace actor_head's Sequential(Linear,GELU,Linear) with a single Linear, so
+        # logits are directly proportional to policy_repr with no internal GELU that can die.
+        single_layer_actor_head: bool = False,
+        # E26: skip the final trunk LayerNorm for policy_repr specifically (still applied to
+        # latent_z), testing whether normalizing across the feature dim crushes the variance of
+        # low-magnitude spatial activations right before the actor head reads them.
+        norm_policy_repr: bool = True,
     ):
         super().__init__()
         self.action_dim = action_dim
         self.embed_dim = embed_dim
         self.unroll_steps = unroll_steps
         self.legacy_actor_init = legacy_actor_init
+        self.single_layer_actor_head = single_layer_actor_head
+        self.norm_policy_repr = norm_policy_repr
 
         # 1. IMPALA-CNN Visual Tokenizer (84x84 -> 121 spatial tokens of dim embed_dim)
         self.visual_encoder = ImpalaCNNEncoder(
             in_channels=in_channels,
             embed_dim=embed_dim,
-            return_spatial_tokens=True
+            return_spatial_tokens=True,
+            orthogonal_init=cnn_orthogonal_init,
+            kaiming_init=cnn_kaiming_init,
         )
 
         # 2. Learnable [STATE] and [POLICY] query tokens
@@ -75,11 +95,14 @@ class ImpalaGTrXLAgent(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
 
         # 4. Heads
-        self.actor_head = nn.Sequential(
-            nn.Linear(embed_dim, 256),
-            nn.GELU(),
-            nn.Linear(256, action_dim)
-        )
+        if single_layer_actor_head:
+            self.actor_head = nn.Sequential(nn.Linear(embed_dim, action_dim))
+        else:
+            self.actor_head = nn.Sequential(
+                nn.Linear(embed_dim, 256),
+                nn.GELU(),
+                nn.Linear(256, action_dim)
+            )
         self.critic_head = nn.Sequential(
             nn.Linear(embed_dim, 256),
             nn.GELU(),
@@ -142,10 +165,13 @@ class ImpalaGTrXLAgent(nn.Module):
 
         for blk in self.blocks:
             seq = blk(seq)
-        seq = self.norm(seq)
+        normed = self.norm(seq)
 
-        latent_z = seq[:, 0]     # [STATE] query token
-        policy_repr = seq[:, 1]  # [POLICY] query token
+        latent_z = normed[:, 0]  # [STATE] query token
+        # E26: optionally skip the final LayerNorm for policy_repr specifically, on the
+        # hypothesis that normalizing across the feature dim crushes low-magnitude spatial
+        # variance right before the actor head reads it. latent_z (critic + EZ2) is unaffected.
+        policy_repr = normed[:, 1] if self.norm_policy_repr else seq[:, 1]
         return latent_z, policy_repr
 
     def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

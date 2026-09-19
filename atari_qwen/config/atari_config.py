@@ -53,6 +53,8 @@ class AtariConfig:
     # Architecture
     model_preset: str = "tiny"           # "tiny", "small", "100m", "500m"
     encoder_type: str = "nature_cnn"      # "nature_cnn", "impala_cnn", "patch"
+    block_type: str = "qwen"              # "qwen" (proven) or "gtrxl" (S-041 incremental-integration swap)
+    impala_kaiming_init: bool = False     # S-043: apply NatureCNNEncoder's kaiming init scheme to ImpalaCNNEncoder
     patch_size: int = 14                 # Used if encoder_type == "patch" (84 / 14 = 6x6 patches)
     features_dim: int = 512
     dropout: float = 0.0

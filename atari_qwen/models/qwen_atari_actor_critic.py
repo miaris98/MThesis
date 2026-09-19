@@ -8,6 +8,7 @@ from torch.distributions.categorical import Categorical
 
 from src.models.transformer.layers import RMSNorm, QwenTransformerBlock
 from atari_qwen.models.visual_encoders import NatureCNNEncoder, ImpalaCNNEncoder, PatchTokenizer
+from atari_qwen.models.gtrxl_layers import GTrXLBlock
 from atari_qwen.config.atari_config import QWEN_ATARI_PRESETS
 
 
@@ -35,12 +36,25 @@ class QwenAtariActorCritic(nn.Module):
         num_heads: Optional[int] = None,
         ffn_dim: Optional[int] = None,
         dropout: float = 0.0,
-        use_gradient_checkpointing: bool = False
+        use_gradient_checkpointing: bool = False,
+        # Incremental-integration plan (struggle-solutions S-041): start from this proven
+        # pipeline (train_ppo.py genuinely climbed 0.00->17.00 with the default "qwen" blocks)
+        # and swap in ImpalaGTrXLAgent's components one at a time to isolate which one breaks
+        # learning, instead of varying hyperparameters on a stack that already differs from the
+        # proven baseline in five places at once. "gtrxl" swaps only the transformer block type
+        # (GTrXLBlock with GRU gating off, matching ImpalaGTrXLAgent's use_gru_gating=False
+        # isolation config) -- everything else (heads, init, RMSNorm, PPO trainer) stays as-is.
+        block_type: str = "qwen",  # "qwen" (proven default) or "gtrxl"
+        # S-043: ImpalaCNNEncoder has no explicit weight init by default (unlike
+        # NatureCNNEncoder). True applies NatureCNNEncoder's own kaiming_normal_ scheme to it --
+        # only relevant when encoder_type="impala_cnn".
+        impala_kaiming_init: bool = False,
     ):
         super().__init__()
         self.action_dim = action_dim
         self.encoder_type = encoder_type.lower()
         self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.block_type = block_type
 
         # Resolve preset dimensions if not explicitly provided
         cfg = QWEN_ATARI_PRESETS.get(preset.lower(), QWEN_ATARI_PRESETS["tiny"])
@@ -54,7 +68,8 @@ class QwenAtariActorCritic(nn.Module):
             self.visual_encoder = ImpalaCNNEncoder(
                 in_channels=in_channels,
                 embed_dim=self.embed_dim,
-                return_spatial_tokens=True
+                return_spatial_tokens=True,
+                kaiming_init=impala_kaiming_init,
             )
             # 11x11 grid = 121 visual tokens
             max_visual_tokens = 128
@@ -84,16 +99,31 @@ class QwenAtariActorCritic(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, total_seq_len, self.embed_dim))
         self.pos_drop = nn.Dropout(p=dropout)
 
-        # 4. Qwen Transformer Blocks (with RMSNorm, SwiGLU, and Trainable Alpha Gating)
-        self.blocks = nn.ModuleList([
-            QwenTransformerBlock(
-                dim=self.embed_dim,
-                num_heads=self.num_heads,
-                ffn_dim=self.ffn_dim,
-                dropout=dropout
-            )
-            for _ in range(self.depth)
-        ])
+        # 4. Transformer Blocks: QwenTransformerBlock (RMSNorm, SwiGLU, Trainable Alpha Gating --
+        # the proven default) or GTrXLBlock (GRU-gated, gating disabled to isolate just the
+        # block's attention/FFN structure) per block_type.
+        if self.block_type == "gtrxl":
+            self.blocks = nn.ModuleList([
+                GTrXLBlock(
+                    dim=self.embed_dim,
+                    num_heads=self.num_heads,
+                    ffn_dim=self.ffn_dim,
+                    dropout=dropout,
+                    bg_init=0.0,
+                    use_gru_gating=False,
+                )
+                for _ in range(self.depth)
+            ])
+        else:
+            self.blocks = nn.ModuleList([
+                QwenTransformerBlock(
+                    dim=self.embed_dim,
+                    num_heads=self.num_heads,
+                    ffn_dim=self.ffn_dim,
+                    dropout=dropout
+                )
+                for _ in range(self.depth)
+            ])
         self.final_norm = RMSNorm(self.embed_dim)
 
         # 5. Actor & Critic Heads

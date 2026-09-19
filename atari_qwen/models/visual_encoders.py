@@ -104,17 +104,52 @@ class ImpalaCNNEncoder(nn.Module):
     Impala CNN visual feature extractor (SOTA representation for RL on arcade games).
     Produces sequence of spatial tokens for transformer reasoning.
     """
-    def __init__(self, in_channels: int = 4, embed_dim: int = 256, return_spatial_tokens: bool = True):
+    def __init__(self, in_channels: int = 4, embed_dim: int = 256, return_spatial_tokens: bool = True,
+                 # E41 (TODO_GTRXL_COLLAPSE_EXPERIMENTS.md): unlike NatureCNNEncoder above, this
+                 # encoder has no explicit weight init at all (default PyTorch Kaiming-uniform).
+                 # True applies orthogonal_(gain=sqrt(2)) to every Conv2d/Linear here, to test
+                 # whether that's washing out input-dependent signal before it reaches the trunk.
+                 orthogonal_init: bool = False,
+                 # S-043 follow-up: the incremental-integration test (I1) showed swapping ONLY
+                 # this encoder into the proven QwenAtariActorCritic+train_ppo.py pipeline at
+                 # 300k steps broke a clean 0->14 climb into the same 0/11-oscillation collapse
+                 # pattern seen throughout S-024-S-042 -- E41's orthogonal init made things worse
+                 # on the (already-broken) GTrXL stack, but was never tried matching
+                 # NatureCNNEncoder's own scheme exactly (kaiming_normal_ fan_out relu on convs,
+                 # trunc_normal_ on the projection) rather than a generic orthogonal init.
+                 kaiming_init: bool = False):
         super().__init__()
         self.return_spatial_tokens = return_spatial_tokens
-        
+
         # 3 stages: 16, 32, 32 channels. 84x84 -> 42x42 -> 21x21 -> 11x11
         self.stage1 = ImpalaConvSequence(in_channels, 16)
         self.stage2 = ImpalaConvSequence(16, 32)
         self.stage3 = ImpalaConvSequence(32, 32)
-        
+
         self.proj = nn.Linear(32, embed_dim) if return_spatial_tokens else nn.Linear(32 * 11 * 11, embed_dim)
         self.layer_norm = nn.LayerNorm(embed_dim)
+
+        if orthogonal_init:
+            self._init_weights_orthogonal()
+        elif kaiming_init:
+            self._init_weights_kaiming()
+
+    def _init_weights_kaiming(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+        nn.init.trunc_normal_(self.proj.weight, std=0.02)
+        if self.proj.bias is not None:
+            nn.init.zeros_(self.proj.bias)
+
+    def _init_weights_orthogonal(self):
+        for m in self.modules():
+            if isinstance(m, (nn.Conv2d, nn.Linear)):
+                nn.init.orthogonal_(m.weight, gain=2.0 ** 0.5)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dtype != torch.float32 and x.dtype != torch.bfloat16 and x.dtype != torch.float16:
