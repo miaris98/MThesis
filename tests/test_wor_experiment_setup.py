@@ -268,3 +268,70 @@ def test_compare_runs_splits_appended_runs(tmp_path):
 
     assert len(runs) == 2
     assert [len(r) for r in runs] == [8, 50]
+
+
+class _StubRouteDataset:
+    """The minimum route_group_split reads: a `samples` list of dicts with `rgb_path`."""
+
+    def __init__(self, n_routes=20, frames_per_route=10, augmented=False):
+        self.samples = []
+        for r in range(n_routes):
+            for i in range(frames_per_route):
+                self.samples.append({"rgb_path": f"/d/Route{r:02d}/rgb/{i:04d}.jpg"})
+                if augmented:
+                    self.samples.append({
+                        "rgb_path": f"/d/Route{r:02d}/rgb_augmented/{i:04d}.jpg",
+                        "is_recovery_augmented": True,
+                    })
+
+    def __len__(self):
+        return len(self.samples)
+
+
+def _paths(ds, idx):
+    return [ds.samples[i]["rgb_path"] for i in idx]
+
+
+def test_augmented_frames_never_enter_the_validation_split():
+    """--use_augmented_camera is a training-only flag, so turning it on must not change
+    what the held-out metric measures.
+
+    It used to. The flag is honoured by gating on is_train, which works on the
+    --val_data_dir path (a separate is_train=False dataset) but not on the --val_split
+    path, which subsets the *train* dataset. The recovery renders were indexed there, so
+    validation silently doubled (20,477 -> 40,954 frames on PDM-Lite) and roughly half of
+    it became off-center corrective views. A val loss measured that way cannot be compared
+    to a run without the flag, which is precisely how the regnety_032-vs-resnet34 backbone
+    comparison came out wrong.
+    """
+    from src.training.wor_dataloaders import route_group_split
+
+    clean = _StubRouteDataset(augmented=False)
+    aug = _StubRouteDataset(augmented=True)
+    assert len(aug) == 2 * len(clean), "stub should double the frame count"
+
+    _, clean_val, _, _ = route_group_split(clean, 0.25, split_seed=0)
+    aug_train, aug_val, _, _ = route_group_split(aug, 0.25, split_seed=0)
+
+    assert not any(aug.samples[i].get("is_recovery_augmented") for i in aug_val)
+    # Same seed, same routes, same held-out frames - the whole point.
+    assert _paths(aug, aug_val) == _paths(clean, clean_val)
+    # ...while the augmented frames still reach training, which is what the flag is for.
+    assert any(aug.samples[i].get("is_recovery_augmented") for i in aug_train)
+
+
+def test_augmented_frames_do_not_leak_held_out_routes_into_training():
+    """An augmented frame is a re-render of the same instant as its base frame, so it has
+    to follow that frame's route across the split. Excluding val by index rather than by
+    route would leave the augmented twin of every held-out frame sitting in training."""
+    from src.training.wor_dataloaders import route_group_split
+
+    aug = _StubRouteDataset(augmented=True)
+    train_idx, val_idx, _, _ = route_group_split(aug, 0.25, split_seed=0)
+
+    def route_of(i):
+        return aug.samples[i]["rgb_path"].split("/")[2]
+
+    assert val_idx and train_idx
+    assert not (set(map(route_of, train_idx)) & set(map(route_of, val_idx)))
+    assert len(set(train_idx) | set(val_idx)) <= len(aug)
