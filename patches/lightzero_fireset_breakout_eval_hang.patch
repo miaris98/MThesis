@@ -1,0 +1,20 @@
+--- atari_wrappers.py.orig	2026-09-20 14:48:01.127806730 +0000
++++ atari_wrappers.py	2026-09-20 14:48:01.163807472 +0000
+@@ -198,6 +198,17 @@
+     if episode_life:
+         env = EpisodicLifeWrapper(env)
+ 
++    # LOCAL PATCH (MThesis): wrap_lightzero omitted FIRE-reset, unlike wrap_deepmind/
++    # wrap_deepmind_mr in this same file, which both apply it right after EpisodicLifeWrapper.
++    # On Breakout this is not cosmetic: at eval time episode_life=False, so if the policy never
++    # selects FIRE the ball is never launched, no life is ever lost, and the episode runs to the
++    # full TimeLimit with a 50-simulation MCTS on every step. Measured cost: a single eval
++    # episode burned ~2 hours of wall clock (12:21->14:19) while the other two eval envs in the
++    # same cycle finished in seconds. Ordering and the get_action_meanings() guard mirror
++    # wrap_deepmind above exactly.
++    if 'FIRE' in env.unwrapped.get_action_meanings():
++        env = FireResetWrapper(env)
++
+     env = TimeLimit(env, max_episode_steps=config.max_episode_steps)
+ 
+     if config.warp_frame:

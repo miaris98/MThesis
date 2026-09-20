@@ -759,3 +759,29 @@ This is safe specifically because `validate_and_resume`'s *second* check (`route
 **Box teardown**: full `results/collapse_exp/` directory (1.4GB: all E-series/S043/S044 logs, probe outputs, and any saved checkpoints) and the S043/S044 top-level run logs were pulled to `E:\MThesis_EXP\atari_gtrxl_collapse_investigation_20260919\` before destruction. CARLA's `best_model.pth` (epoch 17, val loss 0.6421) and training log were separately backed up to `E:\MThesis_EXP\wor_qwen30m_expanded_20260919\`.
 **Conclusion**: the investigation is closed. Root cause = `ImpalaCNNEncoder` missing `kaiming_normal_` weight init. Fix = `cnn_kaiming_init=True`, confirmed sufficient alone both in isolation (S043a) and in the full production architecture with gating + EZ2 aux losses on (S044a). No further confirmation runs are required before moving to the Atari 100k Benchmark harness on the next box.
 **Commit**: (uncommitted -- pending, see below).
+
+---
+
+## [S-045] EfficientZero baseline ran 4.5x slower than it should have: LightZero's `wrap_lightzero` omits FIRE-reset, so a Breakout eval episode with a non-FIRE policy never terminates and burns 108,000 steps of 50-simulation MCTS (~2 hours) per occurrence
+**Date**: 2026-09-20
+**File**: `/workspace/LightZero/zoo/atari/envs/atari_wrappers.py` (vendored; patch tracked at `patches/lightzero_fireset_breakout_eval_hang.patch`), `atari_qwen/scripts/run_lightzero_breakout_100k.py`
+**Context**: standing up a real MCTS-based EfficientZero baseline (vendored opendilab/LightZero) to compare against our own PPO+GTrXL+EZ2-aux architecture on Atari-100k Breakout. The run was far slower than expected and my ETA estimates kept moving (2-3 days -> 21h -> 14h -> 23h), which was itself the signal that I was measuring the wrong thing.
+
+**Three separate errors, found in order:**
+
+| # | Error | Symptom | Reality |
+|---|---|---|---|
+| 1 | Launched with LightZero's shipped `collector_env_num=8` without sizing it to the box | 39 cores, only ~11 in use | Violated CLAUDE.md's "maximize hardware utilization" rule. But raising it to 24 made throughput *worse*, which disproved my own diagnosis |
+| 2 | Set `reanalyze_ratio=1.0` (LightZero ships `0.`) on an unverified recollection of the paper, and wrote a confident config comment asserting their default "is tuned for the 500k-step regime" | 3.6s per training iteration | Every batch re-ran fresh 50-sim MCTS over all 256 sampled trajectories. Reverting to the shipped default gave a measured **3.2x** iteration speedup (not the "20-70x" I initially speculated -- that figure compared against a theoretical ideal, not a measurement) |
+| 3 | **The real dominant cost**: `wrap_lightzero` never applies `FireResetWrapper` | One eval episode ran 12:21->14:19 (~2 hours) while the other two eval envs in the same cycle finished in seconds | Root cause below |
+
+**Root cause (error 3)**: `wrap_lightzero` imports `FireResetWrapper` but never calls it, unlike `wrap_deepmind` and `wrap_deepmind_mr` in the *same file*, which both apply it immediately after `EpisodicLifeWrapper`. At eval time `episode_life=False`, so on Breakout: policy never selects FIRE -> ball never launches -> no life is ever lost -> episode runs to the full `TimeLimit` with a 50-simulation MCTS on every step. Compounding it, LightZero's `eval_max_episode_steps=1.08e5` is **agent** steps, which at frameskip 4 is 432,000 frames -- 4x the standard Atari 108,000-frame (27,000-step) evaluation cap.
+
+**Fix**: (a) apply `FireResetWrapper` in `wrap_lightzero`, mirroring `wrap_deepmind`'s ordering and its `'FIRE' in get_action_meanings()` guard exactly; (b) set `eval_max_episode_steps=int(2.7e4)` in our config, which is *more* protocol-compliant than the default, not less.
+**Verification** (isolated smoke test, worst case = NOOP-only policy, the exact condition that hung): `lives_start=5 -> lives_now=4 after 24 steps`. Pre-patch the same policy would run 108,000 steps. Confirmed in the live run immediately after relaunch: eval episodes now finish in seconds with sane lengths (247 steps) and non-zero rewards (3.0).
+
+**Measurement lesson, and the reason this took three attempts**: I was reading `avg_envstep_per_sec` (~26/s) as the throughput number. That counter only covers the collect phase, which is ~3% of wall clock -- the true end-to-end rate was 0.79 steps/sec, a 33x discrepancy. Because I was watching a metric that excluded the actual bottleneck, I first blamed CPU parallelism (wrong -- CPU was 68% idle), then GPU contention (partly real: freeing one CARLA job measurably moved 3.5 -> 5.1 steps/sec, a 1.45x gain, so my "MCTS is latency-bound so more GPU won't help" hypothesis was also wrong). Only building a full timestamped step-rate curve from the log exposed the 7,197-second gap with 268 steps that was the actual story. **Build the rate curve before theorizing about the bottleneck.**
+
+**Thesis-relevant finding (not a bug)**: even fully fixed, EfficientZero is ~25x more wall-clock-expensive per env step than our reactive PPO policy (which covered the same 100k steps in ~20 minutes), because it runs 50 sequential tree simulations per action. That compute-vs-sample-efficiency tradeoff is the honest framing for comparing the two approaches -- they do not cost the same, and presenting scores side by side without it would be misleading.
+**Next**: Atari-100k requires multiple seeds (5 standard, 3 minimum); a single-seed number is not a valid benchmark result. Once the CARLA runs free the GPU, run seeds 1 and 2 concurrently rather than trying to make one run faster.
+**Commit**: (this commit).
