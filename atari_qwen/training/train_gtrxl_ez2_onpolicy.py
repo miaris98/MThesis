@@ -457,7 +457,9 @@ def train_onpolicy_gtrxl_ez2(
                 eval_temperature=eval_temperature, sticky_action_p=eval_sticky_action_p,
             )
             hns = compute_hns(mean_eval, env_id)
-            print(f"\n[EVALUATION] Step {global_step:,} | Score: {mean_eval:.2f} +/- {std_eval:.2f} | HNS: {hns*100:.1f}%\n", flush=True)
+            # compute_hns() already returns a percentage; don't multiply by 100 again (was a
+            # 100x display bug -- e.g. a real 32.29% printed as "3229.2%").
+            print(f"\n[EVALUATION] Step {global_step:,} | Score: {mean_eval:.2f} +/- {std_eval:.2f} | HNS: {hns:.1f}%\n", flush=True)
             writer.add_scalar("eval/mean_score", mean_eval, global_step)
             writer.add_scalar("eval/hns", hns, global_step)
 

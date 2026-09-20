@@ -446,7 +446,9 @@ def train_turbo_gtrxl_ez2(
         if global_step % eval_interval < num_envs or global_step >= total_steps:
             mean_eval, std_eval = evaluate_agent(agent, env_id, device, num_episodes=5)
             hns = compute_hns(mean_eval, env_id)
-            print(f"\n[EVALUATION] Step {global_step:,} | Score: {mean_eval:.2f} +/- {std_eval:.2f} | HNS: {hns*100:.1f}%\n", flush=True)
+            # compute_hns() already returns a percentage; don't multiply by 100 again (was a
+            # 100x display bug -- e.g. a real 32.29% printed as "3229.2%").
+            print(f"\n[EVALUATION] Step {global_step:,} | Score: {mean_eval:.2f} +/- {std_eval:.2f} | HNS: {hns:.1f}%\n", flush=True)
             writer.add_scalar("eval/mean_score", mean_eval, global_step)
             writer.add_scalar("eval/hns", hns, global_step)
             
