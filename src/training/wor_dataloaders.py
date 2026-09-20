@@ -90,13 +90,34 @@ def route_group_split(
     Returns `(train_idx, val_idx, groups, shuffled_keys)`. `groups` maps each route key
     to its frame indices, which is what lets a caller resample at route granularity
     rather than frame granularity.
+
+    Recovery-augmented frames (`--use_augmented_camera`, see S-020) are training-only by
+    construction: they are off-center re-renders whose waypoint targets are corrective, not a
+    sample of the on-route distribution the held-out metric is meant to measure. They are kept
+    out of `val_idx` *and* out of the target count, so the validation set is identical to the
+    one the same `split_seed` produces without the flag. Until 2026-09-20 they were not, and
+    `--use_augmented_camera 1` silently doubled the val set (20,477 -> 40,954 frames on
+    PDM-Lite), which made the val loss of a run using the flag incomparable to one without it
+    - the two numbers were measured on different distributions. `--val_data_dir` never had
+    this problem, because that path builds its val set with `is_train=False`; only the
+    `--val_split` path, which subsets the *train* dataset, was affected.
     """
+    def _is_aug(s) -> bool:
+        return isinstance(s, dict) and bool(s.get("is_recovery_augmented"))
+
     groups: Dict[str, List[int]] = {}
+    # Val-eligible indices per route: the same grouping minus the augmented frames.
+    val_groups: Dict[str, List[int]] = {}
+    n_val_eligible = 0
     for i, s in enumerate(dataset.samples):
         key = ""
         if isinstance(s, dict):
             key = os.path.dirname(os.path.dirname(s.get("rgb_path", ""))) or s.get("route_dir", "")
-        groups.setdefault(key or str(i), []).append(i)
+        key = key or str(i)
+        groups.setdefault(key, []).append(i)
+        if not _is_aug(s):
+            val_groups.setdefault(key, []).append(i)
+            n_val_eligible += 1
 
     rng = np.random.RandomState(split_seed)
     keys = sorted(groups)
@@ -115,17 +136,25 @@ def route_group_split(
         fold = int(fold) % int(num_folds)
         bounds = [round(len(keys) * f / num_folds) for f in range(num_folds + 1)]
         val_keys = keys[bounds[fold]:bounds[fold + 1]]
-        val_idx = [i for k in val_keys for i in groups[k]]
+        val_idx = [i for k in val_keys for i in val_groups.get(k, [])]
     else:
-        target = int(round(len(dataset) * val_split))
-        val_idx = []
+        # Sized against the val-eligible count, not len(dataset): with augmentation on, the
+        # latter is ~2x larger and would hold out ~2x the routes for the same --val_split.
+        target = int(round(n_val_eligible * val_split))
+        val_keys: List[str] = []
+        n_taken = 0
         for k in keys:
-            if len(val_idx) >= target:
+            if n_taken >= target:
                 break
-            val_idx.extend(groups[k])
+            val_keys.append(k)
+            n_taken += len(val_groups.get(k, []))
+        val_idx = [i for k in val_keys for i in val_groups.get(k, [])]
 
-    val_set = set(val_idx)
-    train_idx = [i for i in range(len(dataset)) if i not in val_set]
+    # Excluded by *route*, not by index: an augmented frame is a re-render of the same instant
+    # as its base frame, so leaving it in train while its base frame is in val would leak the
+    # held-out scene under a different camera pose.
+    val_key_set = set(val_keys)
+    train_idx = sorted(i for k in keys if k not in val_key_set for i in groups[k])
     return train_idx, val_idx, groups, keys
 
 

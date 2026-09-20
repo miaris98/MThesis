@@ -126,11 +126,13 @@ def build_cache_for_dir(
     num_workers: int,
     device: str,
     use_amp: bool,
-    limit_frames: int = 0
+    limit_frames: int = 0,
+    use_augmented_camera: bool = False
 ) -> int:
     ds = WorldOnRailsDataset(
         data_dir=data_dir, is_train=True, cache_decoded=True, route_points=route_points,
-        img_size=img_size, crop_bottom_frac=crop_bottom_frac, route_overlay=route_overlay
+        img_size=img_size, crop_bottom_frac=crop_bottom_frac, route_overlay=route_overlay,
+        use_augmented_camera=use_augmented_camera
     )
     if ds.is_synthetic:
         print(f"[Warning] {data_dir} indexed as synthetic/empty - nothing to cache.")
@@ -210,6 +212,14 @@ def main():
     p.add_argument("--limit_frames", type=int, default=0,
                    help="Cap how many pending frames to encode per directory (0 = no cap). For "
                         "a quick validation pass before committing to the full dataset.")
+    p.add_argument("--use_augmented_camera", type=int, default=0,
+                   help="Also encode the rgb_augmented/ recovery frames (1=yes). Must match the "
+                        "training run's --use_augmented_camera: a run with the flag set indexes "
+                        "those frames as samples, and feature_cache_tag makes a missing entry a "
+                        "hard error, so a cache built without this flag crashes such a run on its "
+                        "first augmented frame. Each augmented frame caches under its own "
+                        "rgb_augmented/ path, and its route overlay is drawn from the *reprojected* "
+                        "route the dataset stores for it, so the two never collide or cross-serve.")
     args = p.parse_args()
 
     img_size = _parse_img_size(args.img_size)
@@ -222,7 +232,8 @@ def main():
             img_size=img_size, crop_bottom_frac=args.crop_bottom_frac,
             route_overlay=bool(args.route_overlay), route_points=args.route_points,
             batch_size=args.batch_size, num_workers=args.num_workers, device=args.device,
-            use_amp=not args.no_amp, limit_frames=args.limit_frames
+            use_amp=not args.no_amp, limit_frames=args.limit_frames,
+            use_augmented_camera=bool(args.use_augmented_camera)
         )
     print(f"=== All done: {total} features written across {len(dirs)} director{'y' if len(dirs)==1 else 'ies'} ===")
 
