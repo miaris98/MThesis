@@ -297,31 +297,34 @@ and quickly, but only by testing the whole `ImpalaGTrXLAgent` end-to-end, not ea
 permanent per-module test suite would catch a class of bugs like E5 (or a future equivalent) in
 seconds via `pytest`, before spending GPU-hours discovering it through a collapsed policy.
 
-**Plan**: add `atari_qwen/tests/test_modules.py` (pytest) with one test class per module, run
-against every architecture variant that implements it, so a regression in one arch's version of a
-module (e.g. `ImpalaCNNEncoder` vs `NatureCNNEncoder`, or `ImpalaGTrXLAgent`'s actor_head vs
-`QwenAtariActorCritic`'s) is caught in isolation rather than only showing up as an unexplained
-end-to-end score:
+**Status: DONE (2026-09-20)**. Implemented as `atari_qwen/tests/test_modules.py` -- 19 tests,
+all passing (`pytest atari_qwen/tests/test_modules.py`, no GPU required, ~4s). One test class
+per module, run against every architecture variant that implements it, so a regression in one
+arch's version of a module (e.g. `ImpalaCNNEncoder` vs `NatureCNNEncoder`, or
+`ImpalaGTrXLAgent`'s actor_head vs `QwenAtariActorCritic`'s) is caught in isolation rather than
+only showing up as an unexplained end-to-end score:
 
-- [ ] **Visual encoders** (`ImpalaCNNEncoder`, `NatureCNNEncoder`, `PatchTokenizer` in
+- [x] **Visual encoders** (`ImpalaCNNEncoder`, `NatureCNNEncoder`, `PatchTokenizer` in
   `visual_encoders.py`): feed maximally-different synthetic inputs (all-zero, all-255, random
   noise) and assert output tokens have non-trivial across-input variance (rel_std above some
   floor) -- i.e. run E1/E2's layer probe as an assertion, not a one-off script, for every encoder.
-- [ ] **Transformer trunk blocks** (`GTrXLBlock` and any plain-residual variant): assert a
+- [x] **Transformer trunk blocks** (`GTrXLBlock` and any plain-residual variant): assert a
   forward+backward pass changes every parameter's gradient to something non-zero for a
   distinguishing input pair, and that `use_gru_gating=True` vs `False` produce different outputs
-  (catches a gate silently defaulting to a no-op, as bg_init effectively did pre-S-035).
-- [ ] **Actor/critic heads** (across `ImpalaGTrXLAgent` and `QwenAtariActorCritic`): assert
+  (catches a gate silently defaulting to a no-op, as bg_init effectively did pre-S-035). Also
+  asserts `bg_init` controls initial gate openness (S-035).
+- [x] **Actor/critic heads** (across `ImpalaGTrXLAgent` and `QwenAtariActorCritic`): assert
   gradient magnitude reaching the shared trunk from the actor head is within some sane ratio
   (e.g. 0.1x-10x) of the critic head's -- would have caught the ~65x-100x actor/critic gradient
   asymmetry from S-038 immediately, without needing the E1 layer probe run against a trained
   checkpoint first.
-- [ ] **EfficientZero v2 predictor** (`efficientzero_v2_predictor.py`): assert the SimSiam
+- [x] **EfficientZero v2 predictor** (`efficientzero_v2_predictor.py`): assert the SimSiam
   consistency loss does NOT trivially reach its collapse minimum (-1.0 cosine similarity) within
   a handful of steps on random targets -- would have flagged the representation-collapse pattern
   noted in S-036 (`SimLoss -> -0.9999` within ~2,500 steps) as a red flag before it ever showed up
-  in a real training run.
-- [ ] **Cross-architecture parity check**: for any module that exists in more than one
+  in a real training run. Also asserts every dynamics/reward/value/projector/predictor parameter
+  receives gradient.
+- [x] **Cross-architecture parity check**: for any module that exists in more than one
   architecture (visual encoder, actor head), run the same synthetic-input variance assertion
   against each implementation and report them side by side, so a newly-added architecture
   variant is checked against the same bar the others already pass, rather than discovered broken
