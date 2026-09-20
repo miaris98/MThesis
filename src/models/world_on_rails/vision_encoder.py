@@ -110,9 +110,20 @@ class PretrainedVisionEncoder(nn.Module):
         filtered = {}
         for k, v in state_dict.items():
             clean_k = k
-            for prefix in prefixes:
-                if clean_k.startswith(prefix):
-                    clean_k = clean_k[len(prefix):]
+            # Repeated passes, not one ordered pass. A compound prefix is only fully stripped
+            # in a single pass when its outer component happens to sort before its inner one in
+            # this list, and TCP's keys ("model.perception.conv1.weight") are the counterexample:
+            # "perception." is checked before "model.", so one pass leaves "perception.conv1.weight"
+            # and load_state_dict matches 0 of 218 tensors - silently, under strict=False, leaving
+            # an ImageNet backbone behind a run config that claims CARLA weights. Terminates
+            # because every strip shortens the key and no prefix is empty.
+            stripped = True
+            while stripped:
+                stripped = False
+                for prefix in prefixes:
+                    if clean_k.startswith(prefix):
+                        clean_k = clean_k[len(prefix):]
+                        stripped = True
             filtered[clean_k] = v
 
         missing, unexpected = self.load_state_dict(filtered, strict=False)
