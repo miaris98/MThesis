@@ -56,6 +56,18 @@ CONFIGS = {
         ez_value_loss_weight=0.25,
         consistency_loss_weight=0.0,
     ),
+    "S048a_100k_dense": dict(
+        total_steps=TOTAL_STEPS,
+        num_envs=16,
+        num_steps=32,
+        update_epochs=8,
+        eval_interval_updates=20,
+        cnn_kaiming_init=True,
+        use_gru_gating=True,
+        reward_loss_weight=1.0,
+        ez_value_loss_weight=0.25,
+        consistency_loss_weight=0.0,
+    ),
 }
 
 
