@@ -70,19 +70,21 @@ class MCTSEngine:
 
     def _select_child(self, node: MCTSNode, min_max_stats: MinMaxStats) -> Tuple[int, MCTSNode]:
         """Select child action maximizing the PUCT score."""
+        # Unvisited children exploration guarantee: visit each child action at least once
+        for action, child in node.children.items():
+            if child.visit_count == 0:
+                return action, child
+
         best_score = -float('inf')
         best_action = -1
         best_child = None
 
         total_visits = sum(child.visit_count for child in node.children.values())
-        sqrt_total = math.sqrt(total_visits)
+        sqrt_total = math.sqrt(total_visits + 1)
 
         for action, child in node.children.items():
             # Normalized Q-value
-            if child.visit_count > 0:
-                q_value = min_max_stats.normalize(child.reward + self.discount * child.value)
-            else:
-                q_value = 0.0
+            q_value = min_max_stats.normalize(child.reward + self.discount * child.value)
 
             # PUCT exploration bonus
             pb_c = math.log((total_visits + self.c_puct_base + 1.0) / self.c_puct_base) + self.c_puct_init
@@ -188,8 +190,14 @@ class MCTSEngine:
         visits = np.array([root.children[a].visit_count for a in range(self.action_dim)], dtype=np.float32)
         if temperature == 0.0:
             probs = np.zeros(self.action_dim, dtype=np.float32)
-            probs[np.argmax(visits)] = 1.0
-            chosen_action = int(np.argmax(visits))
+            max_visits = np.max(visits)
+            candidates = [a for a in range(self.action_dim) if visits[a] == max_visits]
+            if len(candidates) == 1:
+                chosen_action = candidates[0]
+            else:
+                q_vals = [root.children[a].value for a in candidates]
+                chosen_action = candidates[int(np.argmax(q_vals))]
+            probs[chosen_action] = 1.0
         else:
             visits_temp = visits ** (1.0 / max(temperature, 1e-4))
             probs = visits_temp / np.sum(visits_temp)
