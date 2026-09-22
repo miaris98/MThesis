@@ -94,6 +94,32 @@ CONFIGS = {
         ez_value_loss_weight=0.25,
         consistency_loss_weight=0.0,
     ),
+    "S048d_100k_n8_e6": dict(
+        total_steps=TOTAL_STEPS,
+        num_envs=16,
+        num_steps=8,
+        unroll_steps=2,
+        update_epochs=6,
+        eval_interval_updates=80,
+        cnn_kaiming_init=True,
+        use_gru_gating=True,
+        reward_loss_weight=1.0,
+        ez_value_loss_weight=0.25,
+        consistency_loss_weight=0.0,
+    ),
+    "S048e_100k_n32_e10": dict(
+        total_steps=TOTAL_STEPS,
+        num_envs=16,
+        num_steps=32,
+        unroll_steps=5,
+        update_epochs=10,
+        eval_interval_updates=20,
+        cnn_kaiming_init=True,
+        use_gru_gating=True,
+        reward_loss_weight=1.0,
+        ez_value_loss_weight=0.25,
+        consistency_loss_weight=0.0,
+    ),
 }
 
 
