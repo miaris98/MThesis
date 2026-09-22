@@ -120,20 +120,40 @@ CONFIGS = {
         ez_value_loss_weight=0.25,
         consistency_loss_weight=0.0,
     ),
+    "S049_mcts_offpolicy": dict(
+        trainer_module="atari_qwen.training.train_mcts_offpolicy",
+        trainer_func="train_mcts_offpolicy",
+        total_steps=TOTAL_STEPS,
+        num_envs=8,
+        num_simulations=35,
+        eval_simulations=35,
+        unroll_steps=5,
+        replay_ratio=0.5,
+        batch_size=128,
+        eval_interval=10_000,
+        cnn_kaiming_init=True,
+        use_gru_gating=True,
+        reward_loss_weight=1.0,
+        ez_value_loss_weight=0.25,
+        consistency_loss_weight=0.5,
+    ),
 }
 
 
 def run_one(name: str, seed: int, cfg: dict, out_root: Path):
     run_name = f"{name}_s{seed}"
     log_dir = f"results/100k_benchmark/{run_name}"
-    kwargs = dict(cfg, seed=seed, log_dir=log_dir)
+    trainer_module = cfg.get("trainer_module", "atari_qwen.training.train_gtrxl_ez2_onpolicy")
+    trainer_func = cfg.get("trainer_func", "train_onpolicy_gtrxl_ez2")
+    filtered_cfg = {k: v for k, v in cfg.items() if k not in ("trainer_module", "trainer_func")}
+    kwargs = dict(filtered_cfg, seed=seed, log_dir=log_dir)
     arg_str = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
     
     code = (
         "import os\n"
         "os.environ['MLFLOW_ALLOW_FILE_STORE'] = 'true'\n"
-        "from atari_qwen.training.train_gtrxl_ez2_onpolicy import train_onpolicy_gtrxl_ez2\n"
-        f"train_onpolicy_gtrxl_ez2({arg_str})\n"
+        f"from {trainer_module} import {trainer_func}\n"
+        f"{trainer_func}({arg_str})\n"
     )
     
     log_path = out_root / f"{run_name}.log"
@@ -163,13 +183,16 @@ def main():
             for seed in args.seeds:
                 run_name = f"{name}_s{seed}"
                 log_dir = f"results/100k_benchmark/{run_name}"
-                kwargs = dict(cfg, seed=seed, log_dir=log_dir)
+                trainer_module = cfg.get("trainer_module", "atari_qwen.training.train_gtrxl_ez2_onpolicy")
+                trainer_func = cfg.get("trainer_func", "train_onpolicy_gtrxl_ez2")
+                filtered_cfg = {k: v for k, v in cfg.items() if k not in ("trainer_module", "trainer_func")}
+                kwargs = dict(filtered_cfg, seed=seed, log_dir=log_dir)
                 arg_str = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
                 code = (
                     "import os\n"
                     "os.environ['MLFLOW_ALLOW_FILE_STORE'] = 'true'\n"
-                    "from atari_qwen.training.train_gtrxl_ez2_onpolicy import train_onpolicy_gtrxl_ez2\n"
-                    f"train_onpolicy_gtrxl_ez2({arg_str})\n"
+                    f"from {trainer_module} import {trainer_func}\n"
+                    f"{trainer_func}({arg_str})\n"
                 )
                 log_path = out_root / f"{run_name}.log"
                 print(f">>> Spawning parallel process for {run_name} -> {log_path}", flush=True)
