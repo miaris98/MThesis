@@ -548,6 +548,8 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=2.5e-4)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--min-replay-size", type=int, default=1000)
+    parser.add_argument("--eval-interval", type=int, default=10000)
     parser.add_argument("--log-dir", type=str, default="results/100k_benchmark/S049_mcts_offpolicy")
     args = parser.parse_args()
 
@@ -561,6 +563,8 @@ if __name__ == "__main__":
         replay_ratio=args.replay_ratio,
         batch_size=args.batch_size,
         learning_rate=args.lr,
+        min_replay_size=args.min_replay_size,
+        eval_interval=args.eval_interval,
         seed=args.seed,
         log_dir=args.log_dir,
     )
