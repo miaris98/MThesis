@@ -70,6 +70,10 @@ DRIVING_OUTCOME = (
     "agent timed out",
     "agent deviated from the route",
     "route timeout",
+    # Confirmed 2026-09-21 (S-047, regnety032_b2d38 38-route eval): every "Failed -
+    # TickRuntime" route seen so far carried a populated, non-null score_composed -
+    # a real driving-outcome measurement, not a crash. Treat as driving, not unknown.
+    "tickruntime",
 )
 
 

@@ -41,7 +41,7 @@ Output the prompt as a clean markdown code block the user can copy:
 =========================================================
 Project: MThesis — Autonomous Driving PPO/WoR on CARLA & Atari Qwen RL
 Repo: github.com/miaris98/MThesis
-RULES: Mandatory MLflow tracking + two-stage sync (E:\MThesis_EXP first -> Hugging Face second via .env). Maximize compute with safe OOM headroom; parallel execution by default.
+RULES: Mandatory MLflow tracking + two-stage sync (E:\MThesis_EXP first -> Hugging Face second via .env). Maximize GPU & CPU co-utilization by running workloads in parallel by default (vectorized envs, multi-worker loaders, parallel trials) with safe 10-15% OOM headroom.
 
 PROBLEM:
 <one-paragraph summary of the exact problem>

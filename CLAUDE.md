@@ -104,8 +104,13 @@ All artifacts, checkpoints, and evaluation results must follow a strict two-stag
 2. **Stage 2 — Hugging Face Second**:
    - Push verified champion checkpoints, evaluation summaries, and gameplay/rollout videos to Hugging Face using credentials in the local `.env` file (`HF_TOKEN`) via existing sync scripts (`scripts/sync/hf_push_checkpoints.py` or `atari_qwen/training/hf_sync.py`).
 
-### 3. Compute Utilization & Parallelism
+### 3. Compute Utilization & Parallelism (GPU & CPU Co-Utilization)
 Before triggering any training or evaluation run:
-- **Maximize Hardware Utilization**: Fully leverage available GPU VRAM, CPU cores, and system memory on the target machine (e.g., RTX A4000 16GB, EPYC 64-core).
-- **Safe OOM Headroom**: Size batch sizes, rollout steps, and replay buffer capacities to leave a safe ~10–15% VRAM headroom to prevent CUDA Out-Of-Memory (OOM) crashes.
-- **Default to Parallel Execution**: Run workloads in parallel by default (e.g., vectorized simulation environments `num_envs=16` or `32`, multi-worker data loaders `num_workers=4` to `8`, or parallel evaluation trials) unless explicitly instructed by the user to run sequentially or single-threaded.
+- **Mandatory GPU & CPU Co-Utilization**:
+  - **GPU**: Fully saturate available GPU compute and VRAM on the target instance (e.g., RTX A4000 16GB, RTX 3090 24GB, 2x Tesla T4), sizing batch sizes and model contexts to maintain a safe ~10–15% VRAM headroom to prevent CUDA OOM crashes.
+  - **CPU**: Never let system CPU cores sit idle during training or simulation. Fully leverage high-core CPUs (e.g., AMD EPYC 64-core on Vast.ai).
+- **Default to Parallel Execution**:
+  - **Vectorized Environments**: For RL / simulation workloads (Atari, CARLA), always vectorize environment stepping (`num_envs=16`, `32`, or `64` scaled to available CPU cores).
+  - **Parallel Data Loaders**: In supervised or offline distillation (e.g., PDM-Lite / World-on-Rails), scale PyTorch DataLoader workers (`num_workers=4` to `8`+), enable `pin_memory=True`, and set `prefetch_factor=2` to ensure GPU compute is never starved by CPU data loading.
+  - **Parallel Evaluations & Sweeps**: Run evaluation rollouts, seed replications, and hyperparameter trials in parallel across available ports/threads.
+  - **No Sequential / Single-Threaded Execution**: Never default to single-threaded or sequential execution (`num_envs=1`, `num_workers=0`, or sequential seed loops) unless the user explicitly instructs to run sequentially or single-threaded for isolated debugging.

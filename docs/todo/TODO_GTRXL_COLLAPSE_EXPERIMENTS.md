@@ -21,12 +21,26 @@ results tables and the closing interpretation.
 AND EZ2 auxiliary losses re-enabled (the actual intended architecture, not the isolated S043
 testbed) -- `probe_logit_rel_std=1.016`, scores stabilizing around `11.0` with a peak of `14.0`
 across 10 checkpoints, no collapse. This is a cleaner, more stable trajectory than S043a's
-isolated-config run. **The investigation is closed** -- no further confirmation needed before
-moving to Atari 100k Benchmark harness work. A companion longer-horizon run (`S044b`, 600k
+isolated-config run. ~~**The investigation is closed** -- no further confirmation needed before
+moving to Atari 100k Benchmark harness work.~~ A companion longer-horizon run (`S044b`, 600k
 steps, isolated config) was launched but not completed before the vast.ai box was destroyed
 mid-run (2026-09-19); low priority to re-run since S044a already confirms stability in the
 real config. All experiment results/logs archived to
 `E:\MThesis_EXP\atari_gtrxl_collapse_investigation_20260919\` before teardown.
+
+**REOPENED (S-046, 2026-09-21)**: the "closed" verdict above cited S044a's full 300k-step
+trajectory, but its first 4 checkpoints -- steps 30,720/61,440/92,160, i.e. the *entire*
+100k-step Atari-100k production budget -- are all `11.0`, the identical frozen-constant-action
+artifact this investigation exists to fix (`LogitSpread` only reaches `0.299` by the end of that
+window). Production seeds 0/1/2 (same S044a recipe, live box, 2026-09-21) reproduced this
+exactly: seed 0 flat `0.00` the whole 100k steps, seed 1 locked at `11.00` then drifted back to
+the `0.00` pattern. `S044b` (same kaiming fix, EZ2 aux losses OFF) climbs 3-4x faster over the
+same step range and lands a real score by step 153,600 instead of lingering at the artifact --
+implicating the EZ2 consistency (SimSiam) loss, which saturates to -0.99+ almost immediately, as
+the specific drag. See struggle-solutions S-046 for the full trace. **Status: testing
+`consistency_loss_weight=0.0` at the real 100k budget (seed 0, live box) as the direct fix;
+aux-loss warmup (`aux_warmup_steps`, untested combined with `cnn_kaiming_init`) is the documented
+fallback if that doesn't resolve it within budget.**
 
 **IMPORTANT METHODOLOGICAL CAVEAT (S-042, 2026-09-19)**: the incremental-integration test found
 that even the PROVEN `QwenAtariActorCritic` + `train_ppo.py` baseline (S-029's genuine 0.00->17.00

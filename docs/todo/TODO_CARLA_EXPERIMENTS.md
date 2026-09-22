@@ -4,6 +4,44 @@
 
 ---
 
+## Achieved so far (as of 2026-09-21)
+
+The items below are **implemented and validated**, not just hypothesized — most predate this
+checkbox list and aren't 1:1 with the C-numbered items below (several were shipped together as a
+bug-fix batch, see `docs/design/continuation_prompt.md` for the full account). Recorded here so
+"what have we tried" doesn't require reconstructing it from commit history.
+
+- **Camera parity fix** — the training dataset was rendered at `x=-1.5, z=2.0, fov=110, 1024x512`
+  while the closed-loop eval agent requested `x=+1.3, z=1.3, fov=100, 256x256`. Every closed-loop
+  number before 2026-09-14 was measured through a camera the network never trained on (see
+  [`eval-harness-camera-and-route-bugs`] memory). Fixed: one shared definition in
+  `src/config/camera.py` for both dataset rendering and the eval agent.
+- **Aspect-correct input** (partial C8): `192x512` with `crop_bottom_frac 0.25` (TF++'s crop),
+  replacing a 2.7x horizontal squash into `256x256`.
+- **CARLA-pretrained backbone** (supersedes C10's UFLD proposal): `regnety_032` extracted from the
+  released TransFuser++ checkpoint, loads 492/492 tensors clean, `pretrained=False` — no ImageNet
+  fallback, per the standing CARLA-pretrained-only constraint.
+- **Route overlay** (= C9): planned route projected into the image pre-crop.
+- **Target-speed head**: 8-bin two-hot classification, bins matching TF++.
+- **Recovery-camera augmentation** — single-seed result 54.74 -> 60.15 mean DS, 9/16 -> 12/16
+  routes completed on an earlier 16-route subset. Encouraging but **not yet replicated** with a
+  second seed — this is the clearest open thread if the next CARLA compute allocation needs a
+  concrete target.
+- **Eval agent_config mutation bug** fixed 2026-09-17 — silently ran an untrained model from route
+  2 onward before the fix; all `cnn_s0`/`qwen30m_geom_s0` closed-loop numbers from before that date
+  are unverified and should not be cited.
+- **Full 38-route Bench2Drive eval, `wor_qwen30m_geom_regnety032` checkpoint** (2026-09-21, see
+  struggle-solutions [S-047]): 38/38 routes scored, 0 agent-fault, 0 sim-fault. **Mean
+  `score_composed` = 58.53** across all 38 routes. This is the current champion checkpoint and the
+  number to beat for the next CARLA experiment.
+- **`check_leaderboard_results.py`** now correctly classifies `"Failed - TickRuntime"` as a driving
+  outcome (was silently excluding those routes from the mean as "unrecognised" — see [S-047]).
+
+None of the 97 hypotheses (C1-C97, P2-1-P2-15) below are checked off — they remain a brainstormed
+backlog, not a validated record. Treat "Achieved so far" above as the actual done-list.
+
+---
+
 ## Sensor Scope & Operational Constraints
 
 ### Phase 1 Sensor Envelope (Active Priority — Strict Budget)

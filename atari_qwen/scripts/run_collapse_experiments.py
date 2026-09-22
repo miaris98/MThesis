@@ -240,6 +240,50 @@ EXPERIMENTS = {
     # clean climb with more steps, the way I0/I1b did at 300k on the simpler testbed.
     "S044b_kaiming_alone_600k": dict(BASE, total_steps=600000, eval_interval_updates=15,
                                       cnn_kaiming_init=True),
+
+    # ---- S-046 follow-up: S044a (kaiming + gating + ALL THREE EZ2 aux losses at once) is
+    # stuck at the 11.00 artifact for its entire first 92k steps (LogitSpread 0.00004->0.299),
+    # while S044b (kaiming ALONE, no gating, no aux losses) climbs 3-4x faster over the same
+    # range and lands a real score by step 153,600. S044a vs S044b changes FOUR things at once
+    # (gating + 3 aux losses) so we can't tell which one(s) cause the drag. These single-factor
+    # steps insert between them, each adding exactly one component on top of the last, at the
+    # same 300k budget S-043/S-044 used for a clean diagnostic (not the ambiguous 100k zone).
+
+    # S046a: kaiming + GRU gating ON, still no EZ2 aux losses at all. Isolates gating alone.
+    "S046a_kaiming_gating_300k": dict(BASE, total_steps=300000, eval_interval_updates=15,
+                                       cnn_kaiming_init=True, use_gru_gating=True),
+
+    # S046b: S046a + reward-prediction aux loss only.
+    "S046b_kaiming_gating_reward_300k": dict(BASE, total_steps=300000, eval_interval_updates=15,
+                                              cnn_kaiming_init=True, use_gru_gating=True,
+                                              reward_loss_weight=1.0),
+
+    # S046c: S046b + EZ value-prediction aux loss. Everything production has EXCEPT the
+    # consistency (SimSiam) term -- if this one is healthy, S046d/S044a's drag is isolated to
+    # consistency specifically, confirming the live consistency_loss_weight=0 ablation's intent
+    # (that test zeroed only consistency but kept reward+value on, matching this config, and
+    # itself failed to climb by step 51,200 -- so this run's shorter/cleaner 300k signal is the
+    # more trustworthy read on whether reward+value alone are already enough drag on their own).
+    "S046c_kaiming_gating_reward_value_300k": dict(
+        BASE, total_steps=300000, eval_interval_updates=15,
+        cnn_kaiming_init=True, use_gru_gating=True,
+        reward_loss_weight=1.0, ez_value_loss_weight=0.25),
+
+    # S046d: S046c + consistency loss at PRODUCTION's full weight (0.5) -- this is exactly
+    # S044a's recipe, re-run here only for a directly-comparable log format/probe if needed;
+    # skip if S044a's existing data is judged sufficient.
+    "S046d_full_recipe_consistency_full_300k": dict(
+        BASE, total_steps=300000, eval_interval_updates=15,
+        cnn_kaiming_init=True, use_gru_gating=True,
+        reward_loss_weight=1.0, ez_value_loss_weight=0.25, consistency_loss_weight=0.5),
+
+    # S046e: S046c + consistency loss at a much lower weight (0.1 instead of 0.5) -- tests
+    # whether a little SimSiam signal is tolerable once combined with kaiming init + gating
+    # (old E18 tested a low consistency weight, but before the kaiming-init fix existed).
+    "S046e_full_recipe_consistency_low_300k": dict(
+        BASE, total_steps=300000, eval_interval_updates=15,
+        cnn_kaiming_init=True, use_gru_gating=True,
+        reward_loss_weight=1.0, ez_value_loss_weight=0.25, consistency_loss_weight=0.1),
 }
 
 

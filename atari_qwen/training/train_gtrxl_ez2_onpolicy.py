@@ -129,6 +129,10 @@ def train_onpolicy_gtrxl_ez2(
     log_dir: str = "results/atari_gtrxl_ez2_onpolicy",
     device_str: str = "auto",
     seed: int = 42,
+    use_mlflow: bool = True,
+    mlflow_port: int = 10100,
+    experiment_name: str = "Atari_GTrXL_EZ2",
+    run_label: str = None,
     # Isolation test per struggle-solutions S-036/S-037: False replaces GTrXL's GRU gating
     # with plain residual addition, to test whether the gating mechanism itself is why the
     # actor's output stays input-invariant, independent of raw training step budget.
@@ -183,12 +187,33 @@ def train_onpolicy_gtrxl_ez2(
     weight_decay: float = 1e-4,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() and device_str == "auto" else device_str)
-    run_name = f"gtrxl_ez2_onpolicy_{env_id}_{int(time.time())}"
+    run_name = run_label or f"gtrxl_ez2_onpolicy_{env_id}_{int(time.time())}"
     run_dir = Path(log_dir) / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir = run_dir / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(str(run_dir / "tb"))
+
+    # MLflow tracking is mandatory per this project's standing experiment-tracking rule (see
+    # CLAUDE.md) - this trainer never had it. Mirrors the pattern already used by
+    # src/training/wor_trainer.py: one ExperimentLogger, params logged once up front, scalars
+    # logged alongside every existing writer.add_scalar call rather than a second bookkeeping
+    # pass through the training loop.
+    from src.logging.experiment_logger import ExperimentLogger
+    logger = ExperimentLogger(
+        str(run_dir), checkpoint_dir=str(ckpt_dir),
+        experiment_name=experiment_name, use_mlflow=use_mlflow, mlflow_port=mlflow_port
+    )
+    logger.log_params({
+        "env_id": env_id, "total_steps": total_steps, "num_envs": num_envs, "num_steps": num_steps,
+        "unroll_steps": unroll_steps, "learning_rate": learning_rate, "gamma": gamma,
+        "gae_lambda": gae_lambda, "clip_coef": clip_coef, "ent_coef": ent_coef,
+        "ez_value_loss_weight": ez_value_loss_weight, "reward_loss_weight": reward_loss_weight,
+        "consistency_loss_weight": consistency_loss_weight, "seed": seed,
+        "use_gru_gating": use_gru_gating, "cnn_kaiming_init": cnn_kaiming_init,
+        "aux_warmup_steps": aux_warmup_steps, "lr_schedule": lr_schedule,
+        "clip_vloss": clip_vloss, "weight_decay": weight_decay, "run_label": run_name,
+    })
 
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -450,6 +475,10 @@ def train_onpolicy_gtrxl_ez2(
         writer.add_scalar("diag/raw_advantage_absmean", raw_adv_absmean, global_step)
         writer.add_scalar("diag/reward_rate", reward_rate, global_step)
         writer.add_scalar("charts/SPS", sps, global_step)
+        logger.add_scalar("losses/policy", last_pg.item(), global_step)
+        logger.add_scalar("losses/value", last_v.item(), global_step)
+        logger.add_scalar("losses/entropy", last_ent.item(), global_step)
+        logger.add_scalar("charts/SPS", sps, global_step)
 
         if update % eval_interval_updates == 0 or update == num_updates:
             mean_eval, std_eval = evaluate_agent(
@@ -462,6 +491,8 @@ def train_onpolicy_gtrxl_ez2(
             print(f"\n[EVALUATION] Step {global_step:,} | Score: {mean_eval:.2f} +/- {std_eval:.2f} | HNS: {hns:.1f}%\n", flush=True)
             writer.add_scalar("eval/mean_score", mean_eval, global_step)
             writer.add_scalar("eval/hns", hns, global_step)
+            logger.add_scalar("eval/mean_score", mean_eval, global_step)
+            logger.add_scalar("eval/hns", hns, global_step)
 
             torch.save(agent.state_dict(), ckpt_dir / "model_latest.pt")
             if mean_eval > best_eval:
@@ -471,6 +502,8 @@ def train_onpolicy_gtrxl_ez2(
 
     envs.close()
     writer.close()
+    logger.log_params({"final_peak_eval_score": best_eval, "final_step": global_step})
+    logger.close()
     print("\n==================================================================")
     print(f"✓ On-Policy GTrXL + EfficientZero v2 Complete! Peak Eval: {best_eval:.2f}")
     print("==================================================================\n", flush=True)
