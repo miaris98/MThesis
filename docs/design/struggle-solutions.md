@@ -818,3 +818,118 @@ This is safe specifically because `validate_and_resume`'s *second* check (`route
 **Final result**: 38/38 routes scored, all correctly classified as driving outcomes (0 agent-fault, 0 sim-fault, 0 unrecognised). Mean `score_composed` = **58.53** over all 38 routes (down from the pre-fix `63.86` figure, which silently excluded the 5 lower-scoring TickRuntime routes as "unrecognised" — the corrected 58.53 is the real number). Synced to `E:\MThesis_EXP` (tag `carla_b2d38_38of38_FINAL_20260921`; re-sync after the checker fix not yet done, JSON content unchanged so the existing sync is still valid data, only the *reported summary statistic* changed).
 **Lesson**: the pre-fix `63.86` was quietly optimistic — dropping 5 real, lower-scoring routes from the mean by mislabeling them "unrecognised" inflated the headline number by ~5 points. Always check `unrecognised` count is exactly 0 before quoting a mean.
 **Commit**: (uncommitted).
+
+---
+
+## [S-048] CARLA 8-Town Distillation Throughput Collapse on First Vast.ai Box: Single-threaded disk read and DataLoader thread starvation capped training at 25.6 min/epoch (~130 samples/s)
+**Date**: 2026-09-22  
+**File**: `scripts/training/train_wor.py`, `src/training/wor_trainer.py`, `src/data/wor_dataset.py`  
+**Context**: Scaling PDM-Lite dataset from 2 towns (Town01, Town02) to full 8-town multi-weather coverage (~79 GB, 250,000+ frames across Town01, Town02, Town03, Town04, Town05, Town10, Town06, Town07).  
+**Symptom**: On the initial Box 1 instance, training took 25.6 minutes per epoch. GPU utilization sat at 28–35% while data loading consumed ~18 minutes per epoch.  
+**Root Cause**: PyTorch DataLoader had `num_workers=2`, `pin_memory=False`, and dataset images were loaded synchronously from a slow network-attached volume. The GPU was constantly starved of batches.  
+**Fix**:
+1. Migrated dataset to high-speed NVMe scratch storage (`/workspace/dataset/wor_trajectories`).
+2. Scaled PyTorch DataLoader to `num_workers=12`, enabled `pin_memory=True`, and added `prefetch_factor=2`.
+3. Switched to high-frequency AMD Ryzen 9 5950X box with PCIe Gen 4 NVMe.
+4. Pinned DataLoader and trainer to CPU cores 0–15 using `taskset -c 0-15`.  
+**Result**: Throughput increased from ~130 samples/s to **1,000–1,450 samples/s** (a **5.5× to 9.8× speedup**), reducing epoch time from 25.6 minutes to **2.6–3.7 minutes**.
+
+---
+
+## [S-049] Pure Reactive On-Policy GTrXL Sample Efficiency Wall on Atari 100k: PPO fails within 100k budget; Off-Policy MCTS prototype evaluated below random agent (Score 0.00–1.00 vs Random 1.7)
+**Date**: 2026-09-22 / 2026-09-23  
+**File**: `atari_qwen/training/train_mcts_offpolicy.py`, `atari_qwen/mcts/mcts_engine.py`, `atari_qwen/tests/test_gate0_sanity.py`  
+**Context**: Evaluating Atari Breakout benchmark under strict 100,000 environment step protocol.  
+**Symptom**:
+1. Initial MCTS off-policy prototype scored 1.00 at step 40k and 0.00 at step 50k (HNS: -5.9%), strictly below a random agent (~1.70).
+2. Action entropy was 1.308 (94% of uniform 1.386).
+3. Evaluation was limited to 5 episodes on fixed seed 999 with artificial 30-step FIRE forcing.  
+**Root Cause**:
+1. **Replay Window Interleaving Bug**: `add_batch` wrote 8 parallel environments consecutively into a single flat buffer: `env0@t, env1@t, ..., env7@t, env0@t+1, ...`. `sample_trajectories` took 5 consecutive flat slots as a 5-step trajectory, so every 5-step unroll sampled 5 different games at time $t$ rather than 1 continuous game over 5 timesteps! The dynamics model was trained to predict Game 2's frame after Game 1's action, producing pure noise.
+2. **8 Collection Simulations Floor**: With 4 actions and 8 simulations, prior tree search visited each child once before PUCT selection, making $(5,1,1,1)$ the sharpest possible visit distribution (entropy $\ge 1.07$).
+3. **No Target Network**: Active critic bootstrapped values and consistency targets from itself, causing moving-target instability.
+4. **Non-Resumable Checkpoints**: Saved only model weights without optimizer, RNG state, or step counters.  
+**Fix & Resolution**:
+1. Refactored `MCTSReplayBuffer` to a 2D structured circular buffer indexed by `(capacity_per_env, num_envs, ...)`. Slices now unroll strictly within a single continuous game trajectory.
+2. Raised collection simulations to 16/32 simulations.
+3. Added an EMA target network `target_agent` ($\tau=0.005$) for future representations, consistency projections, and value targets.
+4. Full checkpoint serialization: saves model, target model, optimizer, RNG states (PyTorch, CUDA, NumPy, random), and step count.
+5. Overhauled evaluation harness: 10 episodes with independent seeds (`999 + ep * 13`), evaluating both with MCTS lookahead and with the raw policy.
+6. **Empirical Gate Progression**:
+   - **Gate 0 (Sanity)**: Frame stack continuity verified ($\text{obs}[t+1][:3] == \text{obs}[t][1:]$), random agent verified at **1.70 +/- 1.27**. **PASS**.
+   - **Gate 1 (POC 5k steps)**: Entropy dropped from 1.362 to 1.161. Evaluated at 10 episodes: MCTS scored **4.50 +/- 4.50 (HNS: 9.7%)** vs. Raw Policy 0.00. Action distribution at step 5k: NOOP 1%, FIRE 3%, RIGHT 42%, LEFT 54%. Checkpoint saved with full resumable state. **PASS**.
+   - **Gate 2 (20k steps)**: Launched parallel trio (16 sims, 32 sims, policy-only control) across CPU cores 16-31.  
+**Status**: RESOLVED (Gate 0 & Gate 1 fully verified; Gate 2 in progress).
+
+---
+
+## [S-050] Disk Space Exhaustion & Transfer Corruption during Vast.ai Instance Transition
+**Date**: 2026-09-22 / 2026-09-23  
+**File**: `scripts/setup/launch_pdm_lite_download.py`, `scripts/setup/sync_atari_resume.py`  
+**Context**: Migrating both CARLA and Atari workloads from two separate underperforming instances onto a unified RTX 4090 instance ($0.512/hr).  
+**Symptom**:
+1. Initial instance search offered 237 GB disk, which would have filled to 99% immediately after downloading the 79 GB dataset, extracting it (79 GB), storing checkpoints (25 GB), and Docker overlays.
+2. S049c checkpoint transfer from Box 2 truncated prematurely, causing `PytorchStreamReader failed reading zip archive: failed finding central directory (miniz error)` on `model_latest.pt` (file size 26 MB instead of 35 MB).  
+**Root Cause**:
+1. PDM-Lite dataset tar.gz archives require 2× space during download + extraction (`tar -xzf`).
+2. SSH/SCP pipe terminated on Box 2 shutdown before S049c finished syncing.  
+**Fix**:
+1. Sized new container to **458 GB NVMe SSD** with strict disk reservation checks (`--reserve-gb 40`).
+2. Implemented integrity validation: inspected all `.pt` checkpoints with `torch.load` and verified tensor counts (180 tensors each).
+3. Isolated corrupt files into `/workspace/archive_old_atari/` and resumed from authentic verified checkpoint (`1790086674`).
+
+---
+
+## [S-051] Subprocess PYTHONPATH & CLI Argument Inconsistencies in Parallel Benchmark Launcher
+**Date**: 2026-09-23  
+**File**: `atari_qwen/scripts/run_100k_benchmark.py`  
+**Context**: Launching 3 Atari MCTS variants (`S049a` 20 sims, `S049b` 35 sims, `S049c` 50 sims) concurrently in background processes.  
+**Symptom**: Subprocesses exited immediately with return code 1:
+1. `ModuleNotFoundError: No module named 'atari_qwen'`.
+2. Launcher failed with `unrecognized arguments: --configs`.  
+**Root Cause**:
+1. `sys.path.insert(0, str(REPO_ROOT))` was missing in the dynamic `-c` code execution string in `run_100k_benchmark.py`.
+2. The parser defined `--variants`, but CLI scripts passed `--configs`.  
+**Fix**:
+1. Fixed argument parsing to accept both `--variants` and alias `--configs`.
+2. Added `sys.path.insert(0, str(REPO_ROOT))` and `os.environ['MLFLOW_ALLOW_FILE_STORE'] = 'true'` directly into the generated Python command string.
+3. Added unbuffered output handling and individual log file redirection (`results/100k_benchmark/_logs/{run_name}.log`).
+
+---
+
+## [S-052] CPU Thread Thrashing & Resumption Collision on Multi-Workload Co-Utilization
+**Date**: 2026-09-23  
+**File**: `scripts/setup/launch_atari_38k_resumed.py`, `atari_qwen/training/train_mcts_offpolicy.py`  
+**Context**: Running CARLA 8-Town Distillation (12 DataLoader workers) and Atari MCTS (3 variants × 8 envs = 24 env workers) concurrently on 1x AMD Ryzen 9 5950X (16C/32T) + 1x RTX 4090 24GB.  
+**Symptom**: If launched without CPU affinity, 36+ processes fought for CPU scheduler time, causing CARLA throughput to drop from 1,400 to 450 samples/s, and Atari SPS to drop to 2 SPS. Furthermore, `glob.glob("**/model_latest.pt")` picked an older/corrupt run due to modified timestamp sorting.  
+**Fix**:
+1. Implemented strict CPU core partitioning via Linux `taskset`:
+   - CARLA Distillation: `taskset -c 0-15` (16 threads dedicated to PyTorch workers and backbone compute).
+   - Atari MCTS Benchmark: `taskset -c 16-31` (16 threads dedicated to vectorized envs and tree search).
+2. Sized batch size and AMP mixed precision so combined GPU memory is **20,098 MiB / 24,564 MiB**, maintaining a reliable **4.5 GB (18.2%)** headroom against CUDA OOM.
+3. Archiving previous partial runs into `/workspace/archive_old_atari/` to guarantee deterministic resumption from the 38k checkpoint (`start_step=38000`).  
+**Result**: Both workloads operate at maximum throughput concurrently: CARLA at **>1,000 samples/s** and Atari stepping at full speed.
+
+---
+
+## [S-053] Atari MCTS replay windows mixed 8 different games; "resumes" silently restarted training; S049 sweep never varied collection sims
+**Date**: 2026-09-23  
+**File**: `atari_qwen/training/train_mcts_offpolicy.py`, `atari_qwen/scripts/run_100k_benchmark.py`  
+**Symptom**: S049a/b/c (20/35/50 sims) evaluated at 1.00 at 40k and **0.00 at 50k** (S049c), below a random agent. Policy entropy stayed at 1.22–1.32 (uniform = ln 4 = 1.386). The handoff described this as "balanced exploration" and "eliminated collapse"; it was a policy that had learned nothing.  
+**Root cause** (several, each sufficient to invalidate the run):
+1. `MCTSReplayBuffer.add_batch` wrote the 8 vector envs *sequentially* into one flat ring (`env0@t, env1@t, ..., env7@t, env0@t+1`), and `sample_trajectories` took `idx..idx+K` as a K-step trajectory. Every "trajectory" was 5 different games at the same instant, so dynamics, reward, value and consistency targets were noise.
+2. All three S049 configs set `num_simulations=8` for collection; only `eval_simulations` differed. The "sim sweep" swept evaluation only.
+3. With 4 actions and 8 sims, the "visit every child once" rule caps the most peaked visit distribution at (5,1,1,1)/8, i.e. a policy-target entropy floor of 1.07 nats.
+4. Checkpoints were `agent.state_dict()` only, saved only at 10k eval steps. The "38k resume" loaded 30k weights, a fresh optimizer and a 1,000-transition random buffer, with `global_step` hard-coded to 38,000 (`strict=False` load hid any key mismatch).
+5. SPS was `global_step / session_time`, so the resume offset inflated it (reported 37 SPS, real ~2.6).
+6. Gate 2 (S050) repeated 4/5 in a new form: resumed from `checkpoint_best.pt` (step 2,504) while `--start-step 5000` relabelled it, and variant (c) `--collect-with-policy-only` trains the policy toward its own output, so its loss is exactly ln 4 by construction; it is not a search ablation.  
+**Fix**:
+1. Buffer is 2-D `(capacity_per_env, num_envs, ...)`; windows are sampled within one env, never across a `done` or the ring write pointer.
+2. Collection sims 16/32 (no longer 8).
+3. EMA target network (tau 0.005) for value bootstrapping and consistency targets.
+4. `save_checkpoint()` stores model, target model, optimizer, RNG, step, best_eval **and the replay buffer** (`replay_latest.npz`, atomic write) every `--ckpt-interval` (2,500) steps and at every eval. Resume restores the buffer and marks the resume point terminal; the checkpoint's own step always wins over `--start-step`.
+5. SPS counts only steps taken in the current process.
+6. New per-log diagnostics: projection std across batch (collapse check; healthy ~1/sqrt(d)), reward-head recall/false-positive on non-zero rewards, value explained variance, KL(search visits || prior) and how often search changes the prior's argmax. Eval reports standard error and both MCTS and raw-policy scores over 10+ seeded episodes with 30 noop starts.
+7. `atari_qwen/tests/test_gate0_sanity.py`: continuity (incl. after wrap-around, with synthetic resets that break the frame-shift property if a window crosses an episode end), save/load round trip, random agent through the real eval harness.  
+**Note on the random baseline**: through this harness (frameskip 4) a random agent scores ~0.7–0.9, not the literature 1.7 (measured at 10 Hz). Use the measured value for "beats random" gates and 1.7 only inside HNS.  
+**Lesson**: A handoff's adjectives are not results. Before scaling, check that a sampled training window is a real trajectory, that the swept knob is the one the code reads, and that a resume restores state instead of relabelling a step counter.

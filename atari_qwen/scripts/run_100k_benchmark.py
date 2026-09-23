@@ -191,17 +191,26 @@ CONFIGS = {
 }
 
 
-def run_one(name: str, seed: int, cfg: dict, out_root: Path):
+def run_one(name: str, seed: int, cfg: dict, out_root: Path, resume: bool = False, start_step: int = 38000):
     run_name = f"{name}_s{seed}"
     log_dir = f"results/100k_benchmark/{run_name}"
     trainer_module = cfg.get("trainer_module", "atari_qwen.training.train_gtrxl_ez2_onpolicy")
     trainer_func = cfg.get("trainer_func", "train_onpolicy_gtrxl_ez2")
     filtered_cfg = {k: v for k, v in cfg.items() if k not in ("trainer_module", "trainer_func")}
     kwargs = dict(filtered_cfg, seed=seed, log_dir=log_dir)
+    if resume:
+        search_dir = Path(REPO_ROOT) / log_dir
+        candidates = list(search_dir.glob("**/checkpoints/model_latest.pt")) + list(search_dir.glob("**/model_latest.pt"))
+        if candidates:
+            latest_ckpt = max(candidates, key=os.path.getmtime)
+            kwargs["resume_from"] = str(latest_ckpt)
+            kwargs["start_step"] = start_step
+            print(f"--> [RESUME] Found checkpoint for {run_name}: {latest_ckpt} (start_step={start_step})", flush=True)
     arg_str = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
     
     code = (
-        "import os\n"
+        "import os, sys\n"
+        f"sys.path.insert(0, {str(REPO_ROOT)!r})\n"
         "os.environ['MLFLOW_ALLOW_FILE_STORE'] = 'true'\n"
         f"from {trainer_module} import {trainer_func}\n"
         f"{trainer_func}({arg_str})\n"
@@ -222,6 +231,8 @@ def main():
     parser.add_argument("--variants", nargs="+", default=["S047a_100k_standard", "S047b_100k_sample_efficient"])
     parser.add_argument("--seeds", type=int, nargs="+", default=[0])
     parser.add_argument("--parallel", action="store_true", help="Launch variants in background concurrently")
+    parser.add_argument("--resume", action="store_true", help="Resume from latest existing checkpoint in run directory")
+    parser.add_argument("--start-step", type=int, default=38000, help="Initial global_step when resuming (default: 38000)")
     args = parser.parse_args()
 
     out_root = Path(REPO_ROOT) / "results" / "100k_benchmark" / "_logs"
@@ -238,9 +249,18 @@ def main():
                 trainer_func = cfg.get("trainer_func", "train_onpolicy_gtrxl_ez2")
                 filtered_cfg = {k: v for k, v in cfg.items() if k not in ("trainer_module", "trainer_func")}
                 kwargs = dict(filtered_cfg, seed=seed, log_dir=log_dir)
+                if args.resume:
+                    search_dir = Path(REPO_ROOT) / log_dir
+                    candidates = list(search_dir.glob("**/checkpoints/model_latest.pt")) + list(search_dir.glob("**/model_latest.pt"))
+                    if candidates:
+                        latest_ckpt = max(candidates, key=os.path.getmtime)
+                        kwargs["resume_from"] = str(latest_ckpt)
+                        kwargs["start_step"] = args.start_step
+                        print(f"--> [RESUME] Found checkpoint for {run_name}: {latest_ckpt} (start_step={args.start_step})", flush=True)
                 arg_str = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
                 code = (
-                    "import os\n"
+                    "import os, sys\n"
+                    f"sys.path.insert(0, {str(REPO_ROOT)!r})\n"
                     "os.environ['MLFLOW_ALLOW_FILE_STORE'] = 'true'\n"
                     f"from {trainer_module} import {trainer_func}\n"
                     f"{trainer_func}({arg_str})\n"
@@ -260,7 +280,7 @@ def main():
         for name in args.variants:
             cfg = CONFIGS[name]
             for seed in args.seeds:
-                run_one(name, seed, cfg, out_root)
+                run_one(name, seed, cfg, out_root, resume=args.resume, start_step=args.start_step)
 
 
 if __name__ == "__main__":

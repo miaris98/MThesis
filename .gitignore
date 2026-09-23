@@ -10,6 +10,7 @@ __pycache__/
 # tree is still a secret. scripts/sync/hf_push_*.py read the one at the root.
 # ---------------------------------------------------------------------------
 .env
+.remote
 
 # ---------------------------------------------------------------------------
 # External checkouts and reference material, vendored beside the repo rather
@@ -70,3 +71,4 @@ __pycache__/
 .code-review-graph/
 # graphify knowledge-graph output (regenerable via /graphify --update)
 graphify-out/
+scratch/check_box1_detail.py

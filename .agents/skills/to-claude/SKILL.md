@@ -41,7 +41,8 @@ Output the prompt as a clean markdown code block the user can copy:
 =========================================================
 Project: MThesis — Autonomous Driving PPO/WoR on CARLA & Atari Qwen RL
 Repo: github.com/miaris98/MThesis
-RULES: Mandatory MLflow tracking + two-stage sync (E:\MThesis_EXP first -> Hugging Face second via .env). Maximize GPU & CPU co-utilization by running workloads in parallel by default (vectorized envs, multi-worker loaders, parallel trials) with safe 10-15% OOM headroom.
+RULES: Mandatory MLflow tracking + two-stage sync (E:\MThesis_EXP first -> Hugging Face second via .env). Maximize GPU & CPU co-utilization by running workloads in parallel by default with safe 10-15% OOM headroom.
+PROGRESSIVE GATING & MEMORY: All experiments must follow the 4-gate progressive scaling protocol (Gate 1: Smoke POC 3k-5k steps / 1 epoch; Gate 2: Convergence Check 20k steps / 5 epochs; Gate 3: Robustness Check 50k steps / 20 epochs; Gate 4: Full Benchmark 100k / 50 epochs). Every gate MUST save complete resumable checkpoints (model, optimizer, scheduler, step/epoch) and subsequent gates MUST resume directly from previous gate checkpoints (--resume_from) to prevent discarding compute or restarting from scratch. Never recommend launching full 100k/50-epoch runs without Gate 1-2 empirical validation.
 
 PROBLEM:
 <one-paragraph summary of the exact problem>
