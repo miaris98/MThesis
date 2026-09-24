@@ -136,12 +136,32 @@ class TokenMixer(nn.Module):
         return t.transpose(1, 2).reshape(B, C, H, W)
 
 
+def swap_batchnorm(module: nn.Module, skip=()) -> None:
+    """Replace BatchNorm2d(C) by GroupNorm(1, C) (= LayerNorm over C,H,W) and BatchNorm1d(n) by
+    LayerNorm(n) in every submodule except those whose top-level name is in `skip`.
+
+    S-058 (S058b diagnosis): in eval mode - how acting, reanalyze and the target network all run -
+    BatchNorm uses one set of running stats for every unroll depth, but the value-prefix LSTM's
+    features differ strongly between depth 1 and depth 5. The reward head then predicted a phantom
+    +0.25 reward for the first imagined step of any action (real 0.005), the search inflated the root
+    value 3x and the policy collapsed. Layer statistics are per sample, so train == eval."""
+    for name, child in list(module.named_children()):
+        if name in skip:
+            continue
+        if isinstance(child, nn.BatchNorm2d):
+            setattr(module, name, nn.GroupNorm(1, child.num_features))
+        elif isinstance(child, nn.BatchNorm1d):
+            setattr(module, name, nn.LayerNorm(child.num_features))
+        else:
+            swap_batchnorm(child)
+
+
 class EZV2Model(nn.Module):
     def __init__(self, action_dim: int, obs_channels: int = 12, num_channels: int = 64,
                  reduced_channels: int = 16, state_hw: int = 6, fc_layers=(32,),
                  lstm_hidden: int = 512, proj_hidden: int = 1024, proj_out: int = 1024,
                  head_hidden: int = 256, action_embed_dim: int = 16, support: Optional[DiscreteSupport] = None,
-                 trunk: str = "resnet", mixer_dim: int = 128, mixer_depth: int = 2):
+                 trunk: str = "resnet", mixer_dim: int = 128, mixer_depth: int = 2, norm: str = "batch"):
         super().__init__()
         assert trunk in ("resnet", "gtrxl")
         self.action_dim, self.C, self.hw, self.trunk = action_dim, num_channels, state_hw, trunk
@@ -184,6 +204,19 @@ class EZV2Model(nn.Module):
             self.repr_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth)
             self.dyn_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth)
         self.lstm_hidden = lstm_hidden
+        # norm: "batch" = EZ-V2; "heads" = LayerNorm in reward/value/policy heads; "all" = LayerNorm
+        # everywhere except the SimSiam projection (its BatchNorm is what prevents collapse).
+        assert norm in ("batch", "heads", "all")
+        if norm == "heads":
+            for n in ("rew_bn", "rew_bn2", "rew_fc", "pred_res", "v_bn", "p_bn", "v_fc", "p_fc"):
+                sub = getattr(self, n)
+                if isinstance(sub, (nn.BatchNorm1d, nn.BatchNorm2d)):
+                    setattr(self, n, nn.LayerNorm(sub.num_features) if isinstance(sub, nn.BatchNorm1d)
+                            else nn.GroupNorm(1, sub.num_features))
+                else:
+                    swap_batchnorm(sub)
+        elif norm == "all":
+            swap_batchnorm(self, skip=("proj", "proj_head"))
 
     # --- components ---------------------------------------------------------------------------
     def representation(self, obs: torch.Tensor) -> torch.Tensor:

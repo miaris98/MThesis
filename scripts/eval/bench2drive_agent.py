@@ -197,8 +197,25 @@ class WorB2DAgent(AutonomousAgent):
             "command": WOR_LANEFOLLOW_COMMAND,
             "route": route,
         })
+        if os.environ.get("WOR_CREEP") == "1":
+            control = self._creep(input_data, control)
         if os.environ.get("B2D_TELEMETRY_DIR"):
             self._log_telemetry(hero, control, timestamp)
+        return control
+
+    def _creep(self, input_data, control):
+        """TF++ stuck recovery (sensor_agent.py): after stuck_threshold=1100 ticks below 0.1 m/s,
+        force throttle >= 0.4 without brake for creep_duration=20 ticks. TF++ guards the creep with
+        a LiDAR safety box; this agent is RGB-only, so the creep here is unguarded."""
+        spd = input_data["speed"][1]
+        spd = float(spd.get("speed", 0.0)) if isinstance(spd, dict) else float(spd)
+        self._stuck = getattr(self, "_stuck", 0) + 1 if spd < 0.1 else 0
+        if self._stuck > 1100:
+            self._force_move = 20
+        if getattr(self, "_force_move", 0) > 0:
+            control.throttle = max(0.4, control.throttle)
+            control.brake = 0.0
+            self._force_move -= 1
         return control
 
     # ---- optional per-tick telemetry (B2D_TELEMETRY_DIR); off by default ------------------------

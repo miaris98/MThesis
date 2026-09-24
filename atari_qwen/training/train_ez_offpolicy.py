@@ -227,7 +227,7 @@ def train(args):
                                   max_episode_steps=args.train_episode_steps, same_step_autoreset=True)
     A = envs.single_action_space.n
     support = DiscreteSupport()
-    model = EZV2Model(A, obs_channels=3 * 4, support=support, trunk=args.trunk,
+    model = EZV2Model(A, obs_channels=3 * 4, support=support, trunk=args.trunk, norm=args.norm,
                       state_hw=int(np.ceil(args.frame_size / 16))).to(device)
     target = copy.deepcopy(model).eval()
     for p in target.parameters():
@@ -449,6 +449,8 @@ def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--env-id", default="BreakoutNoFrameskip-v4")
     ap.add_argument("--trunk", default="resnet", choices=["resnet", "gtrxl"])
+    ap.add_argument("--norm", default="batch", choices=["batch", "heads", "all"],
+                    help="batch = EZ-V2; heads/all = LayerNorm instead of BatchNorm (S-058: eval-mode BN drift)")
     ap.add_argument("--total-steps", type=int, default=100_000, help="env (agent) steps collected; < --schedule-steps = screen")
     ap.add_argument("--schedule-steps", type=int, default=100_000, help="length of the full run the lr/offline schedules are computed for")
     ap.add_argument("--num-envs", type=int, default=4, help="EZ-V2 data worker uses 4")
