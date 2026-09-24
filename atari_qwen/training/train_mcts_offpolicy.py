@@ -56,7 +56,11 @@ class MCTSReplayBuffer:
         action_dim: int = 4,
         unroll_steps: int = 5,
         capacity_per_env: Optional[int] = None,
+        priority_alpha: float = 0.0,
     ):
+        # priority_alpha > 0 enables prioritized replay (EfficientZero-style): windows are sampled
+        # with probability ~ priority^alpha, priority = root value error, new data at max priority.
+        self.priority_alpha = priority_alpha
         if capacity_per_env is not None:
             self.capacity = capacity_per_env
         else:
@@ -72,6 +76,8 @@ class MCTSReplayBuffer:
         self.done_buf = np.zeros((self.capacity, num_envs), dtype=np.bool_)
         self.pi_buf = np.zeros((self.capacity, num_envs, action_dim), dtype=np.float32)
         self.val_buf = np.zeros((self.capacity, num_envs), dtype=np.float32)
+        self.prio_buf = np.zeros((self.capacity, num_envs), dtype=np.float32)
+        self.max_prio = 1.0
 
         self.ptr = 0
         self.size = 0  # Steps per environment stored
@@ -95,6 +101,7 @@ class MCTSReplayBuffer:
         self.done_buf[self.ptr] = done_batch
         self.pi_buf[self.ptr] = pi_batch
         self.val_buf[self.ptr] = val_batch
+        self.prio_buf[self.ptr] = self.max_prio
 
         self.ptr = (self.ptr + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
@@ -106,6 +113,7 @@ class MCTSReplayBuffer:
             tmp,
             obs=self.obs_buf, act=self.act_buf, rew=self.rew_buf, done=self.done_buf,
             pi=self.pi_buf, val=self.val_buf, ptr=np.int64(self.ptr), size=np.int64(self.size),
+            prio=self.prio_buf, max_prio=np.float64(self.max_prio),
         )
         os.replace(tmp, path)  # atomic: a crash mid-write never leaves a truncated buffer behind
 
@@ -121,74 +129,120 @@ class MCTSReplayBuffer:
         self.val_buf[:] = d["val"]
         self.ptr = int(d["ptr"])
         self.size = int(d["size"])
+        if "prio" in d.files:  # buffers saved before prioritized replay existed stay uniform-valid
+            self.prio_buf[:] = d["prio"]
+            self.max_prio = float(d["max_prio"])
+        else:
+            self.prio_buf[:self.size] = 1.0
         # The environments are freshly reset on resume, so the next stored step starts a new
         # episode. Mark the last stored step terminal so no sampled window stitches the old
         # trajectory onto the new one.
         if self.size > 0:
             self.done_buf[(self.ptr - 1) % self.capacity, :] = True
 
-    def sample_trajectories(self, batch_size: int) -> Dict[str, torch.Tensor]:
+    def update_priorities(self, t_idx: np.ndarray, env_idx: np.ndarray, prios: np.ndarray) -> None:
+        prios = np.abs(prios) + 1e-6
+        self.prio_buf[t_idx, env_idx] = prios
+        self.max_prio = max(self.max_prio, float(prios.max()))
+
+    def _valid_starts(self, t: np.ndarray, e: np.ndarray) -> np.ndarray:
+        """Vectorised validity of window starts (t, e): the K+1 frames t..t+K must be stored,
+        must not straddle the ring write pointer, and steps t..t+K-1 must contain no done."""
+        K = self.unroll_steps
+        offs = np.arange(K + 1)
+        if self.size < self.capacity:
+            ok = t < self.size - K
+            idx = np.minimum(t[:, None] + offs, self.size - 1)
+        else:
+            idx = (t[:, None] + offs) % self.capacity
+            ok = ~np.any(idx == self.ptr, axis=1)
+        ok &= ~np.any(self.done_buf[idx[:, :K], e[:, None]], axis=1)
+        return ok
+
+    def sample_trajectories(self, batch_size: int, beta: float = 1.0) -> Dict[str, torch.Tensor]:
+        """Samples B windows of K steps from single-env trajectories.
+
+        Returns observations as **uint8** (normalise on the GPU): the float32 version was 4x the
+        host->device traffic and was built with per-sample Python loops (see
+        docs/design/atari_mcts_complexity_and_sample_efficiency.md, section 1)."""
         K = self.unroll_steps
         if self.size <= K + 1:
             raise ValueError(f"Buffer size per env ({self.size}) is too small for K={K} unrolls.")
+        n = self.size if self.size < self.capacity else self.capacity
 
-        sampled_envs = []
-        sampled_t = []
-        attempts = 0
-        max_attempts = batch_size * 50
-
-        while len(sampled_envs) < batch_size and attempts < max_attempts:
-            env_i = np.random.randint(0, self.num_envs)
-            if self.size < self.capacity:
-                t_i = np.random.randint(0, self.size - K)
+        if self.priority_alpha > 0:
+            p_all = self.prio_buf[:n].astype(np.float64) ** self.priority_alpha
+            p_flat = (p_all / p_all.sum()).reshape(-1)
+        t_list, e_list = [], []
+        got = 0
+        for _ in range(50):  # oversample and reject invalid starts; a few rounds always suffice
+            m = max(2 * (batch_size - got), 64)
+            if self.priority_alpha > 0:
+                flat = np.random.choice(p_flat.size, size=m, p=p_flat)
+                t_c, e_c = flat // self.num_envs, flat % self.num_envs
             else:
-                t_i = np.random.randint(0, self.capacity)
-                window = [(t_i + k) % self.capacity for k in range(K + 1)]
-                if self.ptr in window:
-                    attempts += 1
-                    continue
+                t_c = np.random.randint(0, n, size=m)
+                e_c = np.random.randint(0, self.num_envs, size=m)
+            ok = self._valid_starts(t_c, e_c)
+            t_list.append(t_c[ok]); e_list.append(e_c[ok])
+            got += int(ok.sum())
+            if got >= batch_size:
+                break
+        t_arr = np.concatenate(t_list)[:batch_size].astype(np.int64)
+        e_arr = np.concatenate(e_list)[:batch_size].astype(np.int64)
+        if t_arr.size < batch_size:  # pathological (almost every window crosses a done): repeat
+            reps = np.resize(np.arange(t_arr.size), batch_size)
+            t_arr, e_arr = t_arr[reps], e_arr[reps]
+        B = batch_size
 
-            indices_k = [(t_i + k) % self.capacity for k in range(K)]
-            if not np.any(self.done_buf[indices_k, env_i]):
-                sampled_envs.append(env_i)
-                sampled_t.append(t_i)
-            attempts += 1
+        idx = (t_arr[:, None] + np.arange(K + 1)) % self.capacity   # (B, K+1)
+        frames = self.obs_buf[idx, e_arr[:, None]]                  # (B, K+1, 4, 84, 84) uint8
+        obs_0 = frames[:, 0]
+        target_future_obs = frames[:, 1:]
+        actions_seq = self.act_buf[idx[:, :K], e_arr[:, None]]
+        rewards_seq = self.rew_buf[idx[:, :K], e_arr[:, None]].astype(np.float32)
+        pi_0 = self.pi_buf[t_arr, e_arr].astype(np.float32)
+        val_0 = self.val_buf[t_arr, e_arr].astype(np.float32)
 
-        if len(sampled_envs) < batch_size:
-            for i in range(batch_size - len(sampled_envs)):
-                sampled_envs.append(sampled_envs[i % len(sampled_envs)])
-                sampled_t.append(sampled_t[i % len(sampled_t)])
-
-        B = len(sampled_envs)
-        obs_0 = np.zeros((B, *self.obs_shape), dtype=np.float32)
-        actions_seq = np.zeros((B, K), dtype=np.int64)
-        rewards_seq = np.zeros((B, K), dtype=np.float32)
-        target_future_obs = np.zeros((B, K, *self.obs_shape), dtype=np.float32)
-        pi_0 = np.zeros((B, self.action_dim), dtype=np.float32)
-        val_0 = np.zeros((B,), dtype=np.float32)
-
-        for b in range(B):
-            e = sampled_envs[b]
-            t = sampled_t[b]
-            obs_0[b] = self.obs_buf[t, e].astype(np.float32) / 255.0
-            pi_0[b] = self.pi_buf[t, e]
-            val_0[b] = self.val_buf[t, e]
-            for k in range(K):
-                step_idx = (t + k) % self.capacity
-                next_step_idx = (t + k + 1) % self.capacity
-                actions_seq[b, k] = self.act_buf[step_idx, e]
-                rewards_seq[b, k] = self.rew_buf[step_idx, e]
-                target_future_obs[b, k] = self.obs_buf[next_step_idx, e].astype(np.float32) / 255.0
+        if self.priority_alpha > 0:
+            # Importance-sampling correction for the non-uniform draw, normalised to max 1.
+            probs = p_flat.reshape(p_all.shape)[t_arr, e_arr]
+            is_w = (probs * p_flat.size) ** (-beta)
+            is_w = (is_w / is_w.max()).astype(np.float32)
+        else:
+            is_w = np.ones((B,), dtype=np.float32)
 
         return {
-            "obs_0": torch.from_numpy(obs_0),
-            "actions_seq": torch.from_numpy(actions_seq),
-            "rewards_seq": torch.from_numpy(rewards_seq),
-            "target_future_obs": torch.from_numpy(target_future_obs),
+            "obs_0": torch.from_numpy(np.ascontiguousarray(obs_0)),
+            "actions_seq": torch.from_numpy(np.ascontiguousarray(actions_seq)),
+            "rewards_seq": torch.from_numpy(np.ascontiguousarray(rewards_seq)),
+            "target_future_obs": torch.from_numpy(np.ascontiguousarray(target_future_obs)),
             "pi_0": torch.from_numpy(pi_0),
             "val_0": torch.from_numpy(val_0),
+            "is_weights": torch.from_numpy(is_w),
+            "t_idx": t_arr,
+            "env_idx": e_arr,
         }
 
+
+
+def augment_obs(x: torch.Tensor, mode: str, pad: int = 4) -> torch.Tensor:
+    """Random shift (replicate-pad by `pad`, random crop back, per image) and optional
+    intensity scaling, on float images in [0, 1] of shape (N, C, H, W). Matches the DrQ/SPR
+    shift used by EfficientZero; done with one grid_sample, so it stays on the GPU."""
+    n, c, h, w = x.shape
+    padded = F.pad(x, (pad, pad, pad, pad), mode="replicate")
+    eps = 1.0 / (h + 2 * pad)
+    arange = torch.linspace(-1.0 + eps, 1.0 - eps, h + 2 * pad, device=x.device, dtype=x.dtype)[:h]
+    arange = arange.unsqueeze(0).repeat(h, 1).unsqueeze(2)
+    base_grid = torch.cat([arange, arange.transpose(1, 0)], dim=2).unsqueeze(0).repeat(n, 1, 1, 1)
+    shift = torch.randint(0, 2 * pad + 1, size=(n, 1, 1, 2), device=x.device, dtype=x.dtype)
+    shift *= 2.0 / (h + 2 * pad)
+    out = F.grid_sample(padded, base_grid + shift, padding_mode="zeros", align_corners=False)
+    if mode == "shift_intensity":
+        noise = 1.0 + 0.05 * torch.randn((n, 1, 1, 1), device=x.device, dtype=x.dtype).clamp_(-2.0, 2.0)
+        out = out * noise
+    return out
 
 
 def evaluate_agent_mcts(
@@ -320,6 +374,10 @@ def train_mcts_offpolicy(
     resume_from: Optional[str] = None,
     start_step: Optional[int] = None,
     ckpt_interval: int = 2_500,
+    reanalyze_ratio: float = 0.0,
+    priority_alpha: float = 0.0,
+    priority_beta: float = 1.0,
+    augment: str = "none",
 ):
     """Off-policy MCTS trainer integrating latent lookahead with prioritized trajectory replay."""
     device = torch.device("cuda" if torch.cuda.is_available() and device_str == "auto" else device_str)
@@ -361,6 +419,15 @@ def train_mcts_offpolicy(
                 "target_tau": target_tau,
                 "seed": seed,
                 "collect_with_policy_only": collect_with_policy_only,
+                "reanalyze_ratio": reanalyze_ratio,
+                "priority_alpha": priority_alpha,
+                "priority_beta": priority_beta,
+                "augment": augment,
+                "learning_rate": learning_rate,
+                "ent_coef": ent_coef,
+                "reward_loss_weight": reward_loss_weight,
+                "ez_value_loss_weight": ez_value_loss_weight,
+                "consistency_loss_weight": consistency_loss_weight,
                 "resume_from": resume_from or "",
             })
             print(f"✓ MLflow Tracking Active: {tracking_uri} (Run: {mlflow_run.info.run_id})", flush=True)
@@ -462,12 +529,23 @@ def train_mcts_offpolicy(
     )
 
     buffer = MCTSReplayBuffer(
-        capacity=buffer_capacity,
+        # Never smaller than the run's budget: EfficientZero keeps every transition, and a 50k ring
+        # silently discarded the first half of a 100k run.
+        capacity=max(buffer_capacity, total_steps),
         num_envs=num_envs,
         obs_shape=(4, 84, 84),
         action_dim=action_dim,
         unroll_steps=unroll_steps,
+        priority_alpha=priority_alpha,
     )
+    # Reanalyze (EfficientZero): refresh stored MCTS policy targets with a new search from the
+    # EMA target network, so old replay data is not trained toward a stale search result.
+    reanalyze_engine = MCTSEngine(
+        action_dim=action_dim,
+        num_simulations=num_simulations,
+        discount=gamma,
+        dirichlet_eps=0.0,
+    ) if reanalyze_ratio > 0 else None
 
     obs, _ = envs.reset()
 
@@ -515,6 +593,9 @@ def train_mcts_offpolicy(
         global_step = buffer.total_transitions
     print(f"--> Training starting at step {global_step:,} / {total_steps:,}\n", flush=True)
 
+    # Wall-clock split per 1k env steps (host-side timers; GPU work is asynchronous, so a phase's
+    # GPU time can land in the next phase that synchronises - read as shares, not exact costs).
+    timing = {"collect": 0.0, "sample": 0.0, "update": 0.0}
     amp_dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
     updates_accumulated = 0.0
     session_start_step = global_step
@@ -548,6 +629,7 @@ def train_mcts_offpolicy(
 
     while global_step < total_steps:
         # A. Collect Transitions with MCTS (or direct policy if collect_with_policy_only)
+        t_c = time.perf_counter()
         obs_norm = torch.as_tensor(obs, device=device).float() / 255.0
         with torch.no_grad():
             if collect_with_policy_only:
@@ -590,6 +672,7 @@ def train_mcts_offpolicy(
         buffer.add_batch(obs, batch_actions, rews, dones, batch_probs, batch_values)
         obs = next_obs
         global_step += num_envs
+        timing["collect"] += time.perf_counter() - t_c
 
         # B. Off-Policy Gradient Updates
         updates_accumulated += num_envs * replay_ratio
@@ -598,12 +681,38 @@ def train_mcts_offpolicy(
 
         loss_dict = {}
         for _ in range(num_updates):
-            batch = buffer.sample_trajectories(batch_size=batch_size)
-            b_obs_0 = batch["obs_0"].to(device)
+            t_s = time.perf_counter()
+            batch = buffer.sample_trajectories(batch_size=batch_size, beta=priority_beta)
+            # uint8 over the bus, normalised on the GPU (4x less host->device traffic).
+            b_obs_0 = batch["obs_0"].to(device, non_blocking=True).float().div_(255.0)
             b_actions = batch["actions_seq"].to(device)
             b_rewards = batch["rewards_seq"].to(device)
-            target_future = batch["target_future_obs"].to(device)
+            target_future = batch["target_future_obs"].to(device, non_blocking=True).float().div_(255.0)
+            b_obs_raw = b_obs_0
+            if augment != "none":
+                # Independent random shift (+intensity) for the online input and every target
+                # frame, as in SPR / EfficientZero: the representation must be invariant to it.
+                b_obs_0 = augment_obs(b_obs_0, augment)
+                Bt, Kt = target_future.shape[:2]
+                target_future = augment_obs(
+                    target_future.reshape(Bt * Kt, *target_future.shape[2:]), augment
+                ).reshape(target_future.shape)
+            timing["sample"] += time.perf_counter() - t_s
+            t_u = time.perf_counter()
             b_pi_0 = batch["pi_0"].to(device)
+            b_is_w = batch["is_weights"].to(device)
+
+            if reanalyze_engine is not None:
+                n_re = int(round(b_obs_0.shape[0] * reanalyze_ratio))
+                if n_re > 0:
+                    with torch.no_grad():
+                        re_z, re_pol = target_agent.encode_observation(b_obs_raw[:n_re])
+                        re_probs, _, _ = reanalyze_engine.search_batch(
+                            re_z, target_agent, device, root_policy_reprs=re_pol,
+                            add_dirichlet=False, temperature=1.0,
+                        )
+                    b_pi_0 = b_pi_0.clone()
+                    b_pi_0[:n_re] = torch.as_tensor(np.asarray(re_probs), device=device, dtype=b_pi_0.dtype)
 
             with torch.amp.autocast(device_type="cuda", dtype=amp_dtype):
                 # 1. Forward root observation through active agent
@@ -636,10 +745,12 @@ def train_mcts_offpolicy(
                 # 5. Losses
                 # A. Policy Cross-Entropy against MCTS visit distribution
                 log_probs_0 = F.log_softmax(logits_0, dim=-1)
-                policy_loss = -(b_pi_0 * log_probs_0).sum(dim=-1).mean()
+                # Per-sample losses weighted by the prioritized-replay IS weights (all 1 when uniform).
+                policy_loss = (b_is_w * -(b_pi_0 * log_probs_0).sum(dim=-1)).mean()
 
                 # B. Value Loss (root + unrolled dynamics values)
-                root_v_loss = F.smooth_l1_loss(value_0.squeeze(-1), target_returns[:, 0])
+                root_v_loss = (b_is_w * F.smooth_l1_loss(
+                    value_0.squeeze(-1), target_returns[:, 0], reduction="none")).mean()
                 unroll_v_loss = 0.0
                 reward_loss = 0.0
                 consistency_loss = 0.0
@@ -671,11 +782,17 @@ def train_mcts_offpolicy(
             nn.utils.clip_grad_norm_(agent.parameters(), max_grad_norm)
             optimizer.step()
 
+            if priority_alpha > 0:
+                with torch.no_grad():
+                    td_err = (value_0.squeeze(-1).float() - target_returns[:, 0].float()).abs().cpu().numpy()
+                buffer.update_priorities(batch["t_idx"], batch["env_idx"], td_err)
+
             # EMA soft-update of target network
             with torch.no_grad():
                 for param, target_param in zip(agent.parameters(), target_agent.parameters()):
                     target_param.data.mul_(1.0 - target_tau).add_(param.data, alpha=target_tau)
 
+            timing["update"] += time.perf_counter() - t_u
             loss_dict = {
                 "total": total_loss.item(),
                 "policy": policy_loss.item(),
@@ -744,6 +861,19 @@ def train_mcts_offpolicy(
                     except Exception:
                         pass
             writer.add_scalar("charts/SPS", sps, global_step)
+
+        if global_step % 1000 < num_envs and loss_dict:
+            tot = max(sum(timing.values()), 1e-9)
+            print("    [time/1k] " + " | ".join(
+                f"{k} {v:.0f}s ({100 * v / tot:.0f}%)" for k, v in timing.items()), flush=True)
+            for k, v in timing.items():
+                writer.add_scalar(f"time/{k}_s_per_1k", v, global_step)
+                if mlflow_run:
+                    try:
+                        mlflow.log_metric(f"time_{k}_s_per_1k", v, step=global_step)
+                    except Exception:
+                        pass
+            timing = dict.fromkeys(timing, 0.0)
 
         # Periodic Evaluation with MCTS and Raw Policy
         if global_step % eval_interval < num_envs or global_step >= total_steps:
@@ -844,6 +974,17 @@ if __name__ == "__main__":
                              "policy target then becomes the policy's own output, so it has no "
                              "improvement signal and drifts to uniform (policy loss == ln|A|). The "
                              "search-vs-no-search comparison is the dual MCTS/raw evaluation.")
+    parser.add_argument("--reanalyze-ratio", type=float, default=0.0,
+                        help="Fraction of each batch whose policy target is recomputed by a fresh target-network search")
+    parser.add_argument("--priority-alpha", type=float, default=0.0, help="Prioritized replay exponent (0 = uniform)")
+    parser.add_argument("--priority-beta", type=float, default=1.0, help="Importance-sampling exponent for prioritized replay")
+    parser.add_argument("--augment", type=str, default="none", choices=["none", "shift", "shift_intensity"],
+                        help="DrQ/SPR/EfficientZero-style augmentation of root and consistency-target frames")
+    parser.add_argument("--ent-coef", type=float, default=0.01)
+    parser.add_argument("--reward-loss-weight", type=float, default=1.0)
+    parser.add_argument("--value-loss-weight", type=float, default=0.25)
+    parser.add_argument("--consistency-loss-weight", type=float, default=0.5)
+    parser.add_argument("--run-label", type=str, default=None)
     parser.add_argument("--ckpt-interval", type=int, default=2500,
                         help="Env steps between resumable checkpoint_latest.pt + replay buffer saves")
     parser.add_argument("--log-dir", type=str, default="results/100k_benchmark/S049_mcts_offpolicy")
@@ -871,6 +1012,15 @@ if __name__ == "__main__":
         resume_from=args.resume_from,
         start_step=args.start_step,
         ckpt_interval=args.ckpt_interval,
+        reanalyze_ratio=args.reanalyze_ratio,
+        priority_alpha=args.priority_alpha,
+        priority_beta=args.priority_beta,
+        augment=args.augment,
+        ent_coef=args.ent_coef,
+        reward_loss_weight=args.reward_loss_weight,
+        ez_value_loss_weight=args.value_loss_weight,
+        consistency_loss_weight=args.consistency_loss_weight,
+        run_label=args.run_label,
     )
 
 

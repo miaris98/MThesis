@@ -11,7 +11,11 @@ apt-get update -qq
 apt-get install -y -qq kmod aria2 wget libtiff5-dev 2>/dev/null || apt-get install -y -qq kmod aria2 wget
 
 echo "===== [2/7] NVIDIA userspace driver (matching kernel module exactly) ====="
-DRIVER_VERSION=$(cat /proc/driver/nvidia/version | grep -oP '(?<=Module  )[0-9.]+' | head -1)
+# First x.y(.z) version on the NVRM line. The old lookbehind '(?<=Module  )' matched the proprietary
+# module's line only; the Open kernel module prints 'Open Kernel Module for x86_64  595.71.05', so it
+# returned empty and the Vulkan userspace driver was silently never installed (2026-09-23).
+DRIVER_VERSION=$(head -1 /proc/driver/nvidia/version | grep -oE '[0-9]{3}\.[0-9]+(\.[0-9]+)?' | head -1)
+[ -n "$DRIVER_VERSION" ] || { echo "FATAL: could not parse driver version from /proc/driver/nvidia/version"; exit 1; }
 echo "Kernel driver version: ${DRIVER_VERSION}"
 cd /workspace
 if [ ! -f "NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run" ]; then

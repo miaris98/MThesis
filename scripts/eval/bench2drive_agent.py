@@ -191,14 +191,64 @@ class WorB2DAgent(AutonomousAgent):
             hero, self._route_locations, self._route_idx,
             route_points=self._inner.route_points)
 
-        return self._inner.run_step({
+        control = self._inner.run_step({
             "rgb_front": rgb,
             "speed": input_data["speed"],  # (frame, {'speed': m/s}) - already the trained unit
             "command": WOR_LANEFOLLOW_COMMAND,
             "route": route,
         })
+        if os.environ.get("B2D_TELEMETRY_DIR"):
+            self._log_telemetry(hero, control, timestamp)
+        return control
+
+    # ---- optional per-tick telemetry (B2D_TELEMETRY_DIR); off by default ------------------------
+    # Answers the two questions route results cannot: after a collision, is the car stopped or
+    # crawling (and what speed does the policy ask for), and in a vehicle collision, who hit whom
+    # (ego velocity vs the other actor's, and where the other actor was in the ego frame).
+    def _log_telemetry(self, hero, control, timestamp):
+        import csv, json, time
+        if getattr(self, "_tele", None) is None:
+            d = os.environ["B2D_TELEMETRY_DIR"]
+            os.makedirs(d, exist_ok=True)
+            stem = os.path.join(d, f"{time.strftime('%Y%m%d-%H%M%S')}_hero{hero.id}")
+            self._tele_f = open(stem + "_ticks.csv", "w", newline="")
+            self._tele = csv.writer(self._tele_f)
+            self._tele.writerow(["t", "x", "y", "yaw", "speed_mps", "target_kmh", "throttle", "brake", "steer"])
+            self._coll_f = open(stem + "_collisions.jsonl", "w")
+            bp = CarlaDataProvider.get_world().get_blueprint_library().find("sensor.other.collision")
+            self._coll_sensor = CarlaDataProvider.get_world().spawn_actor(bp, carla.Transform(), attach_to=hero)
+
+            def on_collision(ev, hero=hero, f=self._coll_f):
+                ht, hv, ov = hero.get_transform(), hero.get_velocity(), ev.other_actor.get_velocity()
+                rel = ev.other_actor.get_location() - ht.location
+                fwd, right = ht.get_forward_vector(), ht.get_right_vector()
+                f.write(json.dumps({
+                    "t": ev.timestamp, "other_type": ev.other_actor.type_id, "other_id": ev.other_actor.id,
+                    "ego_speed": (hv.x ** 2 + hv.y ** 2) ** 0.5, "other_speed": (ov.x ** 2 + ov.y ** 2) ** 0.5,
+                    # other actor in the ego frame: +fwd = ahead of us, +right = to our right
+                    "other_rel_fwd": rel.x * fwd.x + rel.y * fwd.y, "other_rel_right": rel.x * right.x + rel.y * right.y,
+                    # closing speeds along the ego->other line: >0 = that party moves toward the other
+                    "ego_closing": (hv.x * rel.x + hv.y * rel.y) / max((rel.x ** 2 + rel.y ** 2) ** 0.5, 1e-3),
+                    "other_closing": -(ov.x * rel.x + ov.y * rel.y) / max((rel.x ** 2 + rel.y ** 2) ** 0.5, 1e-3),
+                    "impulse": [ev.normal_impulse.x, ev.normal_impulse.y, ev.normal_impulse.z],
+                }) + "\n")
+                f.flush()
+            self._coll_sensor.listen(on_collision)
+        tr, v = hero.get_transform(), hero.get_velocity()
+        tgt = getattr(getattr(getattr(self._inner, "net", None), "controller", None), "target_speed", None)
+        self._tele.writerow([f"{timestamp:.2f}", f"{tr.location.x:.2f}", f"{tr.location.y:.2f}", f"{tr.rotation.yaw:.1f}",
+                             f"{(v.x ** 2 + v.y ** 2) ** 0.5:.2f}", "" if tgt is None else f"{float(tgt):.1f}",
+                             f"{control.throttle:.2f}", f"{control.brake:.2f}", f"{control.steer:.3f}"])
 
     def destroy(self):
+        if getattr(self, "_coll_sensor", None) is not None:
+            try:
+                self._coll_sensor.stop(); self._coll_sensor.destroy()
+            except Exception:
+                pass
+        for f in (getattr(self, "_tele_f", None), getattr(self, "_coll_f", None)):
+            if f is not None:
+                f.close()
         # Resets the PID's integrator state. The evaluator builds a fresh agent per route, so
         # this is belt-and-braces rather than load-bearing, but leaving stale integrator state
         # behind is exactly the kind of cross-route leakage that would bias a comparison.

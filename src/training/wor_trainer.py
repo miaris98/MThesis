@@ -504,7 +504,8 @@ class WorldOnRailsTrainer:
             warmup_frac=self.warmup_frac, peak_lr=self.lr_heads
         )
 
-    def train(self, num_epochs: int = 50, save_freq: int = 5, resume_from: Optional[str] = None):
+    def train(self, num_epochs: int = 50, save_freq: int = 5, resume_from: Optional[str] = None,
+              stop_epoch: Optional[int] = None):
         """Runs the full distillation training loop with checkpointing.
 
         resume_from: path to a `model_epoch_*.pth` written by a prior call (needs its
@@ -545,10 +546,13 @@ class WorldOnRailsTrainer:
                 self.scheduler.step()
             print(f"--> Resumed from {resume_from}: continuing at epoch {start_epoch}/{num_epochs}")
 
-        for epoch in range(start_epoch, num_epochs + 1):
+        # stop_epoch ends the run early without shortening the LR schedule (built above for
+        # num_epochs), so a screening run is an exact prefix of the full run it may later resume into.
+        last_epoch = min(num_epochs, stop_epoch) if stop_epoch else num_epochs
+        for epoch in range(start_epoch, last_epoch + 1):
             metrics = self.train_epoch(epoch)
             if self.val_loader is not None and (epoch % self.val_every == 0
-                                                or epoch == num_epochs):
+                                                or epoch == last_epoch):
                 metrics.update(self.validate())
             # `select_on` is absent from metrics on a skipped-validation epoch, which is
             # exactly when no checkpoint should be promoted to best - not a failure case.
@@ -578,7 +582,7 @@ class WorldOnRailsTrainer:
             # Optimizer state is only needed to resume, and for AdamW it is twice the
             # size of the weights it tracks - so it rides along with the periodic
             # snapshots rather than being rewritten every epoch.
-            if epoch % save_freq == 0 or epoch == num_epochs:
+            if epoch % save_freq == 0 or epoch == last_epoch:
                 # Both the "latest" and the dated snapshot need this: "latest" gets
                 # overwritten every subsequent epoch (without optimizer state, since
                 # `common` is rebuilt from scratch each iteration), so it's only ever

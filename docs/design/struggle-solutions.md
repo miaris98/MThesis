@@ -933,3 +933,125 @@ This is safe specifically because `validate_and_resume`'s *second* check (`route
 7. `atari_qwen/tests/test_gate0_sanity.py`: continuity (incl. after wrap-around, with synthetic resets that break the frame-shift property if a window crosses an episode end), save/load round trip, random agent through the real eval harness.  
 **Note on the random baseline**: through this harness (frameskip 4) a random agent scores ~0.7–0.9, not the literature 1.7 (measured at 10 Hz). Use the measured value for "beats random" gates and 1.7 only inside HNS.  
 **Lesson**: A handoff's adjectives are not results. Before scaling, check that a sampled training window is a real trajectory, that the swept knob is the one the code reads, and that a resume restores state instead of relabelling a step counter.
+
+---
+
+## [S-054] Official EfficientZero baseline (paper config) on 1 GPU; Gate 2 settled at 32 sims; CARLA world-load segfaults
+**Date**: 2026-09-23  
+**Files**: `/workspace/EfficientZero` (upstream YeWR/EfficientZero, unmodified code), `/workspace/ez_train.sh`, `scripts/setup/launch_gate3.sh`, `scripts/eval/launch_b2d20.sh`
+
+**Why a new EfficientZero baseline**: the 2026-09-21 LightZero run (S-045) never finished (~60k env steps, last eval 12.0 over 3 episodes) and used LightZero's shipped defaults, not the paper's: `reanalyze_ratio=0`, `use_priority=False`, `replay_ratio=0.25` (~25k updates vs the paper's 100k training steps), 64x64 input. It is not a faithful paper baseline.
+
+**Setup (paper hyperparameters untouched, `config/atari/__init__.py`)**: 100k training steps, 100k env transitions, 50 simulations, batch 256, td_steps 5, SGD lr 0.2 with warm-up/decay, target model every 200 steps, priority replay with max priority for new data, value prefix, off-policy correction, consistency loss, 96x96 input, `--p_mcts_num 4` as in `train.sh`. Deviations, all infrastructure only:
+- Workers scaled from the paper's 4 GPU / 96 CPU / 14 cpu_actor / 20 gpu_actor to 1 GPU / 30-40 CPU / 7-10 cpu_actor / 5 gpu_actor. `selfplay_worker.py:175` throttles self-play to `trained_steps / training_steps`, so the data:update ratio is the paper's regardless of worker count; only wall clock changes.
+- torch 2.0.1+cu118 instead of the 1.8 pin (no sm_89 kernels for the RTX 4090 in 1.8); `tqdm` added (imported by `core/test.py`, missing from requirements.txt).
+- `--object_store_memory 20e9`: the 150 GB default makes Ray 1.0 compute negative task memory inside a 64 GB container (`ValueError ... available for tasks and actors (-112.54 GB)`).
+Seed 0 on the 4090 box, seed 1 on GPU 0 of the 2x3090 Ti box. Our own Atari runs were stopped (not frozen - frozen processes keep their ~12.6 GB VRAM) at their last full checkpoints: S053c @22,504 (Gate 3, to 50k), S054a @3,504, S054b @3,504; each resumes with `launch_gate3.sh resume ...` / its own checkpoint, buffer included.
+
+**Gate 2 result (off-policy MCTS, 20k steps, 20 eval episodes, SE)**: 32 sims seed 1 = 11.00 +/- 1.11, seed 2 = 10.70 +/- 0.77; 16 sims seed 1 = 3.95, seed 2 = 4.30; random through our harness ~0.8. 32 sims beats 16 within every seed; search beats the raw policy in every from-scratch run. Runs resumed from Gate 1 with an empty buffer (S053a/b) degraded after 10k - the failure mode S-053 fixed.
+
+**CARLA Bench2Drive segfaults**: CarlaUE4 dies with `Signal 11 ... LargeMemoryPoolOffset` during "Loading the world". Route 27515 (Town03) crashed it 10/10 times on two different boxes, even on a fresh server, although the 2026-09-16 baseline completed it; because a resumed evaluator cannot skip a route, it blocked the rest of its arm. Workaround: remaining routes run as their own arm without it; 27515 gets an isolated retry. A crash *during* a route is recorded as "Failed - Simulation" with score 0 (e.g. 25975 on the epoch-50 arm) - that is a harness failure and must be re-run and merged (`merge_leaderboard_results.py`), never averaged in.
+
+---
+
+## [S-055] First-20k-step Optuna search of the off-policy MCTS trainer against EfficientZero V2
+**Date**: 2026-09-23  
+**Files**: `atari_qwen/training/train_mcts_offpolicy.py`, `atari_qwen/training/optimize_mcts_optuna.py`
+
+**Goal**: match or beat EfficientZero V2's Breakout score at 20k env steps (official EZ-V2 run in progress on the same box; its 10k/20k checkpoints will be evaluated offline with 27k-step episodes for the comparison - see S-054 for why its in-training evals are unusable).
+
+**New trainer options** (all default off, so earlier configs are unchanged):
+- `--reanalyze-ratio r`: for the first r of every sampled batch, the stored MCTS policy target is replaced by a fresh search from the EMA target network (EfficientZero reanalyze, policy part only).
+- `--priority-alpha a / --priority-beta b`: prioritized replay over (t, env) window starts, priority = |root value - bootstrapped target|, new data at max priority, IS-weighted policy and root-value losses; priorities persist in `replay_latest.npz` (older buffers load as uniform).
+- `--ent-coef`, `--value-loss-weight`, `--reward-loss-weight`, `--consistency-loss-weight`, `--run-label` exposed on the CLI.
+Not done: categorical (binned) reward/value targets - they change the network heads and every value read inside the MCTS engine; deferred.
+
+**Search**: 50 trials, TPE sampler, seed 1 for every trial (configs differ, noise does not), 20k steps, eval every 5k (10 episodes). MedianPruner kills a trial behind the median at 10k/15k after 6 completed trials; 2.5 h wall-clock cap per trial. Trial 0 is the Gate-2 recipe (32 sims: 11.00 / 10.70 at 20k on seeds 1 / 2). Space: sims {16,32}, lr [1e-4,1e-3], replay ratio {0.5,1,2}, batch {128,256}, reanalyze {0,0.1,0.25}, priority alpha {0,0.6,1}, target tau [0.002,0.02], ent coef [1e-3,2e-2], value weight {0.25,0.5,1}, consistency weight {0.5,1,2}.
+
+**Cost finding from the smoke test**: reanalyze 0.5 + replay ratio 1.0 ran at ~1 env step/s (64 extra tree searches per gradient update, GPU shared with EZ-V2), i.e. ~5.5 h per 20k trial - hence reanalyze capped at 0.25. Reanalyze is the most expensive lever by far; batching it across updates is the next speed fix if it wins.
+
+**Before any claim**: re-run the top 3 configs on seeds 2 and 3.
+**Update (same day)**: the study was stopped before any trial finished and reset, so it runs only *after* EZ-V2 completes (`/workspace/after_ezv2.sh`): (1) EZ-V2's saved `model_10000.p` / `model_20000.p` are evaluated with `scripts/eval/eval_ezv2_checkpoint.py` (repo's own `ez.eval.eval`, 10 episodes, 27,000-step cap; EZ-V2 training steps track env transitions ~1:1, step 20k = ~19.4k transitions); (2) once `ez/train.py` exits, the study starts with 3 concurrent trials on the free GPU and `--target-score` = EZ-V2's 20k mean, stopping early if a trial reaches it. Pruning stays median-based: pruning on "below EZ-V2 at the same step" would kill every trial if all are below it and leave the search with no signal.
+
+---
+
+## [S-056] WITHDRAWN - Atari iteration loop: 10k-step screens against the human score
+> **Withdrawn the same day (misread instruction).** The user did not want the post-EZ-V2 study changed; the study stays as in S-055 (20k trials, EZ-V2 20k score as target, 3 jobs). What the user asked for is S-057: 10k-step experiments run *now*, in the GPU headroom next to EZ-V2. The watchdog was reverted to the S-055 settings. Kept below for the record.
+**Date**: 2026-09-23  
+**Files**: `scripts/training/ezv2_then_optuna_watchdog.sh`, `atari_qwen/training/optimize_mcts_optuna.py`, `scripts/eval/eval_ezv2_checkpoint.py`
+
+**Decision (user)**: iterate on the off-policy MCTS agent with short experiments capped at **10k env steps**; the bar is the **human score (Breakout 30.5, HNS 100%)**. If no configuration clears it, add the next algorithmic improvement and screen again. Nothing runs next to the EfficientZero V2 baseline while it trains.
+
+**Mechanics** (supersedes the 20k study in S-055, which never completed a trial):
+- The watchdog waits for EZ-V2's `ez/train.py` to exit, evaluates EZ-V2's `model_10000.p` / `model_20000.p` (10 episodes, 27k cap) as the comparison baseline, then starts study `S056_mcts_first10k`: 50 trials, 10k steps, evals every 2.5k (10 episodes), MedianPruner from 5k after 6 completed trials, 1.5 h per-trial cap, `--target-score 30.5` stops the study on the first trial that clears the human score. 4 concurrent trials x 11 cores on the free 24 GB GPU (~5 GB each -> ~17% VRAM headroom); `gpu_util.log` samples utilisation every 5 min. Driver restarted up to 5x on failure; trials persist in `/workspace/optuna_mcts.db`.
+- Trial 0 is the Gate-2 recipe (32 sims). Reference points at 10k: ours 7.90 (seed 1, S053c), EZ-V2 = model_10000 eval (pending).
+
+**Expectation, stated in advance**: 30.5 at 10k is a high bar (our best is 7.9; EZ-V2's own 10k score will show what the strong baseline does at this budget). A "not cleared" result is the expected trigger for the improvement queue, in order:
+1. Categorical (binned, h-transformed) reward/value targets - network heads + every MCTS value read.
+2. Spatial latent dynamics (conv dynamics over a 6x6 latent instead of the flat 256-d MLP).
+3. Batched reanalyze (the 0.1-0.25 cap exists only because per-update reanalyze searches are slow).
+Each is screened with the same 10k protocol and the study's best config.
+
+---
+
+## [S-057] 10k-step experiments in the GPU headroom next to the EZ-V2 baseline
+**Date**: 2026-09-23  
+**Files**: `scripts/setup/launch_gate3.sh` (scratch mode), `atari_qwen/training/train_mcts_offpolicy.py` (S-055 flags)
+
+**What the user asked for**: use the spare capacity *now* for short experiments (max 10k env steps) on our off-policy MCTS agent, judged against the **human score (Breakout 30.5)**; when a configuration falls short, try the next improvement. The post-EZ-V2 Optuna study (S-055) is unchanged and still starts from the watchdog.
+
+**Headroom sizing** (RTX 3090 24.5 GB, 46-CPU quota): EZ-V2 uses 11.0 GB and ~100% GPU compute. Keeping a 15% VRAM reserve leaves ~10 GB -> **2 concurrent experiments** (~4 GB each); measured 19.1/24.6 GB after launch (22% free). Compute is shared, so the experiments slow EZ-V2: before launch it ran 0.364 s/step (step 27,950, 9.3 h left). Rule: drop to one experiment if EZ-V2 slows by more than ~25%.
+
+**Round 1** (seed 1, 32 sims, 10k steps, eval 5k/10k x 10 episodes; paired reference = S053c seed 1, current recipe, **7.90 at 10k**):
+
+| Run | Change vs recipe | 5k | 10k | vs 7.90 / vs human 30.5 |
+|---|---|---|---|---|
+| S057a_10k_per06_rr1_s1 | prioritized replay a=0.6 + replay ratio 1.0 | stopped at 2k | - | requeued |
+| S057b_10k_re025_per06_s1 | reanalyze 0.25 + prioritized replay a=0.6 | stopped at 2k | - | requeued |
+| S057c_10k_aug_si_s1 | **augmentation shift+intensity** (only change) | 0.00 (MCTS pressed FIRE 100%) | **3.90 +/- 1.45 SE** (n=10) | below 7.90; far below 30 -> resumed to 20k |
+
+**Round-2 reading (S057c)**: worse than the paired reference at 10k, but **not conclusive**. Without augmentation our two seeds scored 7.90 (seed 1) and 2.80 (seed 2) at 10k and both reached ~11 by 20k, so 10k single-run scores span at least 2.8-7.9 for an *unchanged* recipe; 3.90 lies inside it. Augmentation is also known to slow the earliest learning (harder input) and pay off later. Health signals at 10k were fine (proj_std 0.055, V ev 0.93, reward recall 0.38, search changes the prior's argmax 38%).
+**Protocol lesson**: a single 10k run cannot rank changes of this size. Either >=2 seeds per arm at 10k, or compare at 20k where the reference is tighter (11.00 / 10.70 on two seeds). S057c was resumed from its full 10k checkpoint (buffer restored) to 20k to get that comparison.
+
+**Headroom was VRAM, not compute.** With S057a+b running, EZ-V2 went from 0.33 to **0.61 s/step (+84%)** (measured 28,800 -> 29,100 in 182 s) and each experiment ran at ~1 env step/s: the GPU was already compute-saturated by EZ-V2. Rule was "drop to one experiment above +25%", so both were stopped at 2k steps and the single slot went to the top-ranked lever from `docs/design/atari_mcts_complexity_and_sample_efficiency.md` (augmentation), one change vs the paired reference (seed 1, recipe, 7.90 @10k).
+
+**Target (user)**: the score to beat is **30** (human 30.5).
+
+**Code added for round 2** (`train_mcts_offpolicy.py`, all verified by Gate 0 + an 1,200-step smoke run):
+- Vectorised uint8 replay sampler (`_valid_starts` + fancy-index gather, normalisation on GPU): same distribution and validity rules, no per-sample Python loops, 1/4 of the host->device bytes.
+- `--augment none|shift|shift_intensity` (`augment_obs`: replicate-pad 4 + integer random crop via one `grid_sample`, optional 5% intensity noise), applied independently to the root input and each consistency-target frame; reanalyze searches use the un-augmented frames.
+- `[time/1k]` wall-clock split logged to stdout/TensorBoard/MLflow. First measurement (smoke, batch 32, GPU shared): **update 78% | collect 15% | sample 6%** - the encoder over 6 frames per sample dominates, so 121 -> 36 visual tokens is the biggest speed lever.
+- `buffer_capacity` raised to at least `total_steps` (a 50k ring had been discarding half of a 100k run).
+
+**Next if neither clears 30.5**: categorical reward/value targets, then spatial latent dynamics, then batched reanalyze (S-056 queue), each as another headroom round against the same references.
+
+---
+
+## [S-058] Match EfficientZero V2, keep the transformer as the novel part
+**Date**: 2026-09-24  
+**Files**: `atari_qwen/models/ez_model.py`, `atari_qwen/mcts/gumbel_mcts.py`, `atari_qwen/training/train_ez_offpolicy.py`, `atari_qwen/envs/atari_wrappers.py` (new options, defaults unchanged)
+
+**Trigger**: EZ-V2 reproduction on box3 (seed 0, 120k training steps) reached 9.8 / 37.2 at 10k / 20k checkpoints (10 episodes) and 312 in its in-training eval at ~69k; paper reports 400.1 at 100k. Our off-policy MCTS agent: 11.6 best at 20k; S-055 Optuna trials 2.1 / 9.9 / 6.9 at 20k. The S-055 study was stopped (user) - hyper-parameters cannot close a 3.5x gap at 20k.
+
+**Structural defects found in `train_mcts_offpolicy.py` (all absent in EZ-V2 / MuZero)**:
+1. Search mixes heads that are never trained together: root prior = `actor_head(policy token)`, leaf prior = `actor_head(dynamics latent)` (the head never sees dynamics latents in training), root value = `critic_head`, leaf value = `predictor.value_head`. Policy loss only at the root. -> in-tree priors are close to noise.
+2. Windows containing a done are never sampled; with episodic life every lost ball is a done, so the transitions leading to a life loss are never trained on.
+3. Value targets are a 5-step GAE confined to the unroll window, scalar smooth-L1 (no categorical support), gamma 0.99 (EZ-V2: 0.997^4 = 0.988 per step).
+4. gymnasium 1.3 vector envs default to NEXT_STEP autoreset: the step after each done is a junk transition (terminal frame -> reset frame, action ignored, reward 0, done False). Every life loss in the old replay is followed by one; windows stitch across it.
+5. `cv2` was missing in `/venv/main`, so frames were down-sampled by nearest-neighbour indexing, not INTER_AREA.
+
+**Decision (user: "match EfficientZero as close as possible while still a bit novel")**: a new trainer that copies EZ-V2's Atari recipe from its source (`E:\MThesis_EXP\reference_code\EfficientZeroV2`), with one switch:
+- `--trunk resnet`: EZ-V2's network layer for layer (DownSample ResNet -> 64x6x6, conv dynamics with action plane, 601-bin h-transformed value and value-prefix LSTM heads, SimSiam 1024-d, BatchNorm). This is the *pipeline check*: it should land near EZ-V2's own curve (9.8 @10k, 37.2 @20k).
+- `--trunk gtrxl` (thesis variant): identical heads/losses/search, plus GTrXL token mixing over the 36 spatial tokens after representation and after every dynamics step; zero-initialised output projection so it starts as the resnet model and must earn its contribution.
+
+**Recipe copied from EZ-V2** (config `atari_breakout.yaml`, `agents/base.py:update_weights`, `worker/batch_worker.py`): RGB 96x96, 4-stack, no FIRE reset, 3,000-step training episodes, episodic life, clipped reward; unroll 5, TD 5, value prefix horizon 5; Gumbel search 16 sims / top-4 / sequential halving (halve after sims 7 and 15), c_visit 50, c_scale 0.1, noise not temperature-scaled (their cython path); collection acts with the search's best action; reanalyze of *every* sampled state (policy = improved policy of a target-network search; search value for the "mixed" target after 30k updates on data older than 5k transitions); prioritized replay alpha = beta = 1 on |V - target|; SGD lr 0.2, 1% warm-up, momentum 0.9, wd 1e-4, batch 256, grad-norm 5, gradient scale 1/K, 0.5 gradient scale on dynamics states; loss weights reward 1, value 0.5 (x0.5 inside, as their `Value_loss`), policy 1, consistency 5; target network hard copy every 200 updates; ~1 update per env step + 20% offline updates. Windows run past episode ends with masks (terminal value 0, empty policy target).
+
+**Deliberate differences**: one synchronous process (collect -> update at a fixed ratio) instead of Ray workers; the Gumbel tree is batched on the GPU as fixed-size tensors (EZ-V2 needed cython) - checked on a toy model: the improved policy puts 0.92 on the rewarding action, best action 100% without noise, 86% with Gumbel noise (as intended), root visits 1+16; replay frames live on the GPU (100k RGB steps ~2.8 GB).
+
+**Protocol**: 10k-step screens (S-057) against EZ-V2's own checkpoints evaluated with the same 10 episodes / 27k cap: resnet first (must approach 9.8 @10k), then gtrxl on the same seeds; >= 2 seeds before any claim.
+
+**S058a result (2026-09-24): 0.0 at 5k and at 10k (10/10 episodes each) vs EZ-V2 9.8 @10k -> stopped, diagnosed.**
+Replay + checkpoint forensics (`checkpoint_env10000_upd8004.pt`): lives 38 steps on average, reward/step falling 0.010 -> 0.005, root search value rising 0.08 -> 2.27, policy collapsing to LEFT 57% / RIGHT 2%. Value head vs the replay's Monte-Carlo return (0.15): online eval-mode 2.89, target 1.81, online train-mode BN 1.48, correlation 0.07. The k=0 target was 0.04 reward + 1.49 bootstrap. Every BatchNorm on the value path had drifted in eval mode (running vs actual stats: 1-5 sd shift, `v_fc.1` 4.5 sd / variance 10x off); re-estimating the BN stats brought eval V to 1.52 (= train mode) but still 10x the return -> a self-inflating bootstrap loop, fed by eval-mode BN drift of the target network.
+Two deviations from EZ-V2's first 10k steps explain it: (1) the 1% lr warm-up was scaled to the 10k screen (lr 0.2 after 120 updates instead of 1,000); (2) consistency-target frames were encoded in one batched call, so BN running stats were refreshed 2x per update instead of EZ-V2's 6x. Fixes: `--schedule-steps` (default 100k) - lr warm-up/decay, offline phase and mixed-value start follow the full run and a screen is an exact prefix (the CARLA `--stop_epoch` rule); per-step target encoding as EZ-V2. Re-run: S058b_resnet_10k_s0_prefix.
+Also: EZ-V2's final `model.p` was saved from a `torch.compile`d model (`_orig_mod.` key prefix) - stripped into `models/model_120000.p` before evaluating.
+EZ-V2 checkpoint curve (10 episodes each, 27k cap): 0k 0.0 | 10k 9.8 | 20k 37.2 | 30k 92.0 | 40k 278.2 | **50k 363.1 +/- 4.5** | 60k 179.9 | 70k 204.7 | 80k 346.7 | 90k 337.5 | 100k 321.2 | 110k 322.0 | 120k pending. Paper: 400.1 at 100k.

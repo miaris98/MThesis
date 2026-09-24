@@ -17,8 +17,8 @@ set -euo pipefail
 cd /workspace/MThesis
 PY=/venv/main/bin/python
 T=atari_qwen/training/train_mcts_offpolicy.py
-GATE1_DIR=$(ls -d results/100k_benchmark/gate1_poc_16sims/*/checkpoints | head -1)
-GATE1_CKPT="$GATE1_DIR/checkpoint_latest.pt"
+# Several gate1 run dirs exist (aborted starts); take the newest one that actually has a checkpoint.
+GATE1_CKPT=$(ls -t results/100k_benchmark/gate1_poc_16sims/*/checkpoints/checkpoint_latest.pt | head -1)
 STEP=$($PY -c "import torch;print(torch.load('$GATE1_CKPT',map_location='cpu',weights_only=False)['step'])")
 echo "Gate 1 checkpoint: $GATE1_CKPT (step $STEP)"
 [ "$STEP" -ge 4990 ] || { echo "FATAL: expected Gate 1 latest at ~5000, got $STEP"; exit 1; }

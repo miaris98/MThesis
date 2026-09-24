@@ -54,17 +54,23 @@ print("PREFLIGHT_OK backbone=", a.backbone_name, "route_points=", a.route_points
 EOF
   ;;
 run)
+  # ARMS: space-separated "suffix:rpc_port:tm_port:route,ids" entries; default = the two 10-route
+  # halves. GPU: device for both CARLA (-graphicsadapter) and the agent (CUDA_VISIBLE_DEVICES),
+  # so a 2-GPU box can keep CARLA off the GPU that trains.
+  GPU="${GPU:-0}"
+  ARMS="${ARMS:-a:2000:8000:$ARM_A_ROUTES b:2100:8100:$ARM_B_ROUTES}"
   mkdir -p /workspace/bench2drive_out
-  for arm in a b; do
-    if [ "$arm" = a ]; then SUBSET="$ARM_A_ROUTES"; PORT=2000; TM=8000; else SUBSET="$ARM_B_ROUTES"; PORT=2100; TM=8100; fi
+  for spec in $ARMS; do
+    IFS=: read -r arm PORT TM SUBSET <<<"$spec"
+    N=$(awk -F, '{print NF}' <<<"$SUBSET")
     ARM_LABEL="${LABEL}_${arm}"
-    nohup bash "$MTHESIS_ROOT/scripts/eval/b2d_guardian.sh" "$ARM_LABEL" \
-      "/workspace/bench2drive_out/${ARM_LABEL}.json" 10 \
+    CUDA_VISIBLE_DEVICES="$GPU" nohup bash "$MTHESIS_ROOT/scripts/eval/b2d_guardian.sh" "$ARM_LABEL" \
+      "/workspace/bench2drive_out/${ARM_LABEL}.json" "$N" \
       bash "$MTHESIS_ROOT/scripts/eval/run_bench2drive.sh" "$ARM_LABEL" "$ARCH" "$CKPT" \
-        "$ROUTES" "$PORT" "$TM" 0 "$SUBSET" \
+        "$ROUTES" "$PORT" "$TM" "$GPU" "$SUBSET" \
       > "/workspace/guardian_${ARM_LABEL}.out" 2>&1 &
-    echo "launched guardian for $ARM_LABEL (port $PORT) pid $!"
-    sleep 20  # stagger CARLA boots so the two servers do not race for the same Vulkan init
+    echo "launched guardian for $ARM_LABEL ($N routes, port $PORT, GPU $GPU) pid $!"
+    sleep 20  # stagger CARLA boots so the servers do not race for the same Vulkan init
   done
   ;;
 *) echo "unknown phase $PHASE"; exit 2 ;;

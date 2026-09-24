@@ -192,16 +192,19 @@ class ClipRewardEnv(gym.RewardWrapper):
 
 
 class WarpFrame(gym.ObservationWrapper):
-    """Warp frames to 84x84 grayscale, matching DeepMind DQN / Nature papers."""
-    def __init__(self, env: gym.Env, width: int = 84, height: int = 84):
+    """Warp frames to 84x84 grayscale (DQN / Nature), or HxW RGB channel-first (EfficientZero V2)."""
+    def __init__(self, env: gym.Env, width: int = 84, height: int = 84, grayscale: bool = True):
         super().__init__(env)
         self.width = width
         self.height = height
-        self.observation_space = spaces.Box(
-            low=0, high=255, shape=(self.height, self.width), dtype=np.uint8
-        )
+        self.grayscale = grayscale
+        shape = (self.height, self.width) if grayscale else (3, self.height, self.width)
+        self.observation_space = spaces.Box(low=0, high=255, shape=shape, dtype=np.uint8)
 
     def observation(self, frame: np.ndarray) -> np.ndarray:
+        if not self.grayscale:
+            frame = cv2.resize(frame, (self.width, self.height), interpolation=cv2.INTER_AREA)
+            return np.ascontiguousarray(frame.transpose(2, 0, 1))
         if cv2 is not None:
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
             frame = cv2.resize(frame, (self.width, self.height), interpolation=cv2.INTER_AREA)
@@ -223,7 +226,7 @@ class FrameStack(gym.Wrapper):
         self.frames = deque([], maxlen=k)
         shp = env.observation_space.shape
         self.observation_space = spaces.Box(
-            low=0, high=255, shape=((k,) + shp), dtype=np.uint8
+            low=0, high=255, shape=((k * shp[0],) + shp[1:]) if len(shp) == 3 else ((k,) + shp), dtype=np.uint8
         )
 
     def reset(self, **kwargs):
@@ -249,7 +252,8 @@ class FrameStack(gym.Wrapper):
         return self._get_ob(), reward, terminated or truncated, info
 
     def _get_ob(self) -> np.ndarray:
-        return np.array(self.frames)
+        # (k, H, W) for grayscale; (k*3, H, W) for channel-first RGB frames
+        return np.concatenate(self.frames, axis=0) if self.frames[0].ndim == 3 else np.array(self.frames)
 
 
 def make_atari_env(
@@ -259,7 +263,11 @@ def make_atari_env(
     noop_max: int = 30,
     frame_stack: int = 4,
     clip_reward: bool = True,
-    episodic_life: bool = True
+    episodic_life: bool = True,
+    frame_size: int = 84,
+    grayscale: bool = True,
+    fire_reset: bool = True,
+    max_episode_steps: Optional[int] = None,
 ) -> Callable[[], gym.Env]:
     """Factory creating a fully wrapped single Atari environment instance."""
     def _thunk() -> gym.Env:
@@ -279,11 +287,13 @@ def make_atari_env(
             
         # 4. Fire reset if game requires it
         action_meanings = env.unwrapped.get_action_meanings()
-        if 'FIRE' in action_meanings and len(action_meanings) >= 3 and action_meanings[1] == 'FIRE':
+        if fire_reset and 'FIRE' in action_meanings and len(action_meanings) >= 3 and action_meanings[1] == 'FIRE':
             env = FireResetEnv(env)
             
         # 5. Warp to 84x84 grayscale
-        env = WarpFrame(env, width=84, height=84)
+        env = WarpFrame(env, width=frame_size, height=frame_size, grayscale=grayscale)
+        if max_episode_steps:
+            env = gym.wrappers.TimeLimit(env, max_episode_steps=max_episode_steps)
         
         # 6. Clip reward
         if clip_reward:
@@ -305,7 +315,9 @@ def make_vector_atari_envs(
     frame_stack: int = 4,
     clip_reward: bool = True,
     episodic_life: bool = True,
-    asynchronous: bool = True
+    asynchronous: bool = True,
+    same_step_autoreset: bool = False,
+    **env_kwargs,
 ) -> Any:
     """Create vectorized Atari environments (AsyncVectorEnv or SyncVectorEnv)."""
     env_fns = [
@@ -316,13 +328,20 @@ def make_vector_atari_envs(
             noop_max=noop_max,
             frame_stack=frame_stack,
             clip_reward=clip_reward,
-            episodic_life=episodic_life
+            episodic_life=episodic_life,
+            **env_kwargs,
         )
         for i in range(num_envs)
     ]
+    # gymnasium >= 1.0 defaults to NEXT_STEP autoreset: the step after a done ignores the action and
+    # returns (reset obs, reward 0, done False) - a junk transition in any replay buffer. SAME_STEP
+    # returns the reset obs together with the done (final obs in info), the classic gym behaviour.
+    vec_kwargs = {}
+    if same_step_autoreset and hasattr(gym.vector, "AutoresetMode"):
+        vec_kwargs["autoreset_mode"] = gym.vector.AutoresetMode.SAME_STEP
     if asynchronous and num_envs > 1:
         try:
-            return gym.vector.AsyncVectorEnv(env_fns)
+            return gym.vector.AsyncVectorEnv(env_fns, **vec_kwargs)
         except Exception:
-            return gym.vector.SyncVectorEnv(env_fns)
-    return gym.vector.SyncVectorEnv(env_fns)
+            return gym.vector.SyncVectorEnv(env_fns, **vec_kwargs)
+    return gym.vector.SyncVectorEnv(env_fns, **vec_kwargs)
