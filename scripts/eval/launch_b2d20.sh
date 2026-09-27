@@ -6,7 +6,8 @@
 #   scripts/eval/launch_b2d20.sh preflight        # load the checkpoint through the eval agent
 #   scripts/eval/launch_b2d20.sh run              # 2 parallel arms x 10 routes, under guardians
 #
-# env: LABEL (default b2d20_8towns_e20), ARCH (qwen30m), CKPT (8-town epoch-20 best_model.pth)
+# env: LABEL (default b2d20_8towns_e20), ARCH (default: policy_arch from the checkpoint's
+#      run_config.json, else qwen30m), CKPT (8-town epoch-20 best_model.pth)
 #
 # b2d20 = the same 20-route subset of bench2drive220.xml used for the 2026-09-16 baseline run
 # (E:\MThesis_EXP\bench2drive_eval\run_20260916_final: TF++ 80.33 DS, cnn 26.23, qwen 27.05), so
@@ -15,8 +16,13 @@
 set -uo pipefail
 PHASE="${1:?usage: $0 setup|preflight|run}"
 LABEL="${LABEL:-b2d20_8towns_e20}"
-ARCH="${ARCH:-qwen30m}"
 CKPT="${CKPT:-/workspace/checkpoints/wor_qwen30m_8towns_fast/best_model.pth}"
+# ARCH defaults to the checkpoint's own run_config.json policy_arch. A hard qwen30m default loaded
+# the arm H cnn checkpoint into a Qwen policy: every route "Agent couldn't be set up", 0 DS (S-087).
+if [ -z "${ARCH:-}" ] && [ -f "$(dirname "$CKPT")/run_config.json" ]; then
+  ARCH=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('policy_arch',''))" "$(dirname "$CKPT")/run_config.json" 2>/dev/null)
+fi
+ARCH="${ARCH:-qwen30m}"
 MTHESIS_ROOT=/workspace/MThesis
 GARAGE=/workspace/carla_garage
 PY=/workspace/venv_carla/bin/python
