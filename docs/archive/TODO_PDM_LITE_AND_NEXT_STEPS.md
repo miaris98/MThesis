@@ -1,5 +1,7 @@
 # Next Steps: Full Exploitation of PDM-Lite Dataset & Advanced Policy Architecture
 
+> **Archived 2026-09-27:** every item here is closed (ticked with the reason under it). Open work is in [TODO_ACTIVE.md](../todo/TODO_ACTIVE.md); what was tried is in `challenges/tried_and_ruled_out.md`.
+
 Following the migration to the RTX 4090 instance and the parallel co-utilization of CARLA World-on-Rails Distillation and Atari 100k MCTS, this document tracks all tried approaches, empirical outcomes, active runs, and remaining tasks.
 
 > **Master Experiment Tracker**: For the complete 100-hypothesis experimental matrix covering dataset scaling, spatial perception, sequence modeling, multi-task losses, multimodal fusion, and closed-loop control, see [`TODO_CARLA_EXPERIMENTS.md`](file:///c:/Users/miari/Desktop/MThesis/docs/todo/TODO_CARLA_EXPERIMENTS.md).

@@ -6,6 +6,9 @@
 
 ## Achieved so far (as of 2026-09-21)
 
+History as of 2026-09-21, kept for the record. Scores below predate the 19-route protocol and the
+S-072 backbone fix; current numbers are in [TODO_ACTIVE.md](TODO_ACTIVE.md).
+
 The items below are **implemented and validated**, not just hypothesized — most predate this
 checkbox list and aren't 1:1 with the C-numbered items below (several were shipped together as a
 bug-fix batch, see `docs/design/continuation_prompt.md` for the full account). Recorded here so
@@ -66,11 +69,14 @@ Explores additional physical hardware sensors once the vision-centric Phase 1 mo
 
 ---
 
-## Current Baseline to Beat (Epoch 34 Checkpoint)
-- **Model**: `wor_qwen30m_augmented` (`results/checkpoints_box2/best_model.pth`, 106 MB)
-- **Validation Loss**: `0.6439` | **Validation ADE**: `0.449m` | **Validation Lateral Error**: `0.075m` (7.5 cm)
-- **Training Throughput**: ~43 samples/sec on 2x Tesla T4 (~9.9 min/epoch)
-- **Closed-Loop Target**: Exceed ResNet-34 CNN baseline on 20-route Bench2Drive stratified benchmark.
+## Current Baseline to Beat (updated 2026-09-27)
+The goal is the original World on Rails agent, closed-loop, on the 19 b2d20 routes (S-089):
+- **WoR original (PCLA `wor_lb`, untuned): 67.8 DS** (run 1; run 2 in progress).
+- **Best arm: E e15 (288x768) 65.4 DS**, -1.5 vs the mean of both WoR runs, 95% CI [-10.5, +7.8]: tied (S-090).
+- TF++ (camera + LiDAR, reference upper bound): 80.3 DS.
+- Controlled baseline: arm H = WoR's `cnn` head on arm A's data/backbone (S-081), eval running.
+The old reference here (Epoch 34, val loss 0.6439 / ADE 0.449 m, 2x T4) was an open-loop number from
+before the camera-parity fix and is no longer a target.
 
 ---
 
@@ -93,7 +99,7 @@ Explores additional physical hardware sensors once the vision-centric Phase 1 mo
 - **Metric**: Junction collision rate reduction on Bench2Drive; Val lateral error on turns < 0.05m.
 
 ### [x] C3. Recovery Trajectory Ratio Sweep (0%, 25%, 50%, 75%)
-- **Resolved 2026-09-25 - Tried, likely helps:** Recovery camera on vs off, valid 19 routes: A e15 60.8 vs B e15 53.6 (S-073), one seed per arm. A ratio sweep is possible later but is not the priority (obstacle routes are, TODO_ACTIVE A1).
+- **Resolved 2026-09-25 - Tried, not shown:** Recovery camera on vs off, valid 19 routes: A e15 60.8 vs B e15 53.6 (S-073), one seed per arm. With A's and B's second runs the gap shrank to 3.1, 95% CI [-9.5, +1.8] (S-079). A ratio sweep is not the priority (obstacle routes are, TODO_ACTIVE A1).
 - **Hypothesis**: Without perturbed recovery trajectories, the policy suffers from DAgger-style distribution drift in closed-loop. Too much recovery data degrades nominal smooth driving.
 - **Method**: Train 4 models with recovery frame fractions $\{0.0, 0.25, 0.50, 0.75\}$ using PDM-Lite perturbed camera views.
 - **Metric**: Closed-loop Route Completion (RC) on Bench2Drive Town04.
@@ -155,7 +161,7 @@ Explores additional physical hardware sensors once the vision-centric Phase 1 mo
 - **Metric**: Validation loss reduction below 0.60.
 
 ### [x] C13. Photometric & Contrast Jitter Augmentation
-- **Resolved 2026-09-25 - Tried, promising:** Arm D, `--color_aug_prob 0.5`: 19 routes (real backbone) D e15 64.6 vs A e15 60.8 (S-075), one run; D e20 queued.
+- **Resolved 2026-09-25 - Tried, promising, not significant:** Arm D, `--color_aug_prob 0.5`: D e15 64.6 / 64.9 over 2 runs, +4.2 vs A e15, 95% CI [-5.7, +12.8]; D e20 61.7 (S-075, S-079). Combined with 288x768 as arm I (S-082, training).
 - **Hypothesis**: Direct sunlight glare and night headlight shadows wash out features.
 - **Method**: Apply ColorJitter (brightness=0.3, contrast=0.3, saturation=0.2, hue=0.1) and RandomAutoContrast at $p=0.5$.
 - **Metric**: Performance parity between Day and Night/Dusk routes.
@@ -328,8 +334,8 @@ Explores additional physical hardware sensors once the vision-centric Phase 1 mo
 - **Method**: Implement SGDR with $T_0 = 15$ epochs, $T_{mult} = 2$, decaying max LR from $3e-4$ to $5e-5$.
 - **Metric**: Validation loss recovery and escape from plateau at Epoch 30.
 
-### [ ] C40. Stochastic Weight Averaging (SWA)
-- **Open (2026-09-25):** promoted to TODO_ACTIVE A2 (checkpoint averaging), see [TODO_ACTIVE.md](TODO_ACTIVE.md).
+### [x] C40. Stochastic Weight Averaging (SWA)
+- **Resolved 2026-09-27 - Tried, no gain:** Arm A e11-e20 averaged (TODO_ACTIVE A2): 62.4 vs A e15 60.6, +1.8, 95% CI [-7.2, +10.5] (S-078, S-079).
 - **Hypothesis**: A single checkpoint represents one point on the loss surface. Averaging checkpoints across late epochs finds flatter, more robust minima.
 - **Method**: Apply SWA over checkpoints from Epochs 30 to 50 with learning rate $1e-4$.
 - **Metric**: Generalization on unseen weather routes on Bench2Drive.

@@ -1,5 +1,7 @@
 # GTrXL+EZ2 Input-Invariance: Experiment Tracker
 
+> **Archived 2026-09-27:** every item here is closed (ticked with the reason under it). Open work is in [TODO_ACTIVE.md](../todo/TODO_ACTIVE.md); what was tried is in `challenges/tried_and_ruled_out.md`.
+
 **INVESTIGATION CLOSED (S-043, 2026-09-19)**: ROOT CAUSE CONFIRMED AND FIXED on the real
 architecture. `ImpalaCNNEncoder` had no explicit weight init by default; adding
 `NatureCNNEncoder`'s own `kaiming_normal_`(fan_out/relu)+`trunc_normal_` scheme

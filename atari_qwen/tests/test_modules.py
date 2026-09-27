@@ -1,6 +1,6 @@
 """Module-level regression tests for atari_qwen architecture components.
 
-See docs/todo/TODO_GTRXL_COLLAPSE_EXPERIMENTS.md, "Module-level regression tests" section
+See docs/archive/TODO_GTRXL_COLLAPSE_EXPERIMENTS.md, "Module-level regression tests" section
 (added after the S-024..S-043 input-invariance investigation). These are fast structural
 sanity checks -- forward/backward passes produce input-dependent, gradient-bearing output --
 run in seconds via pytest instead of discovering a broken module through a multi-week,

@@ -1,6 +1,6 @@
 # Evaluation tiers, and calibrating them against TransFuser++
 
-Companion to [TODO_leaderboard_benchmark.md](../todo/TODO_leaderboard_benchmark.md) (which holds the
+Companion to [TODO_leaderboard_benchmark.md](../archive/TODO_leaderboard_benchmark.md) (which holds the
 published-baseline table this work is ultimately measured against) and
 [challenges/log_00_index.md](../../challenges/log_00_index.md) S-011..S-015 (the measurements and failures that
 motivated it).

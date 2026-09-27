@@ -1,5 +1,7 @@
 # TODO — Official CARLA Leaderboard protocol, and TCP
 
+> **Archived 2026-09-27:** every item here is closed (ticked with the reason under it). Open work is in [TODO_ACTIVE.md](../todo/TODO_ACTIVE.md); what was tried is in `challenges/tried_and_ruled_out.md`.
+
 Companion to [TODO_wor_architecture.md](TODO_wor_architecture.md) and
 `challenges/challenges_13_transformer_head_underperformance.md` (13.31, the closed-loop
 result this follows on from).

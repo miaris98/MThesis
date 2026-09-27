@@ -1,5 +1,7 @@
 # WoR decision-head study — status and next steps
 
+> **Archived 2026-09-27:** every item here is closed (ticked with the reason under it). Open work is in [TODO_ACTIVE.md](../todo/TODO_ACTIVE.md); what was tried is in `challenges/tried_and_ruled_out.md`.
+
 Companion to `challenges/challenges_13_transformer_head_underperformance.md` (sections
 13.1–13.28), which carries the full reasoning. This file is the working checklist.
 
@@ -191,13 +193,13 @@ scores), and for testing TCP itself.
 ## Next — Tier 2
 
 - [x] **`--grad_clip`.** 93% of `qwen30m` batches were rescaled at the default 5.0 and it
-  - **Resolved 2026-09-25 - Running:** Arm G = arm A + `--grad_clip 15`, started 2026-09-25 on box R (S-070).
+  - **Resolved 2026-09-27 - Tried, no gain:** Arm G = arm A + `--grad_clip 15` (S-070): G e15 62.2, G e20 60.9 vs A e15 60.6 on 19 routes, CI includes 0 (S-079).
       won anyway. Try 10–20.
 - [x] **Train longer.** 15 epochs was a time budget, not a choice. At 1.52× gap there is
   - **Resolved 2026-09-25 - Tried, negative:** e20 < e15 in arms A-C on the sentinel set (S-062).
       headroom.
-- [ ] **LR sweep.** 3e-4 was inherited from the conv head and never revisited; both the
-  - **Open (2026-09-25):** Still untried; TODO_ACTIVE A10.
+- [x] **LR sweep.** 3e-4 was inherited from the conv head and never revisited; both the
+  - **Resolved 2026-09-27 - Duplicate:** tracked as TODO_ACTIVE A10 (still untried).
       schedule and the data have since changed.
 
 ## Next — Tier 3 (now measurable — paired CI is ±0.025, so ~4% effects resolve)

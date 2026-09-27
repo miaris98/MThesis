@@ -1,6 +1,6 @@
 """Batch runner for the input-invariance experiment matrix (E5-E12).
 
-See docs/todo/TODO_GTRXL_COLLAPSE_EXPERIMENTS.md. Each experiment is a short 15k-step on-policy
+See docs/archive/TODO_GTRXL_COLLAPSE_EXPERIMENTS.md. Each experiment is a short 15k-step on-policy
 run from the S-037 baseline config, varying one or more of the suspected causes identified by the
 E1/E2 layer-wise probe:
 
