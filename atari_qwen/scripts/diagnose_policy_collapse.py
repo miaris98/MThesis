@@ -1,7 +1,7 @@
 """Diagnostic: does the trained GTrXL+EZ2 actor's argmax action actually vary across
 different observations, or has it collapsed to a single input-invariant constant action?
 
-Motivation (struggle-solutions S-032/S-034): two unrelated training algorithms (an
+Motivation (challenges log S-032/S-034): two unrelated training algorithms (an
 off-policy replay-buffer trainer and an on-policy PPO+GAE trainer) both converged to the
 exact same score (11.00) with the exact same eval action histogram (FIRE:45, LEFT:1280).
 That coincidence is too specific to be architecture-independent learning -- it suggests

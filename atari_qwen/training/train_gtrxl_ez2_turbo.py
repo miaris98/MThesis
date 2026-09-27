@@ -47,7 +47,7 @@ class VectorizedTrajectoryReplayBuffer:
         self.done_buf = np.zeros((capacity,), dtype=np.bool_)
         # log-probability of the action actually taken, under the behavior policy active at
         # collection time (the eps-greedy/sampling mixture) -- needed for PPO-style importance
-        # sampling correction against off-policy replay drift (see struggle-solutions S-025/S-026).
+        # sampling correction against off-policy replay drift (see challenges log S-025/S-026).
         self.logp_buf = np.zeros((capacity,), dtype=np.float32)
 
         self.ptr = 0
@@ -208,7 +208,7 @@ def train_turbo_gtrxl_ez2(
     learning_rate: float = 3e-4,
     unroll_steps: int = 5,
     # Kept well below typical total_steps so the buffer actually cycles and batches stay
-    # recent (see struggle-solutions S-028 -- 100k never wrapped within a 60k-step run,
+    # recent (see challenges log S-028 -- 100k never wrapped within a 60k-step run,
     # so widening num_envs alone didn't reduce effective staleness as intended).
     buffer_capacity: int = 15000,
     min_replay_size: int = 2000,
@@ -245,7 +245,7 @@ def train_turbo_gtrxl_ez2(
         num_heads=4,
         ffn_dim=1024,
         unroll_steps=unroll_steps,
-        # See struggle-solutions S-035: bg_init=2.0 was still frozen at init after a full 60k-step
+        # See challenges log S-035: bg_init=2.0 was still frozen at init after a full 60k-step
         # run, making the actor's output input-invariant. 0.0 lets gates open much sooner.
         bg_init=0.0
     ).to(device)
@@ -285,7 +285,7 @@ def train_turbo_gtrxl_ez2(
             logits, _, _ = agent(obs_t)
             probs = F.softmax(logits.float(), dim=-1)
             eps = max(0.1, 1.0 - (global_step / 100000.0))
-            # Per-env independent eps-greedy coin flip (see struggle-solutions S-033): a single
+            # Per-env independent eps-greedy coin flip (see challenges log S-033): a single
             # shared `np.random.rand() < eps` check applied one coin toss to the WHOLE vectorized
             # batch, so every step was either all-32-random or all-32-on-policy. That correlates
             # exploration noise across the batch (bursty blocks of pure-random vs. pure-on-policy
@@ -402,7 +402,7 @@ def train_turbo_gtrxl_ez2(
                 # stale versions of the policy), but a plain REINFORCE/advantage-actor-critic update
                 # assumes on-policy data -- with no correction, a sample the current policy now
                 # considers very unlikely produces a huge-magnitude log-prob that dominates the batch
-                # gradient and drives the policy to collapse onto a single action (struggle-solutions
+                # gradient and drives the policy to collapse onto a single action (challenges log
                 # S-024/S-025/S-026). PPO's clipped importance-sampling surrogate bounds the update
                 # from any one sample regardless of how far the policy has drifted since collection.
                 act_0 = b_actions[:, 0]

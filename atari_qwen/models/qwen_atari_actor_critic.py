@@ -37,7 +37,7 @@ class QwenAtariActorCritic(nn.Module):
         ffn_dim: Optional[int] = None,
         dropout: float = 0.0,
         use_gradient_checkpointing: bool = False,
-        # Incremental-integration plan (struggle-solutions S-041): start from this proven
+        # Incremental-integration plan (challenges log S-041): start from this proven
         # pipeline (train_ppo.py genuinely climbed 0.00->17.00 with the default "qwen" blocks)
         # and swap in ImpalaGTrXLAgent's components one at a time to isolate which one breaks
         # learning, instead of varying hyperparameters on a stack that already differs from the

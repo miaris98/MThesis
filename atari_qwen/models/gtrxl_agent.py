@@ -30,11 +30,11 @@ class ImpalaGTrXLAgent(nn.Module):
         dropout: float = 0.0,
         unroll_steps: int = 5,
         # 2.0 (~88% skip per gate, the "Stabilizing Transformers for RL" default) was measured
-        # in struggle-solutions S-035 to still be frozen at init after 15k-60k training steps --
+        # in challenges log S-035 to still be frozen at init after 15k-60k training steps --
         # 3-5 orders of magnitude short of the huge step budgets that default was designed for.
         # 0.0 (~50% skip) lets visual information reach the policy/value heads much sooner.
         bg_init: float = 0.0,
-        # Isolation test per struggle-solutions S-036/S-037: False replaces every block's GRU
+        # Isolation test per challenges log S-036/S-037: False replaces every block's GRU
         # gating with plain residual addition, to test whether the gating mechanism itself
         # (rather than raw step budget) is why the actor's output stays input-invariant.
         use_gru_gating: bool = True,
@@ -128,7 +128,7 @@ class ImpalaGTrXLAgent(nn.Module):
         # The small 0.01 gain belongs on the OUTPUT layer only (near-uniform initial policy);
         # applying it to hidden layers too compounds to ~1e-4 attenuation, which measurably
         # crushed the actor's gradient into the shared trunk to ~65x below the critic's and
-        # left the logits input-invariant (struggle-solutions S-038, experiment E1/E2).
+        # left the logits input-invariant (challenges log S-038, experiment E1/E2).
         if self.legacy_actor_init:
             actor_gains = [0.01] * len(self._actor_linears)
         else:

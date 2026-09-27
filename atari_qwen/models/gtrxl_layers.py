@@ -55,7 +55,7 @@ class GTrXLBlock(nn.Module):
         ffn_dim: int = 1024,
         dropout: float = 0.0,
         bg_init: float = 2.0,
-        # Isolation test per struggle-solutions S-036/S-037: with GRU gating, even bg_init=0.0
+        # Isolation test per challenges log S-036/S-037: with GRU gating, even bg_init=0.0
         # still showed the actor's output fully input-invariant at 15k-60k steps. When False,
         # skip goes back to plain residual addition (x = x + f(x)) instead of learned gating, to
         # test whether the gating mechanism itself (rather than raw step budget) is the bottleneck.

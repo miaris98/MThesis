@@ -34,7 +34,7 @@ def _camera_offset_matrix(translation_y: float, rotation_yaw_deg: float) -> np.n
     Its inverse (a plain transpose+negate for a rigid transform) reprojects a point
     recorded in the true frame - e.g. an already-computed waypoint or route point - into
     what the augmented camera would have seen, which is the corrective label recovery
-    augmentation needs. See struggle-solutions.md S-020 for why the label cannot simply be
+    augmentation needs. See challenges/log_00_index.md S-020 for why the label cannot simply be
     recomputed without this: the image really is a different render, so the target must be
     re-expressed in that render's own frame, not left as the on-route target.
     """
@@ -57,6 +57,24 @@ def _reproject_points(points_xy, offset_matrix_inv: np.ndarray) -> list:
         p = offset_matrix_inv @ np.array([x, y, 0.0, 1.0])
         out.append([float(p[0]), float(p[1])])
     return out
+
+
+def color_augment(rgb: np.ndarray, rng=np.random) -> np.ndarray:
+    """Photometric-only augmentation of one uint8 HWC frame, in the spirit of TransFuser++'s
+    training-time colour augmentation (TF++ improvement #4): brightness, contrast, a mild colour
+    cast, sensor noise and occasional grayscale. Geometry is untouched, so waypoint/route targets
+    stay valid. Not a copy of TF++'s imgaug pipeline - an approximation of the same idea without
+    the extra dependency. Relies on the DataLoader's per-worker numpy seeding."""
+    x = rgb.astype(np.float32)
+    x *= rng.uniform(0.6, 1.4)
+    mean = x.mean()
+    x = (x - mean) * rng.uniform(0.7, 1.3) + mean
+    x *= rng.uniform(0.9, 1.1, size=3).astype(np.float32)
+    if rng.rand() < 0.1:
+        x[:] = x.mean(axis=2, keepdims=True)
+    if rng.rand() < 0.3:
+        x += rng.normal(0.0, rng.uniform(2.0, 10.0), x.shape).astype(np.float32)
+    return np.clip(x, 0, 255).astype(np.uint8)
 
 
 def feature_cache_path(rgb_path: str, pixel_tag: str, feature_cache_tag: str) -> str:
@@ -92,7 +110,8 @@ class WorldOnRailsDataset(Dataset):
         route_overlay: bool = False,
         overlay_kwargs: Optional[Dict] = None,
         feature_cache_tag: Optional[str] = None,
-        use_augmented_camera: bool = False
+        use_augmented_camera: bool = False,
+        color_aug_prob: float = 0.0
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -137,7 +156,7 @@ class WorldOnRailsDataset(Dataset):
         # would mean some frames in a batch carry "vision_features" and others carry "rgb",
         # which the default collate can't merge into one batch key.
         self.feature_cache_tag = feature_cache_tag
-        # Recovery-data augmentation (struggle-solutions.md S-020/S-021's follow-up): PDM-Lite's
+        # Recovery-data augmentation (challenges/log_00_index.md S-020/S-021's follow-up): PDM-Lite's
         # DataAgent renders a second camera per frame at a random per-route lateral+yaw offset
         # (measurements' augmentation_translation/augmentation_rotation), saved as
         # rgb_augmented/. Behaviour cloning otherwise never sees an off-center state, since the
@@ -147,6 +166,9 @@ class WorldOnRailsDataset(Dataset):
         # measure something other than on-route driving, and stop it being comparable across
         # runs that don't use this flag.
         self.use_augmented_camera = bool(use_augmented_camera) and is_train
+        # Per-frame probability of color_augment(). Train-only for the same reason as above.
+        # Applied after the decoded-frame cache, so cached .npy files stay un-augmented.
+        self.color_aug_prob = float(color_aug_prob) if is_train else 0.0
 
         self.samples = []
         if synthetic_samples > 0:
@@ -223,7 +245,7 @@ class WorldOnRailsDataset(Dataset):
         trajectory, re-expressed in the augmented camera's own (laterally/yaw offset)
         frame instead of the true ego frame - a corrective "how to get back onto the
         route" target, matched to an image that actually shows the off-center view.
-        See _camera_offset_matrix and struggle-solutions.md S-020.
+        See _camera_offset_matrix and challenges/log_00_index.md S-020.
         """
         meas_files = sorted(glob.glob(os.path.join(measurements_dir, "*.json.gz")))
         rgb_dir = os.path.join(route_dir, "rgb")
@@ -249,7 +271,7 @@ class WorldOnRailsDataset(Dataset):
                     "target_speed": float(meas.get("target_speed", meas.get("speed", 0.0))),
                     # Present on PDM-Lite DataAgent dumps that ship rgb_augmented/ (confirmed
                     # against the released autonomousvision/PDM_Lite_Carla_LB2 archives - see
-                    # struggle-solutions.md S-020); absent, and harmlessly defaulted to no
+                    # challenges/log_00_index.md S-020); absent, and harmlessly defaulted to no
                     # offset, on the "wor" native format and any dump collected without
                     # --augment.
                     "augmentation_translation": float(meas.get("augmentation_translation", 0.0)),
@@ -443,6 +465,9 @@ class WorldOnRailsDataset(Dataset):
             target_q = np.array(item.get("q_values", np.zeros(self.num_rails)), dtype=np.float32)
             target_waypoints = np.array(item.get("waypoints", np.zeros((5, 2))), dtype=np.float32)
             route = np.array(item.get("route", np.zeros((self.route_points, 2))), dtype=np.float32)
+
+        if rgb is not None and self.color_aug_prob > 0 and np.random.rand() < self.color_aug_prob:
+            rgb = color_augment(rgb)
 
         # RGB stays uint8 HWC here: converting to float32 CHW in the worker would
         # quadruple both the CPU work and the bytes crossing PCIe (786KB vs 196KB per

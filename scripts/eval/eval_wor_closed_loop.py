@@ -652,7 +652,7 @@ def run_route(world, client, agent_cls, agent_config, route_spec, spawn_points, 
             # wired up), calls agent.run_step(input_data, timestamp), and prints the same
             # "=== [Agent] -- Wallclock = ... Ratio = ...x" line Tiers 2/3 print - the
             # sim-to-wall ratio numbers used throughout eval_tiers_design.md and
-            # struggle-solutions.md come from this exact call on every tier now, not a
+            # challenges/log_00_index.md come from this exact call on every tier now, not a
             # lookalike computed separately per tier.
             control = agent_wrapper()
             ego.apply_control(control)

@@ -1,4 +1,4 @@
-"""Incremental-integration plan (struggle-solutions S-041): start from the PROVEN pipeline
+"""Incremental-integration plan (challenges log S-041): start from the PROVEN pipeline
 (train_ppo.py + QwenAtariActorCritic, which genuinely climbed Breakout 0.00 -> 17.00 in S-029)
 and swap in ImpalaGTrXLAgent's components one at a time, instead of continuing to vary
 hyperparameters on a stack that already differs from the proven baseline in five places at once
@@ -41,7 +41,7 @@ STEPS = {
 # S-042 follow-up: I0_baseline at the 15k budget above FAILS its own diagnostic
 # (probe_logit_rel_std=0.013, flat 0.0 eval) -- because S-029's own genuinely-successful run of
 # this exact pipeline stayed at 0.0 until ~150k steps and only reached 17.0 by 299k
-# (struggle-solutions S-029: 0.00@51k, 0.00@100k, 12.00@151k, 12.00@200k, 16.00@251k, 17.00@299k).
+# (challenges log S-029: 0.00@51k, 0.00@100k, 12.00@151k, 12.00@200k, 16.00@251k, 17.00@299k).
 # 15k steps was never long enough to distinguish "broken" from "hasn't gotten there yet" for ANY
 # of these architectures. Re-run all three steps at S-029's actual 300k-step budget, same eval
 # cadence, to get the real apples-to-apples reference trajectory.

@@ -59,6 +59,13 @@ run)
   # so a 2-GPU box can keep CARLA off the GPU that trains.
   GPU="${GPU:-0}"
   ARMS="${ARMS:-a:2000:8000:$ARM_A_ROUTES b:2100:8100:$ARM_B_ROUTES}"
+  # Frozen-backbone runs save only the heads; the vision weights live in a sibling
+  # frozen_backbone.pth. Without it the CARLA encoder stays randomly initialised and the loader only
+  # warns - every b2d20 eval on the 2026-09-25 eval box ran that way (S-072).
+  if [ ! -f "$(dirname "$CKPT")/frozen_backbone.pth" ] && [ "${ALLOW_NO_FROZEN_BACKBONE:-0}" != 1 ]; then
+    echo "REFUSING: $(dirname "$CKPT")/frozen_backbone.pth is missing (copy it next to the checkpoint)" >&2
+    exit 1
+  fi
   mkdir -p /workspace/bench2drive_out
   for spec in $ARMS; do
     IFS=: read -r arm PORT TM SUBSET <<<"$spec"

@@ -4,7 +4,7 @@ Searches:
     - learning_rate: [1e-4, 1e-3]
     - replay_ratio: [2, 4]
     - unroll_steps: [3, 5]
-    - bg_init: [-1.0, 0.0, 1.0] (trainable GRU skip gate initialization -- see struggle-solutions
+    - bg_init: [-1.0, 0.0, 1.0] (trainable GRU skip gate initialization -- see challenges log
       S-035: the old [1.0, 2.0, 3.0] range was measured to keep every gate 73-95% closed, and
       every prior trial in this study left the gates frozen near their init after 50k steps,
       making the actor's output input-invariant regardless of any other hyperparameter)
@@ -77,7 +77,7 @@ def objective(
 
     optimizer = optim.AdamW(agent.parameters(), lr=lr, weight_decay=1e-4)
     # Kept well below total_steps_per_trial so the buffer actually cycles and batches stay
-    # recent (see struggle-solutions S-028).
+    # recent (see challenges log S-028).
     buffer = VectorizedTrajectoryReplayBuffer(capacity=15000, obs_shape=(4, 84, 84), unroll_steps=unroll_steps)
 
     obs, _ = envs.reset()
@@ -106,7 +106,7 @@ def objective(
             logits, _, _ = agent(obs_t)
             probs = F.softmax(logits.float(), dim=-1)
             eps = max(0.01, 1.0 - (global_step / 70000.0))
-            # Per-env independent eps-greedy coin flip (see struggle-solutions S-033), matching
+            # Per-env independent eps-greedy coin flip (see challenges log S-033), matching
             # the fix in train_gtrxl_ez2_turbo.py -- a single shared coin toss for the whole
             # vectorized batch correlates exploration noise across envs instead of diversifying it.
             random_mask = torch.rand(num_envs, device=device) < eps
@@ -159,7 +159,7 @@ def objective(
                     future_values = agent.critic_head(flat_target_z).squeeze(-1).view(B_sz, K_steps)  # V(s_1..s_K)
 
                 # Multi-Step GAE(lambda) Advantage/Return Targets using these real encoded
-                # values rather than a single n-step bootstrap sum (see struggle-solutions
+                # values rather than a single n-step bootstrap sum (see challenges log
                 # S-029 -- this is the mechanism the successfully-trained on-policy comparison
                 # run relies on, brought into the replay buffer's K-step windows).
                 with torch.no_grad():
@@ -195,7 +195,7 @@ def objective(
                 consistency_loss /= unroll_steps
                 total_value_loss = 0.5 * (root_value_loss + unroll_value_loss)
 
-                # PPO-Clipped Advantage-Weighted Policy Gradient (see struggle-solutions
+                # PPO-Clipped Advantage-Weighted Policy Gradient (see challenges log
                 # S-024/S-025/S-026: plain REINFORCE on off-policy replay samples with no
                 # importance-sampling correction drives the policy to collapse onto a single
                 # action). The clipped surrogate bounds the update from any one stale sample

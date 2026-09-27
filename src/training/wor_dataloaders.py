@@ -176,7 +176,8 @@ def create_wor_train_val_dataloaders(
     route_overlay: bool = False,
     overlay_kwargs: Optional[Dict] = None,
     feature_cache_tag: Optional[str] = None,
-    use_augmented_camera: bool = False
+    use_augmented_camera: bool = False,
+    color_aug_prob: float = 0.0
 ) -> Tuple[DataLoader, Optional[DataLoader]]:
     """Creates the training loader and, when asked for, a held-out validation loader.
 
@@ -196,7 +197,8 @@ def create_wor_train_val_dataloaders(
         cache_decoded=cache_decoded, route_points=route_points,
         img_size=img_size, crop_bottom_frac=crop_bottom_frac,
         route_overlay=route_overlay, overlay_kwargs=overlay_kwargs,
-        feature_cache_tag=feature_cache_tag, use_augmented_camera=use_augmented_camera
+        feature_cache_tag=feature_cache_tag, use_augmented_camera=use_augmented_camera,
+        color_aug_prob=color_aug_prob
     )
 
     if val_data_dir:

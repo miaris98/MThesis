@@ -14,7 +14,7 @@ no entropy, 1e-3 LR) ON TOP of the real fix (`S043b`) actively re-collapses the 
 broken encoder, not a generally good recipe, and become harmful once the actual bug is fixed.
 **Conclusion**: the correct go-forward recipe is `cnn_kaiming_init=True` alone at original
 hyperparameters, not the E10 stack. Most of E5-E51's hyperparameter tuning below was chasing
-downstream symptoms of this one missing init call. See struggle-solutions S-043 for full
+downstream symptoms of this one missing init call. See challenges log S-043 for full
 results tables and the closing interpretation.
 
 **CONFIRMED IN FULL PRODUCTION CONFIG (S044a, 2026-09-19)**: re-ran the fix with GRU gating
@@ -37,7 +37,7 @@ exactly: seed 0 flat `0.00` the whole 100k steps, seed 1 locked at `11.00` then 
 the `0.00` pattern. `S044b` (same kaiming fix, EZ2 aux losses OFF) climbs 3-4x faster over the
 same step range and lands a real score by step 153,600 instead of lingering at the artifact --
 implicating the EZ2 consistency (SimSiam) loss, which saturates to -0.99+ almost immediately, as
-the specific drag. See struggle-solutions S-046 for the full trace. **Status: testing
+the specific drag. See challenges log S-046 for the full trace. **Status: testing
 `consistency_loss_weight=0.0` at the real 100k budget (seed 0, live box) as the direct fix;
 aux-loss warmup (`aux_warmup_steps`, untested combined with `cnn_kaiming_init`) is the documented
 fallback if that doesn't resolve it within budget.**
@@ -48,7 +48,7 @@ climb) shows `probe_logit_rel_std=0.013` and a flat 0.0 eval score at the 15k-st
 throughout this entire tracker -- below E10's 0.03008 and nowhere near the 0.243 healthy-reference
 target. **Every relative ranking below ("E10 beats X", "E37 beats E10") is still valid as a
 same-budget comparison, but the absolute "still far from healthy" framing needs revision** -- the
-proven architecture doesn't clear that bar at 15k steps either. See struggle-solutions S-042
+proven architecture doesn't clear that bar at 15k steps either. See challenges log S-042
 before drawing conclusions from probe_logit_rel_std numbers in isolation.
 
 **Problem statement.** The `ImpalaGTrXLAgent` actor produces essentially identical logits for
@@ -56,7 +56,7 @@ wildly different observations (per-action logit std-dev ~`0.0002-0.0005` across 
 noise / real gameplay frames). Every eval score in this investigation (the recurring `0.00` and
 `11.00`) is an artifact of a constant-action policy being steered by the eval harness's scripted
 `FIRE`-on-life-loss override against a deterministic emulator -- not learning. See
-`docs/design/struggle-solutions.md` S-024 through S-037 for the full trail.
+`challenges/log_00_index.md` S-024 through S-037 for the full trail.
 
 **Already ruled out** (all still fully input-invariant at 15k-60k steps):
 | # | Intervention | Entry | Result |
@@ -71,27 +71,31 @@ noise / real gameplay frames). Every eval score in this investigation (the recur
 
 ## Phase A -- Diagnostics (cheap, no training)
 
-### [ ] E1. Layer-wise variance probe (trained checkpoint)
+### [x] E1. Layer-wise variance probe (trained checkpoint)
+- **Resolved 2026-09-25:** Done: see the Results log below (rel_std collapses through trunk + head).
 **Hypothesis**: the signal dies at a specific, identifiable layer, not diffusely.
 **Method**: feed N very different observations through a trained checkpoint and measure, at every
 stage (raw obs -> CNN stage1/2/3 -> proj -> encoder LayerNorm -> each GTrXL block -> latent_z /
 policy_repr -> logits), the across-input std-dev, both absolute and relative to activation scale.
 **Success criterion**: pinpoint the first stage where relative across-input variation collapses.
 
-### [ ] E2. Same probe on a randomly-initialized (untrained) network
+### [x] E2. Same probe on a randomly-initialized (untrained) network
+- **Resolved 2026-09-25:** Done: random-init policy_repr rel_std 0.307, network not born broken (Results log).
 **Hypothesis**: distinguishes "born invariant" (architecture/init bug) from "trained into
 invariance" (optimization pathology).
 **Success criterion**: if random-init shows healthy variance and trained does not, training is
 actively destroying the signal -- which points at the loss, not the architecture.
 
-### [ ] E3. Reference measurement on a known-healthy checkpoint
+### [x] E3. Reference measurement on a known-healthy checkpoint
+- **Resolved 2026-09-25:** Skipped: superseded by E2's random-init reference (Results log).
 **Hypothesis**: we have no idea what a *healthy* logit std-dev even looks like for this task.
 **Method**: run the same probe against S-029's from-scratch `QwenAtariActorCritic` PPO run (which
 genuinely climbed 0.00 -> 17.00) if its checkpoint is still on the box; else the historical BC+PPO
 checkpoint at `E:\MThesis_EXP\atari_qwen\qwen_bc_ppo_finetuned\`.
 **Success criterion**: a concrete target number to compare every other experiment against.
 
-### [ ] E4. Supervised sanity check -- can this architecture learn ANYTHING input-dependent?
+### [x] E4. Supervised sanity check -- can this architecture learn ANYTHING input-dependent?
+- **Resolved 2026-09-25:** Done: solved in ~45 steps, no structural bug (Results log).
 **Hypothesis**: the strongest possible test of a structural forward/backward bug.
 **Method**: take the exact `ImpalaGTrXLAgent`, and train the actor head with plain cross-entropy
 to map all-black frames -> action 0 and all-white frames -> action 1, for a few hundred gradient
@@ -104,7 +108,8 @@ and the problem is the RL signal/optimization balance.
 
 ## Phase B -- Targeted fixes (15-20k step runs, measured by probe + score)
 
-### [ ] E5. Fix the actor-head initialization (**prime suspect**)
+### [x] E5. Fix the actor-head initialization (**prime suspect**)
+- **Resolved 2026-09-25:** Done: not sufficient alone (Results log, S-038).
 **Bug**: `ImpalaGTrXLAgent._init_weights` applies `orthogonal_(gain=0.01)` to **every** Linear in
 `actor_head`, which is `Sequential(Linear(256,256), GELU, Linear(256,action_dim))` -- so both
 layers, compounding to roughly `1e-4` attenuation. Standard practice (CleanRL) applies the small
@@ -113,7 +118,8 @@ are crushed toward a constant, (b) gradient flowing back into the shared trunk i
 so the actor's learning signal is negligible compared to the critic's.
 **Fix**: `sqrt(2)` on the hidden layer, `0.01` on the output layer only.
 
-### [ ] E6. Stop the critic from flattening the shared trunk
+### [x] E6. Stop the critic from flattening the shared trunk
+- **Resolved 2026-09-25:** Done: detach critic helps, not enough alone (Results log).
 **Hypothesis**: `critic_head` is initialized at `gain=1.0` on both layers -- ~1e4x stronger
 gradient into the shared trunk than the actor's. With Breakout's sparse rewards the value target is
 near-constant early on, so the critic actively pushes the trunk toward a constant representation,
@@ -121,17 +127,20 @@ and the attenuated actor cannot counteract it.
 **Method**: detach the critic from the trunk (or give it its own trunk / scale down `vf_coef`) and
 re-measure input variance.
 
-### [ ] E7. Learning-rate sweep
+### [x] E7. Learning-rate sweep
+- **Resolved 2026-09-25:** Done as the LR arms E9/E14/E15 (Results log, Round 2): high LR is destructive.
 **Hypothesis**: the network is moving, just far too slowly to show up in 15k steps.
 **Method**: 10x LR (2.5e-3) and 3x LR at 15k steps; compare logit std-dev trajectory.
 
-### [ ] E8. Encoder LayerNorm / feature-scale audit
+### [x] E8. Encoder LayerNorm / feature-scale audit
+- **Resolved 2026-09-25:** Done: the missing CNN init was the root cause (S-043, `cnn_kaiming_init=True`).
 **Hypothesis**: `ImpalaCNNEncoder` has **no weight initialization at all** (unlike
 `NatureCNNEncoder`, which has `_init_weights`), and ends in a `LayerNorm` over `embed_dim` after
 projecting from only 32 channels. Either could be washing out spatial/input-dependent signal.
 **Method**: add proper CNN init; A/B the final LayerNorm.
 
-### [ ] E9. Isolate the SimSiam consistency-loss collapse
+### [x] E9. Isolate the SimSiam consistency-loss collapse
+- **Resolved 2026-09-25:** Done as E11/E16-E18 (Results log): the consistency loss hurts; S-046 later showed SimSiam saturating at -0.99 inside 100k.
 **Observation**: `SimLoss` hits `-0.9999` (perfect cosine similarity) within ~2,500 steps in every
 run that enables it -- the textbook signature of SimSiam **representation collapse**, where the
 easiest way to predict the next latent is to make all latents identical. That is exactly an
@@ -139,7 +148,8 @@ input-invariance generator.
 **Method**: run with consistency weight on vs. off and probe latent variance directly (S-037
 disabled it wholesale but never measured latent variance specifically).
 
-### [ ] E10. Fix the evaluation harness
+### [x] E10. Fix the evaluation harness
+- **Resolved 2026-09-25:** Addressed by E35/E36 (temperature sampling, sticky actions), S-039; that PPO eval harness is no longer used (EZ-V2 port, S-058).
 **Bug**: `evaluate_agent` forces `action = 1` (FIRE) on every life loss and after 30 rewardless
 steps, so a constant-action network produces a plausible-looking, perfectly reproducible score.
 Combined with a fixed seed, no sticky actions, and deterministic argmax, every eval is one frozen
@@ -151,11 +161,13 @@ use several seeds, and report the spread.
 
 ## Phase C -- Scale-up (only after Phase B identifies a fix)
 
-### [ ] E11. Long-horizon run (200k-300k steps)
+### [x] E11. Long-horizon run (200k-300k steps)
+- **Resolved 2026-09-25:** Done as E11b (100k) and after the fix S043a (300k, best 18.0), S-043.
 Matches S-029's own successful budget. Only worth spending once a Phase B experiment shows the
 probe's variance actually rising.
 
-### [ ] E12. Reward/advantage signal audit at scale
+### [x] E12. Reward/advantage signal audit at scale
+- **Resolved 2026-09-25:** Closed without running as a separate audit: the investigation ended at S-043 and on-policy GTrXL was dropped for Atari-100k (S-049).
 Log advantage magnitudes, entropy, and clipfrac over a long run to confirm the policy gradient
 carries real signal rather than noise around zero.
 
@@ -185,7 +197,7 @@ carries real signal rather than noise around zero.
 (3.4x over control) -- but even that is still ~8x below the healthy random-init reference
 (0.243). Both the EfficientZero v2 auxiliary losses and GTrXL's GRU gating actively fight
 against whatever gain the fix produces, even at bg_init=0.0. Furthermore, E11b proves conclusively
-that scaling the step budget to 100k steps does not break the collapse. See struggle-solutions S-038.
+that scaling the step budget to 100k steps does not break the collapse. See challenges log S-038.
 
 **Baseline to beat** (from S-037, simplified config @ 15k steps):
 per-action logit std-dev `[0.00049, 0.00015, 0.00026, 0.00038]`, argmax constant across all inputs.
@@ -238,28 +250,38 @@ the policy gradient. Tests removing the `(adv - mean) / std` normalization step 
 ## Round 3 -- 30 Architectural, Representation & Signal Levers (E22–E51)
 
 ### Category A: Attention & Spatial Aggregation (Query Bottleneck)
-- [ ] **E22. Cross-Attention Query Bottleneck (Perceiver/DETR style)**: Instead of concatenating `[STATE, POLICY]` with 121 visual tokens in full self-attention (where 121 tokens dilute the query), use explicit cross-attention where `POLICY` queries the visual memory tokens as keys/values.
-- [ ] **E23. Attention Temperature Sharpening**: Attention weights over 121 tokens are near-uniform ($1/121 \approx 0.008$). Scale $Q \cdot K^T / (\sqrt{d} \cdot \tau)$ with temperature $\tau < 1.0$ (e.g. 0.5) to sharpen spatial focus on the ball and paddle.
-- [ ] **E24. Global Spatial Pooling (GAP) Bypass**: Compare the 121-token sequence against global average pooling or flattened projection `Linear(32*11*11, embed_dim)` (NatureCNN style), testing whether the 121-token attention mechanism is diluting spatial localization.
-- [ ] **E25. Residual CNN-to-Actor Bypass**: Add a direct residual connection from the visual CNN encoder directly to `actor_head` (`policy_repr = transformer_out + cnn_proj(vis_tokens.mean(1))`), preventing the transformer trunk from acting as an information bottleneck.
+- [x] **E22. Cross-Attention Query Bottleneck (Perceiver/DETR style)**: Instead of concatenating `[STATE, POLICY]` with 121 visual tokens in full self-attention (where 121 tokens dilute the query), use explicit cross-attention where `POLICY` queries the visual memory tokens as keys/values.
+  **Resolved 2026-09-25 - Closed:** Closed without running: the investigation ended at S-043 (the missing Kaiming init on `ImpalaCNNEncoder` was the root cause), on-policy GTrXL was dropped for Atari-100k (S-049), and the GTrXL trunk now runs inside the EZ-V2 port, where it scores 38.6 at 10k (S-068).
+- [x] **E23. Attention Temperature Sharpening**: Attention weights over 121 tokens are near-uniform ($1/121 \approx 0.008$). Scale $Q \cdot K^T / (\sqrt{d} \cdot \tau)$ with temperature $\tau < 1.0$ (e.g. 0.5) to sharpen spatial focus on the ball and paddle.
+  **Resolved 2026-09-25 - Closed:** Closed without running: the investigation ended at S-043 (the missing Kaiming init on `ImpalaCNNEncoder` was the root cause), on-policy GTrXL was dropped for Atari-100k (S-049), and the GTrXL trunk now runs inside the EZ-V2 port, where it scores 38.6 at 10k (S-068).
+- [x] **E24. Global Spatial Pooling (GAP) Bypass**: Compare the 121-token sequence against global average pooling or flattened projection `Linear(32*11*11, embed_dim)` (NatureCNN style), testing whether the 121-token attention mechanism is diluting spatial localization.
+  **Resolved 2026-09-25 - Closed:** Closed without running: the investigation ended at S-043 (the missing Kaiming init on `ImpalaCNNEncoder` was the root cause), on-policy GTrXL was dropped for Atari-100k (S-049), and the GTrXL trunk now runs inside the EZ-V2 port, where it scores 38.6 at 10k (S-068).
+- [x] **E25. Residual CNN-to-Actor Bypass**: Add a direct residual connection from the visual CNN encoder directly to `actor_head` (`policy_repr = transformer_out + cnn_proj(vis_tokens.mean(1))`), preventing the transformer trunk from acting as an information bottleneck.
+  **Resolved 2026-09-25 - Closed:** Closed without running: the investigation ended at S-043 (the missing Kaiming init on `ImpalaCNNEncoder` was the root cause), on-policy GTrXL was dropped for Atari-100k (S-049), and the GTrXL trunk now runs inside the EZ-V2 port, where it scores 38.6 at 10k (S-068).
 - [x] **E26. Remove Final LayerNorm on `policy_repr`**: `self.norm(seq)` immediately before `self.actor_head` normalizes across the feature dimension, potentially crushing the variance of low-magnitude spatial activations.
   **Result**: `norm_policy_repr=False` on E10 -> probe_logit_rel_std=0.00335 -- worse than E10.
 
 ### Category B: Representation Collapse & Auxiliary Loss Redesign
-- [ ] **E27. VICReg Variance Regularizer on `latent_z` & `policy_repr`**: Add explicit variance penalty $L_{var} = \max(0, 1 - \sqrt{\mathrm{Var}(z) + \epsilon})$ from VICReg (Bardes et al.) to mathematically forbid representation collapse.
-- [ ] **E28. Stop-Gradient Verification in Target Latent Projection**: Verify and enforce `stop_gradient` on the target projection in the SimSiam branch. Without stop-gradient, SimSiam trivially minimizes cosine distance by collapsing representations to a constant.
-- [ ] **E29. Decouple Predictor Trunk from Actor Trunk**: Give EfficientZero v2's multi-step dynamics predictor its own projection head rather than backpropagating auxiliary consistency gradients directly into the actor's representation.
-- [ ] **E30. Replace Cosine Similarity with InfoNCE / Contrastive Loss**: Cosine loss has no negative samples and readily collapses. InfoNCE with temporal negatives (frames from other timesteps or other envs in the batch) forces distinct representations.
+- [x] **E27. VICReg Variance Regularizer on `latent_z` & `policy_repr`**: Add explicit variance penalty $L_{var} = \max(0, 1 - \sqrt{\mathrm{Var}(z) + \epsilon})$ from VICReg (Bardes et al.) to mathematically forbid representation collapse.
+  **Resolved 2026-09-25 - Closed:** Closed without running: the investigation ended at S-043 (the missing Kaiming init on `ImpalaCNNEncoder` was the root cause), on-policy GTrXL was dropped for Atari-100k (S-049), and the GTrXL trunk now runs inside the EZ-V2 port, where it scores 38.6 at 10k (S-068).
+- [x] **E28. Stop-Gradient Verification in Target Latent Projection**: Verify and enforce `stop_gradient` on the target projection in the SimSiam branch. Without stop-gradient, SimSiam trivially minimizes cosine distance by collapsing representations to a constant.
+  **Resolved 2026-09-25 - Closed:** Closed without running: the investigation ended at S-043 (the missing Kaiming init on `ImpalaCNNEncoder` was the root cause), on-policy GTrXL was dropped for Atari-100k (S-049), and the GTrXL trunk now runs inside the EZ-V2 port, where it scores 38.6 at 10k (S-068).
+- [x] **E29. Decouple Predictor Trunk from Actor Trunk**: Give EfficientZero v2's multi-step dynamics predictor its own projection head rather than backpropagating auxiliary consistency gradients directly into the actor's representation.
+  **Resolved 2026-09-25 - Closed:** Closed without running: the investigation ended at S-043 (the missing Kaiming init on `ImpalaCNNEncoder` was the root cause), on-policy GTrXL was dropped for Atari-100k (S-049), and the GTrXL trunk now runs inside the EZ-V2 port, where it scores 38.6 at 10k (S-068).
+- [x] **E30. Replace Cosine Similarity with InfoNCE / Contrastive Loss**: Cosine loss has no negative samples and readily collapses. InfoNCE with temporal negatives (frames from other timesteps or other envs in the batch) forces distinct representations.
+  **Resolved 2026-09-25 - Closed:** Closed without running: the investigation ended at S-043 (the missing Kaiming init on `ImpalaCNNEncoder` was the root cause), on-policy GTrXL was dropped for Atari-100k (S-049), and the GTrXL trunk now runs inside the EZ-V2 port, where it scores 38.6 at 10k (S-068).
 - [x] **E31. Dynamic Aux Loss Warmup**: Set `aux_loss_weight = 0.0` for the first 20k steps, allowing the policy and value functions to establish basic ground-truth dynamics before turning on auxiliary predictive losses.
   **Result**: `aux_warmup_steps=10000` on E10+EZ2(on) at 15k steps -> probe_logit_rel_std=0.02334 -- close but below E10, and clearly better than E11's 0.00739 (EZ2 at full strength from step 1), so warmup does help relative to no-warmup EZ2, just not enough to beat E10 (EZ2 off) outright at this step budget.
 
 ### Category C: Exploration & Reward Signal in Sparse Atari Breakout
-- [ ] **E32. Random Network Distillation (RND) Intrinsic Curiosity**: Add an RND exploration bonus $r_{int} = \|\hat{f}(s) - f(s)\|^2$. In Breakout, novel states (ball bouncing, bricks breaking) yield high intrinsic reward, breaking the $r=0$ dead zone.
+- [x] **E32. Random Network Distillation (RND) Intrinsic Curiosity**: Add an RND exploration bonus $r_{int} = \|\hat{f}(s) - f(s)\|^2$. In Breakout, novel states (ball bouncing, bricks breaking) yield high intrinsic reward, breaking the $r=0$ dead zone.
+  **Resolved 2026-09-25 - Closed:** Closed without running: the investigation ended at S-043 (the missing Kaiming init on `ImpalaCNNEncoder` was the root cause), on-policy GTrXL was dropped for Atari-100k (S-049), and the GTrXL trunk now runs inside the EZ-V2 port, where it scores 38.6 at 10k (S-068).
 - [x] **E33. Living / Ball-in-Play Reward Shaping**: Add a tiny living reward ($+0.005$ per alive frame) or ball-in-play reward to provide dense gradient signal before bricks are struck.
   **Result**: `living_reward=0.005` on E10 -> probe_logit_rel_std=0.00273 -- worse than E10.
-- [ ] **E34. Ball-Paddle Alignment Heuristic Reward**: Use frame differencing or a heuristic proxy reward for paddle horizontal alignment with the ball during early training to bootstrap intercept trajectories.
+- [x] **E34. Ball-Paddle Alignment Heuristic Reward**: Use frame differencing or a heuristic proxy reward for paddle horizontal alignment with the ball during early training to bootstrap intercept trajectories.
+  **Resolved 2026-09-25 - Closed:** Closed without running: the investigation ended at S-043 (the missing Kaiming init on `ImpalaCNNEncoder` was the root cause), on-policy GTrXL was dropped for Atari-100k (S-049), and the GTrXL trunk now runs inside the EZ-V2 port, where it scores 38.6 at 10k (S-068).
 - [x] **E35. Softmax Action Sampling in Evaluation (Remove Argmax Lock)**: In `evaluate_agent()`, evaluate with stochastic sampling ($\tau = 0.5$ or $\tau = 1.0$) rather than deterministic `argmax`. Under `argmax`, a 0.0002 logit advantage locks into 100% constant action.
-  **Result**: `eval_temperature=1.0` on the E10 recipe -> score reads **1.2 on all 3 eval checkpoints** instead of a hard 0.0/11.0 toggle. First evidence the deterministic-argmax eval harness was itself partly manufacturing the "11.00 looks like learning" artifact -- though 1.2 is still near-random for Breakout, not real learning. See struggle-solutions S-039.
+  **Result**: `eval_temperature=1.0` on the E10 recipe -> score reads **1.2 on all 3 eval checkpoints** instead of a hard 0.0/11.0 toggle. First evidence the deterministic-argmax eval harness was itself partly manufacturing the "11.00 looks like learning" artifact -- though 1.2 is still near-random for Breakout, not real learning. See challenges log S-039.
 - [x] **E36. Sticky Action & Frame-Skip Evaluation**: Evaluate with standard Atari sticky actions ($p=0.25$) to break deterministic emulator looping where a single action locks into a static cycle.
   **Result**: `sticky_action_p=0.25` on the E10 recipe -> score still locks to a constant 11.0 on all 3 checkpoints. The underlying policy is degenerate enough that sticky actions alone don't expose it (unlike E35's temperature sampling).
 
@@ -269,34 +291,44 @@ the policy gradient. Tests removing the `(adv - mean) / std` normalization step 
   - **E37b** (same 5x-ratio recipe, seed=7): probe_logit_rel_std=**0.15585**, policy_repr_rel_std=**0.19534**.
   - **E37c** (same recipe, 40k steps): probe_logit_rel_std=0.03524, policy_repr_rel_std=0.10085 -- reproduces the original magnitude, more steps helps mildly.
   - **E37d** (ratio pushed to 20x: actor_lr=1e-3, rest=5e-5, seed=42, 15k steps): probe_logit_rel_std=**0.21385**, policy_repr_rel_std=**0.27571** -- within ~10% of the healthy **random-init reference** (logits rel_std=0.243, policy_repr rel_std=0.307), the first result in the whole S-024-S-039 trail to get this close. Eval score also hit 11.0 on one of 3 checkpoints (still not consistently climbing, but no longer a hard 0.0-only lock like most other configs).
-  Asymmetric actor/critic LR -- not detach_critic, not entropy removal alone -- looks like the real missing lever; those two were necessary but nowhere near sufficient. See struggle-solutions S-040.
+  Asymmetric actor/critic LR -- not detach_critic, not entropy removal alone -- looks like the real missing lever; those two were necessary but nowhere near sufficient. See challenges log S-040.
   **Confirmation batch** (E37e: seed=7 at 20x ratio; E37f: 20x ratio at 100k steps): E37e reproduces and even **exceeds** the healthy reference (policy_repr_rel_std=0.31073 vs. 0.307 reference) -- not a lucky seed. But E37f shows the gain **decays at 100k steps** (0.23164, down from the 15k-step ~0.28-0.31 range), and **eval score stayed a flat 0.0 in both** despite the healthy-looking representation. The diagnostic probe and actual RL learning have decoupled: fixing input-invariance (as measured) does not by itself fix score improvement. Likely cause: the 20x-slower trunk/critic LR may be starving the critic's value learning, degrading the GAE advantage signal. **Next**: try an intermediate ratio (between 5x and 20x) and directly monitor critic value-loss/advantage trajectory for signs of critic starvation.
 
-  **Ratio sweep at 10x** (E37g 15k, E37h 40k): policy_repr_rel_std=0.203/0.191 -- a clean midpoint between 5x (0.122) and 20x (0.276-0.311). VLoss trajectories checked directly across 5x/10x/20x: all stay in a similar 0.017-0.064 range with no divergence at higher ratios, so the critic-starvation hypothesis is **not supported**. This is a monotonic dose-response (more decoupling = more variance), not a sweet spot, and eval score stays flat 0.0 at every ratio tested. The bottleneck between "healthy representation" and "climbing eval score" remains unidentified -- see struggle-solutions S-040 for the full writeup and next-step options (very long run vs. PPO-mechanics audit).
+  **Ratio sweep at 10x** (E37g 15k, E37h 40k): policy_repr_rel_std=0.203/0.191 -- a clean midpoint between 5x (0.122) and 20x (0.276-0.311). VLoss trajectories checked directly across 5x/10x/20x: all stay in a similar 0.017-0.064 range with no divergence at higher ratios, so the critic-starvation hypothesis is **not supported**. This is a monotonic dose-response (more decoupling = more variance), not a sweet spot, and eval score stays flat 0.0 at every ratio tested. The bottleneck between "healthy representation" and "climbing eval score" remains unidentified -- see challenges log S-040 for the full writeup and next-step options (very long run vs. PPO-mechanics audit).
 
   **PPO-mechanics audit** (S-041): diffed against `train_ppo.py`, the trainer that proved `QwenAtariActorCritic` can climb 0.00->17.00. Found and fixed 3 real gaps: no LR annealing (added `lr_schedule` cosine/linear), no value-loss clipping (added `clip_vloss`), and 100x-weaker weight decay (1e-4 vs the proven 1e-2). Tested individually on E10 (all landed below 0.03008 -- Epp1 lr_cosine: 0.01044, Epp2 clip_vloss: 0.00326, Epp3 weight_decay: 0.00881) and all three combined with E37g's 10x-ratio recipe (Epp4: reproduces E37g's own ~0.20 representation variance, still a flat 0.0 eval score). **None of these unlock eval-score improvement.** The PPO-mechanics gap is ruled out as the explanation. Next direction: incremental integration (see the "Module-level regression tests" section below) -- start from the proven `QwenAtariActorCritic` + `train_ppo.py` combination and swap in `ImpalaGTrXLAgent` components one at a time to isolate exactly which swap breaks learning, rather than continuing to vary hyperparameters on a stack that differs from the proven baseline in five places at once.
 - [x] **E38. Advantage Normalization Clamp / Soft-Standardization**: Standard advantage normalization $(A - \mu) / (\sigma + 1e-8)$ in sparse reward batches explodes noise when $\sigma \to 0$. Use $(A - \mu) / \max(\sigma, 0.1)$ or unnormalized raw GAE advantages.
   **Result**: `adv_norm_std_floor=0.1` on the E10 recipe -> `probe_logit_rel_std=0.03151`, marginally above E10's 0.03008 -- but eval score was a flat 0.0 on all 3 checkpoints (worse than E10's mixed 0/11), and the margin is inside the run-to-run noise floor seen across nominally-identical configs. **Not confirmed as a real improvement without a repeat run.**
 - [x] **E39. GAE Lambda ($\lambda$) Sweep**: Test $\lambda \in \{0.80, 0.90, 0.95, 0.99\}$ (0.95 is E10's default, already covered). Lower $\lambda$ reduces variance in sparse-reward settings where long unrolls accumulate near-zero bootstrap errors.
   **Result**: $\lambda=0.80$ -> probe_logit_rel_std=0.00455 (worse); $\lambda=0.99$ -> 0.01150 (worse). Neither direction helps; 0.95 (E10's default) remains best in this dimension.
-- [ ] **E40. Completely Separate Actor and Critic Trunks**: Decouple the actor network and critic network into two distinct IMPALA+Transformer branches, completely eliminating gradient interference between policy and value.
+- [x] **E40. Completely Separate Actor and Critic Trunks**: Decouple the actor network and critic network into two distinct IMPALA+Transformer branches, completely eliminating gradient interference between policy and value.
+  **Resolved 2026-09-25 - Closed:** Closed without running: the investigation ended at S-043 (the missing Kaiming init on `ImpalaCNNEncoder` was the root cause), on-policy GTrXL was dropped for Atari-100k (S-049), and the GTrXL trunk now runs inside the EZ-V2 port, where it scores 38.6 at 10k (S-068).
 - [x] **E41. Orthogonal Weight Init on Visual Encoder**: Add explicit `orthogonal_(gain=sqrt(2))` initialization to all convolutional layers in `ImpalaCNNEncoder` (which currently use default PyTorch Kaiming uniform).
   **Result**: `cnn_orthogonal_init=True` on E10 -> probe_logit_rel_std=0.00028 -- much worse, actively harmful.
 
 ### Category E: Behavioral Cloning & Pretrained Bootstrap
-- [ ] **E42. 5k-Step BC Warmup from Expert Dataset**: Pretrain `ImpalaGTrXLAgent` on `data/atari_expert/breakout_expert_100k.npz` with cross-entropy for 5k steps before RL. Guarantees the actor starts with high logit spread and valid paddle movement.
-- [ ] **E43. Auxiliary Behavioral Cloning Regularizer during PPO**: Add an auxiliary loss $L_{total} = L_{PPO} + \alpha L_{BC}$ against a small buffer of expert transitions to anchor the policy logits against collapse.
-- [ ] **E44. Policy Distillation from Pretrained Qwen PPO Baseline**: Distill from the successful `compare_ppo_qwen` model (which achieved score 17.00) into `ImpalaGTrXLAgent` via KL divergence $D_{KL}(\pi_{qwen} \| \pi_{gtrxl})$.
-- [ ] **E45. Off-Policy Q-Learning / SAC-Discrete Head**: Replace the on-policy PPO policy gradient with discrete SAC or Double DQN on top of the GTrXL latent, where TD learning directly optimizes $Q(s, a)$ rather than relying on advantage normalization.
-- [ ] **E46. Value-Guided Rollout Exploration**: In training rollouts, sample actions from $\pi(a|s) \propto \exp(Q_{aux}(s, a) / \tau)$ using the 1-step lookahead Q-values from EfficientZero rather than pure $\pi_\theta(a|s)$.
+- [x] **E42. 5k-Step BC Warmup from Expert Dataset**: Pretrain `ImpalaGTrXLAgent` on `data/atari_expert/breakout_expert_100k.npz` with cross-entropy for 5k steps before RL. Guarantees the actor starts with high logit spread and valid paddle movement.
+  **Resolved 2026-09-25 - Closed:** Closed without running: the investigation ended at S-043 (the missing Kaiming init on `ImpalaCNNEncoder` was the root cause), on-policy GTrXL was dropped for Atari-100k (S-049), and the GTrXL trunk now runs inside the EZ-V2 port, where it scores 38.6 at 10k (S-068).
+- [x] **E43. Auxiliary Behavioral Cloning Regularizer during PPO**: Add an auxiliary loss $L_{total} = L_{PPO} + \alpha L_{BC}$ against a small buffer of expert transitions to anchor the policy logits against collapse.
+  **Resolved 2026-09-25 - Closed:** Closed without running: the investigation ended at S-043 (the missing Kaiming init on `ImpalaCNNEncoder` was the root cause), on-policy GTrXL was dropped for Atari-100k (S-049), and the GTrXL trunk now runs inside the EZ-V2 port, where it scores 38.6 at 10k (S-068).
+- [x] **E44. Policy Distillation from Pretrained Qwen PPO Baseline**: Distill from the successful `compare_ppo_qwen` model (which achieved score 17.00) into `ImpalaGTrXLAgent` via KL divergence $D_{KL}(\pi_{qwen} \| \pi_{gtrxl})$.
+  **Resolved 2026-09-25 - Closed:** Closed without running: the investigation ended at S-043 (the missing Kaiming init on `ImpalaCNNEncoder` was the root cause), on-policy GTrXL was dropped for Atari-100k (S-049), and the GTrXL trunk now runs inside the EZ-V2 port, where it scores 38.6 at 10k (S-068).
+- [x] **E45. Off-Policy Q-Learning / SAC-Discrete Head**: Replace the on-policy PPO policy gradient with discrete SAC or Double DQN on top of the GTrXL latent, where TD learning directly optimizes $Q(s, a)$ rather than relying on advantage normalization.
+  **Resolved 2026-09-25 - Closed:** Closed without running: the investigation ended at S-043 (the missing Kaiming init on `ImpalaCNNEncoder` was the root cause), on-policy GTrXL was dropped for Atari-100k (S-049), and the GTrXL trunk now runs inside the EZ-V2 port, where it scores 38.6 at 10k (S-068).
+- [x] **E46. Value-Guided Rollout Exploration**: In training rollouts, sample actions from $\pi(a|s) \propto \exp(Q_{aux}(s, a) / \tau)$ using the 1-step lookahead Q-values from EfficientZero rather than pure $\pi_\theta(a|s)$.
+  **Resolved 2026-09-25 - Closed:** Closed without running: the investigation ended at S-043 (the missing Kaiming init on `ImpalaCNNEncoder` was the root cause), on-policy GTrXL was dropped for Atari-100k (S-049), and the GTrXL trunk now runs inside the EZ-V2 port, where it scores 38.6 at 10k (S-068).
 
 ### Category F: Head Architecture & Action Constraints
 - [x] **E47. Single-Layer Actor Head (Linear without Hidden Layer)**: Replace `Sequential(Linear(256, 256), GELU, Linear(256, action_dim))` with a direct `Linear(256, action_dim)`. In linear heads, logits are directly proportional to feature projections with no internal dead GELUs.
   **Result**: `single_layer_actor_head=True` on E10 -> probe_logit_rel_std=0.00424 -- worse than E10.
-- [ ] **E48. LayerNorm inside Actor Head**: Add `LayerNorm` between the hidden linear and output linear in `actor_head` (`Linear(256, 256) -> LayerNorm -> GELU -> Linear(256, 4)`) to stabilize activation variance.
-- [ ] **E49. Spectral Normalization on Critic**: Apply spectral normalization (`torch.nn.utils.spectral_norm`) to the critic head to bound the Lipschitz constant and prevent massive critic gradients from over-regularizing the trunk.
-- [ ] **E50. Cosine Classifier Head**: Compute logits as cosine similarity between normalized feature $f$ and normalized action prototypes $w_a$: $\text{logit}_a = \frac{f \cdot w_a}{\|f\| \|w_a\| \cdot \tau}$. Logits are bounded in $[-1/\tau, +1/\tau]$, mathematically preventing logit collapse to a constant scalar.
-- [ ] **E51. Discrete Action Masking / Force Fire on Reset Wrapper**: Wrap the environment with `FireResetEnv` and mask out NOOP on Breakout (reducing action space from 4 to 3: FIRE, RIGHT, LEFT), eliminating the degenerate "stay still" stationary point.
+- [x] **E48. LayerNorm inside Actor Head**: Add `LayerNorm` between the hidden linear and output linear in `actor_head` (`Linear(256, 256) -> LayerNorm -> GELU -> Linear(256, 4)`) to stabilize activation variance.
+  **Resolved 2026-09-25 - Closed:** Closed without running: the investigation ended at S-043 (the missing Kaiming init on `ImpalaCNNEncoder` was the root cause), on-policy GTrXL was dropped for Atari-100k (S-049), and the GTrXL trunk now runs inside the EZ-V2 port, where it scores 38.6 at 10k (S-068).
+- [x] **E49. Spectral Normalization on Critic**: Apply spectral normalization (`torch.nn.utils.spectral_norm`) to the critic head to bound the Lipschitz constant and prevent massive critic gradients from over-regularizing the trunk.
+  **Resolved 2026-09-25 - Closed:** Closed without running: the investigation ended at S-043 (the missing Kaiming init on `ImpalaCNNEncoder` was the root cause), on-policy GTrXL was dropped for Atari-100k (S-049), and the GTrXL trunk now runs inside the EZ-V2 port, where it scores 38.6 at 10k (S-068).
+- [x] **E50. Cosine Classifier Head**: Compute logits as cosine similarity between normalized feature $f$ and normalized action prototypes $w_a$: $\text{logit}_a = \frac{f \cdot w_a}{\|f\| \|w_a\| \cdot \tau}$. Logits are bounded in $[-1/\tau, +1/\tau]$, mathematically preventing logit collapse to a constant scalar.
+  **Resolved 2026-09-25 - Closed:** Closed without running: the investigation ended at S-043 (the missing Kaiming init on `ImpalaCNNEncoder` was the root cause), on-policy GTrXL was dropped for Atari-100k (S-049), and the GTrXL trunk now runs inside the EZ-V2 port, where it scores 38.6 at 10k (S-068).
+- [x] **E51. Discrete Action Masking / Force Fire on Reset Wrapper**: Wrap the environment with `FireResetEnv` and mask out NOOP on Breakout (reducing action space from 4 to 3: FIRE, RIGHT, LEFT), eliminating the degenerate "stay still" stationary point.
+  **Resolved 2026-09-25 - Closed:** Closed without running: the investigation ended at S-043 (the missing Kaiming init on `ImpalaCNNEncoder` was the root cause), on-policy GTrXL was dropped for Atari-100k (S-049), and the GTrXL trunk now runs inside the EZ-V2 port, where it scores 38.6 at 10k (S-068).
 
 ---
 

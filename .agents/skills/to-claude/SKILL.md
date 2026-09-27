@@ -27,7 +27,7 @@ Pull **only** the following — do NOT include the full conversation history:
 - The error or symptom (exact traceback if present).
 - The relevant file snippet (use `view_file` to read ≤60 lines around the error).
 - **Knowledge Graph Context (Memory)**: Query the graphify knowledge graph using `& "C:\Users\miari\anaconda3\envs\graphtools\python.exe" -m graphify explain "<symbol>"` or `query "<problem>"`. If the question involves historical experiments, past checkpoints, or Bench2Drive scores, also check or query the external graph at `E:\MThesis_EXP\graphify-out\graph.json` (`--graph "E:\MThesis_EXP\graphify-out\graph.json"`) or `E:\MThesis_EXP\graphify-out\wiki\index.md`.
-- The relevant section of `struggle-solutions.md` if the problem matches a known struggle ID.
+- The relevant section of `challenges/log_00_index.md` if the problem matches a known struggle ID.
 - The active training command (if training-related).
 - Key environment facts: Python env (`carla_py38`), GPU count, CARLA version, Vast.ai.
 
@@ -57,19 +57,19 @@ RELEVANT CODE (<filename>:<start_line>-<end_line>):
 <paste ≤50 lines of code>
 
 WHAT HAS ALREADY BEEN TRIED:
-<bullet list from struggle-solutions.md if relevant, or "Nothing yet">
+<bullet list from challenges/log_00_index.md if relevant, or "Nothing yet">
 
 QUESTION FOR YOU:
 <the specific question the user wants answered>
 =========================================================
 ```
 
-### 4. Conflict Check against struggle-solutions.md
-Before generating the prompt, scan `struggle-solutions.md` for any entry whose
+### 4. Conflict Check against challenges/log_00_index.md
+Before generating the prompt, scan `challenges/log_00_index.md` for any entry whose
 **Symptom** or **Fix** directly contradicts what the user is about to ask.
 - If a contradiction is found: summarize the conflict and **ask the user to clarify** before generating the prompt.
 - If no contradiction: generate the prompt immediately.
 
 ### 5. After Generating the Prompt
-- Ask the user: "Want me to also append this as a new entry to `struggle-solutions.md`?"
+- Ask the user: "Want me to also append this as a new entry to `challenges/log_00_index.md`?"
 - If yes, generate the next available `[S-NNN]` ID and append using the standard template.

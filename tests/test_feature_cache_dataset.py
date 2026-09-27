@@ -1,5 +1,5 @@
 """Verifies the feature-caching read path in `WorldOnRailsDataset` - the mechanism this
-session's whole speedup plan depends on (see struggle-solutions.md and the qwen30m/cnn
+session's whole speedup plan depends on (see challenges/log_00_index.md and the qwen30m/cnn
 throughput measurements). Confirmed via the code-review-graph's `tests_for` query that this
 path had zero direct test coverage: `test_wor_new_features_integration.py` covers the
 overlay/target-speed flags but never sets `feature_cache_tag`, and no test exercises

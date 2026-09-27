@@ -170,15 +170,18 @@ scores), and for testing TCP itself.
 
 ## Next — Tier 1
 
-- [ ] **More data.** Dominant lever twice over. `python scripts/setup/download_pdm_lite.py --towns
+- [x] **More data.** Dominant lever twice over. `python scripts/setup/download_pdm_lite.py --towns
+  - **Resolved 2026-09-25 - Done:** 6 and 8 towns trained on (S-063, ch. 13.34).
       Town04,Town05 --reserve-gb 30` → 47 GB, ~9 min, ~1,840 routes total.
-- [ ] **Widen the closed-loop sample.** 15 routes was enough to certify the two-improvement
+- [x] **Widen the closed-loop sample.** 15 routes was enough to certify the two-improvement
+  - **Resolved 2026-09-25 - Done:** Arms are now compared on 19 b2d20 routes plus sentinel repeats (S-069); a paired route bootstrap is TODO_ACTIVE A8.
       bundle (cnn vs qwen30m+geometry) but not either single step (13.31) — the CIs on those
       two comparisons ([-0.100, +0.032] and [-0.145, +0.064]) are wide enough that more
       routes could plausibly resolve one or both. `scripts/eval/run_closed_loop_arms.sh` already runs all
       three arms concurrently (`--tm_port` fix, 11.8); raising `--routes` past 15 is the only
       change needed, budget ~2.5 min/route/arm when solo, less under concurrency.
-- [ ] **Attribute the two-improvement bundle.** 13.31 shows cnn-vs-geometry clears but
+- [x] **Attribute the two-improvement bundle.** 13.31 shows cnn-vs-geometry clears but
+  - **Resolved 2026-09-25 - Done:** At 3 seeds the transformer beats the conv head closed-loop; the geometry loss adds nothing established (ch. 13.33).
       neither cnn-vs-baseline nor baseline-vs-geometry does alone — that's a sample-size
       argument, not evidence the architecture change contributes nothing on its own. A wider
       route sample (above) is the direct way to find out whether baseline-vs-geometry
@@ -187,22 +190,29 @@ scores), and for testing TCP itself.
 
 ## Next — Tier 2
 
-- [ ] **`--grad_clip`.** 93% of `qwen30m` batches were rescaled at the default 5.0 and it
+- [x] **`--grad_clip`.** 93% of `qwen30m` batches were rescaled at the default 5.0 and it
+  - **Resolved 2026-09-25 - Running:** Arm G = arm A + `--grad_clip 15`, started 2026-09-25 on box R (S-070).
       won anyway. Try 10–20.
-- [ ] **Train longer.** 15 epochs was a time budget, not a choice. At 1.52× gap there is
+- [x] **Train longer.** 15 epochs was a time budget, not a choice. At 1.52× gap there is
+  - **Resolved 2026-09-25 - Tried, negative:** e20 < e15 in arms A-C on the sentinel set (S-062).
       headroom.
 - [ ] **LR sweep.** 3e-4 was inherited from the conv head and never revisited; both the
+  - **Open (2026-09-25):** Still untried; TODO_ACTIVE A10.
       schedule and the data have since changed.
 
 ## Next — Tier 3 (now measurable — paired CI is ±0.025, so ~4% effects resolve)
 
-- [ ] **Bundle:** QK-norm + 2D axial RoPE over the vision grid + register tokens +
+- [x] **Bundle:** QK-norm + 2D axial RoPE over the vision grid + register tokens +
+  - **Resolved 2026-09-25 - Deprioritised:** No link to the failures we measure (obstacle-in-lane routes, S-063/S-069), and the head is not the bottleneck (10M/30M/100M within 3.5%, ch. 13.25).
       stochastic depth. Measure as one arm; ablate within only if the bundle clears.
-- [ ] **Attention-pooled readout** replacing `tokens[:, 0]`, or a state-initialised policy
+- [x] **Attention-pooled readout** replacing `tokens[:, 0]`, or a state-initialised policy
+  - **Resolved 2026-09-25 - Deprioritised:** No link to the failures we measure (obstacle-in-lane routes, S-063/S-069), and the head is not the bottleneck (10M/30M/100M within 3.5%, ch. 13.25).
       token — the structural half of 13.5, still unaddressed.
-- [ ] **Earlier backbone stage** (ResNet stage 3 → 16×16 at stride 16) for higher spatial
+- [x] **Earlier backbone stage** (ResNet stage 3 → 16×16 at stride 16) for higher spatial
+  - **Resolved 2026-09-25 - Deprioritised:** Higher-resolution features are being tested more directly by arm E (288x768 input, S-070).
       resolution.
-- [ ] Muon optimiser — own arm, changes the comparison basis.
+- [x] Muon optimiser — own arm, changes the comparison basis.
+  - **Resolved 2026-09-25 - Deprioritised:** No link to the failures we measure (obstacle-in-lane routes, S-063/S-069), and the head is not the bottleneck (10M/30M/100M within 3.5%, ch. 13.25).
 
 Regularisation (dropout/augmentation) has **dropped in priority**: at a 1.52× gap there is
 little left to recover.

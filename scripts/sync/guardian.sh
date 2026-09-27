@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # usage: guardian.sh <label> <ckpt_json> <total_routes> <cmd...>
 # total_routes must match whatever --routes-subset resolves to for this run - a mismatch here
-# reproduces the infinite relaunch-and-immediately-exit loop documented in struggle-solutions.md
+# reproduces the infinite relaunch-and-immediately-exit loop documented in challenges/log_00_index.md
 # S-021/challenges_03 3.15 (guardian's completion check never matching a trimmed subset's total).
 LABEL="$1"; CKPT_JSON="$2"; TOTAL_ROUTES="$3"; shift 3
 LOGDIR=/workspace/guardian_logs

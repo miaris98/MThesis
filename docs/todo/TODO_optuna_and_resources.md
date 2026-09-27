@@ -139,18 +139,27 @@ can be cross-referenced.
 
 ### Checklist
 
-- [ ] Add `optuna` to `requirements.txt` (not currently present).
-- [ ] Add a **three-way route split** (train/val/test) — currently only train/val exists.
+- [x] Add `optuna` to `requirements.txt` (not currently present).
+  - **Resolved 2026-09-25 - Parked:** The study's objective is held-out val loss, which cannot rank closed-loop driving (ch. 13.28-13.29), and closed-loop DS per trial is too slow (S-015). Applies to this whole checklist.
+- [x] Add a **three-way route split** (train/val/test) — currently only train/val exists.
+  - **Resolved 2026-09-25 - Parked:** See the first item: the Optuna study is parked.
       This is a prerequisite, not an optional extra.
-- [ ] Write `tune_wor.py` with the objective above.
-- [ ] Persistent SQLite storage under `/workspace/optuna/`, added to `scripts/sync/sync_experiments.py`.
-- [ ] Verify resume-after-kill actually works (kill a study mid-trial, restart, confirm it
+- [x] Write `tune_wor.py` with the objective above.
+  - **Resolved 2026-09-25 - Parked:** See the first item.
+- [x] Persistent SQLite storage under `/workspace/optuna/`, added to `scripts/sync/sync_experiments.py`.
+  - **Resolved 2026-09-25 - Parked:** See the first item.
+- [x] Verify resume-after-kill actually works (kill a study mid-trial, restart, confirm it
+  - **Resolved 2026-09-25 - Parked:** See the first item.
       continues) — this is the failure mode that already cost runs once.
-- [ ] Run equal-budget studies for `cnn` and `qwen30m`.
-- [ ] Re-score the two winners on the untouched test split with the paired bootstrap from
+- [x] Run equal-budget studies for `cnn` and `qwen30m`.
+  - **Resolved 2026-09-25 - Parked:** See the first item.
+- [x] Re-score the two winners on the untouched test split with the paired bootstrap from
+  - **Resolved 2026-09-25 - Parked:** See the first item.
       `scripts/analysis/check_val_noise.py`.
-- [ ] Cross-apply hyperparameters (each arch under the other's best) for the 13.6 answer.
-- [ ] Document as challenges section 13.23 / a new group.
+- [x] Cross-apply hyperparameters (each arch under the other's best) for the 13.6 answer.
+  - **Resolved 2026-09-25 - Parked:** See the first item; the transformer-vs-conv question was settled closed-loop instead (ch. 13.33).
+- [x] Document as challenges section 13.23 / a new group.
+  - **Resolved 2026-09-25 - Parked:** See the first item.
 
 ---
 
@@ -166,8 +175,10 @@ regression, with many independent routes** (routes, not frames, are the statisti
 The highest-value data available is the **rest of what we already have**. 4 of 8 towns are
 downloaded (656 routes). Remaining: Town04 (20.3 GB), Town05 (26.6 GB), then Town12/Town13
 (~117 GB each). Already in the exact expected format with route plans — zero loader work.
-- [ ] `python scripts/setup/download_pdm_lite.py --towns Town04,Town05 --reserve-gb 30` → ~1,840 routes
-- [ ] Town12/Town13 only on a large-disk instance; each is a big map with many routes.
+- [x] `python scripts/setup/download_pdm_lite.py --towns Town04,Town05 --reserve-gb 30` → ~1,840 routes
+  - **Resolved 2026-09-25 - Done:** All 8 towns downloaded and trained on (S-063).
+- [x] Town12/Town13 only on a large-disk instance; each is a big map with many routes.
+  - **Resolved 2026-09-25 - Done:** Town12/13 trained on in `wor_qwen30m_8towns_fast` (S-063); they did not fix the obstacle routes.
 
 ### `jkdxbns/autonomous-driving-carla` — CARLA-domain pretrained backbone
 YOLO11n (detection: vehicles, pedestrians, traffic lights, speed signs) + **UFLD lane
@@ -179,9 +190,11 @@ ResNet-34, and Challenge Group 8 is entirely about sourcing better pretrained pe
 backbone trained on CARLA lane geometry is plausibly a much better frozen feature source for
 a lane-following waypoint task than ImageNet classification features — and swapping it stays
 inside the "use pretrained perception, don't train vision" scope.
-- [ ] Load UFLD weights through the existing `--weights_path` path (same mechanism as the
+- [x] Load UFLD weights through the existing `--weights_path` path (same mechanism as the
+  - **Resolved 2026-09-25 - Superseded:** The CARLA-pretrained TF++ regnety_032 is the backbone (memory carla-pretrained-backbone-only).
       PCLA/LAV checkpoints) and A/B against ImageNet ResNet-34.
-- [ ] Caveat: ResNet-18 at 800×288 input vs our 256×256/ResNet-34 — feature map geometry
+- [x] Caveat: ResNet-18 at 800×288 input vs our 256×256/ResNet-34 — feature map geometry
+  - **Resolved 2026-09-25 - Superseded:** See the UFLD item above.
       changes, so `vision_grid` and `PretrainedVisionEncoder.out_channels` need checking.
 - Detection/lane *outputs* as auxiliary policy inputs would be a larger architectural change
   and a separate question; not recommended before the items in Tier 1.
@@ -197,7 +210,8 @@ Its one real value: it was collected by a **different pipeline**, so evaluating 
 PDM-Lite-trained model on it is a genuine out-of-distribution generalisation test. "The
 transformer's advantage transfers to data it was not collected alongside" is a strong thesis
 claim that no amount of extra PDM-Lite towns can support.
-- [ ] Stretch goal, after Tier 1. Requires deriving a route proxy, which risks leakage —
+- [x] Stretch goal, after Tier 1. Requires deriving a route proxy, which risks leakage —
+  - **Resolved 2026-09-25 - Deprioritised:** A cross-source OOD test is a nice-to-have; the open driving problem is the obstacle routes.
       design carefully or restrict to a control-prediction metric.
 
 ## Not useful for this project

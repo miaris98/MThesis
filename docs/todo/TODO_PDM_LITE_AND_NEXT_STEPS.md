@@ -36,7 +36,8 @@ Following the migration to the RTX 4090 instance and the parallel co-utilization
   - [x] **Gate 3 (Stability & Robustness Milestone - Epoch 20)**:
     - **Val Lateral Error**: Dropped from 3.8 cm to **3.2 cm** (New Champion!).
     - **Val ADE**: Dropped from 0.342m to **0.249m**.
-  - [ ] **Gate 4 (Full Benchmark Production - In Flight)**:
+  - [x] **Gate 4 (Full Benchmark Production - In Flight)**:
+    - **Resolved 2026-09-25 - Stale:** This in-flight status is from an earlier box. The 6- and 8-town runs since then are evaluated in S-062, S-063, S-069.
     - Actively training **Epoch 38 / 50**.
     - Epoch 37 training metrics: **ADE = 0.055m (5.5 cm)**, **Lat Err = 0.009m (9 mm)**, **Total Loss = 0.1170**.
     - ETA to Epoch 50 completion: ~11:35 local time.
@@ -48,10 +49,12 @@ Following the migration to the RTX 4090 instance and the parallel co-utilization
   - Evaluated 38/38 routes on `regnety032_b2d38`.
   - Identified and fixed metric classification bug where `"TickRuntime"` was treated as "unrecognised" rather than a real driving outcome ([S-047]).
   - *Empirical Outcome*: **Mean score_composed = 58.53** across all 38 routes (0 agent-fault, 0 sim-fault, 0 unrecognised).
-- [ ] **Closed-Loop Evaluation of Epoch 50 Champion**:
+- [x] **Closed-Loop Evaluation of Epoch 50 Champion**:
+  - **Resolved 2026-09-25 - Superseded:** Screens stop at e20 and e20 < e15 (S-062); the 8-town e50 checkpoint was evaluated on b2d20 (S-063). Checkpoints are picked by closed-loop DS.
   - Benchmark new `best_model.pth` (Epoch 20-50 champion) on the 20-route stratified evaluation subset (`data/bench2drive_subset20.txt`).
   - Extract Driving Score (DS), Route Completion (RC), and Infraction Score.
-- [ ] **Two-Stage Model Synchronization**:
+- [x] **Two-Stage Model Synchronization**:
+  - **Resolved 2026-09-25 - Done as a standing rule:** Every run is synced to `E:` during training and pushed to HF after its result (CLAUDE.md); per-run records are in the challenges log.
   - **Stage 1 (External Archive First)**: Stream final checkpoints, telemetry logs, and MLflow runs to `E:\MThesis_EXP\carla_wor_8towns_epoch50_final\`.
   - **Stage 2 (Hugging Face Second)**: Push champion model weights and rollout video summaries to Hugging Face Hub (`Miaris/mthesis-carla-wor`).
 
@@ -78,7 +81,8 @@ Following the migration to the RTX 4090 instance and the parallel co-utilization
     - **Action Entropy**: **1.308** (healthy exploration).
   - *Current Status*: Actively stepping at **Step 46,000–47,000 / 100,000**.
   - ETA to 100k completion: ~11:15 local time.
-- [ ] **Multi-Seed Production Run & Final HNS Score Aggregation**:
+- [x] **Multi-Seed Production Run & Final HNS Score Aggregation**:
+  - **Resolved 2026-09-25 - Superseded:** `train_mcts_offpolicy.py` was replaced by the EZ-V2 port (S-058). Multi-seed now = S058f/S058g seeds 0-3 (S-071), TODO_ACTIVE B1.
   - Once seed 42 completes, run seeds 0 and 1.
   - Calculate Human-Normalized Score (HNS) against benchmark literature (DER, SimPLe, EfficientZero).
   - Stage 1 Sync to `E:\MThesis_EXP\results_atari_100k_mcts\`.

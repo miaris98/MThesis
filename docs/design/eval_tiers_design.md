@@ -2,7 +2,7 @@
 
 Companion to [TODO_leaderboard_benchmark.md](../todo/TODO_leaderboard_benchmark.md) (which holds the
 published-baseline table this work is ultimately measured against) and
-[struggle-solutions.md](struggle-solutions.md) S-011..S-015 (the measurements and failures that
+[challenges/log_00_index.md](../../challenges/log_00_index.md) S-011..S-015 (the measurements and failures that
 motivated it).
 
 Created 2026-09-15.

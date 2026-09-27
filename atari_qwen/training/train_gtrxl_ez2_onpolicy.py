@@ -1,6 +1,6 @@
 """On-Policy PPO+GAE Trainer for IMPALA-CNN + GTrXL + EfficientZero v2.
 
-Fallback architecture per struggle-solutions S-029/S-032: the off-policy replay-buffer
+Fallback architecture per challenges log S-029/S-032: the off-policy replay-buffer
 design (train_gtrxl_ez2_turbo.py) stabilizes under GAE-within-K-step-windows but plateaus,
 oscillating between a small set of fixed-point behaviors rather than climbing (never
 exceeded a score of 11.00 across a full 60k-step run). This trainer keeps the exact same
@@ -133,7 +133,7 @@ def train_onpolicy_gtrxl_ez2(
     mlflow_port: int = 10100,
     experiment_name: str = "Atari_GTrXL_EZ2",
     run_label: str = None,
-    # Isolation test per struggle-solutions S-036/S-037: False replaces GTrXL's GRU gating
+    # Isolation test per challenges log S-036/S-037: False replaces GTrXL's GRU gating
     # with plain residual addition, to test whether the gating mechanism itself is why the
     # actor's output stays input-invariant, independent of raw training step budget.
     use_gru_gating: bool = True,
@@ -235,7 +235,7 @@ def train_onpolicy_gtrxl_ez2(
         num_heads=4,
         ffn_dim=1024,
         unroll_steps=unroll_steps,
-        # See struggle-solutions S-035: bg_init=2.0 was still frozen at init after 15k-60k steps
+        # See challenges log S-035: bg_init=2.0 was still frozen at init after 15k-60k steps
         # in both trainers, making the actor's output input-invariant. 0.0 lets gates open sooner.
         bg_init=0.0,
         use_gru_gating=use_gru_gating,

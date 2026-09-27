@@ -108,6 +108,7 @@ class WorldOnRailsTrainer:
         route_overlay: bool = False,
         feature_cache_tag: Optional[str] = None,
         use_augmented_camera: bool = False,
+        color_aug_prob: float = 0.0,
         val_every: int = 1,
         max_batches: int = 0,
         target_speed_loss_weight: float = 0.0,
@@ -219,7 +220,8 @@ class WorldOnRailsTrainer:
             "val_split": val_split, "val_data_dir": val_data_dir or "", "seed": seed,
             "vision_grid": getattr(model, "vision_grid", ""),
             "pool_vision": getattr(model, "pool_vision", ""),
-            "use_augmented_camera": use_augmented_camera
+            "use_augmented_camera": use_augmented_camera,
+            "color_aug_prob": color_aug_prob
         })
 
         # Per-epoch CSV telemetry.
@@ -245,7 +247,8 @@ class WorldOnRailsTrainer:
             crop_bottom_frac=crop_bottom_frac,
             route_overlay=route_overlay,
             feature_cache_tag=feature_cache_tag,
-            use_augmented_camera=use_augmented_camera
+            use_augmented_camera=use_augmented_camera,
+            color_aug_prob=color_aug_prob
         )
         # Cap on batches per epoch, for smoke tests that measure cost without paying for a full
         # epoch. 0 means no cap. Stored rather than applied here so both the train and eval
