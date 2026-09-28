@@ -71,4 +71,11 @@ __pycache__/
 .code-review-graph/
 # graphify knowledge-graph output (regenerable via /graphify --update)
 graphify-out/
-scratch/check_box1_detail.py
+
+# ---------------------------------------------------------------------------
+# One-off status/ops scripts written by agent sessions, and per-box sync scripts
+# with hardcoded hosts. They are archived on E:\MThesis_EXP\local_repo_logs_*;
+# the few scratch files committed before 2026-09-28 stay tracked.
+# ---------------------------------------------------------------------------
+/scratch/
+/scripts/sync/sync_box_*.py
