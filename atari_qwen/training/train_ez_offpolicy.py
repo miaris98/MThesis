@@ -269,7 +269,12 @@ def train(args):
             replay.save(ckpt_dir / "replay_latest.npz")
 
     obs, _ = envs.reset(seed=args.seed)
-    amp = torch.bfloat16 if (device.type == "cuda" and torch.cuda.is_bf16_supported()) else torch.float16
+    # bf16 autocast only where the GPU has native bf16 (Ampere+). is_bf16_supported() also returns True for
+    # emulated bf16, which ran ~4.5x slower than fp16 on a 2080 Ti (S-099); there is no GradScaler for fp16,
+    # so pre-Ampere GPUs run in fp32 instead.
+    bf16_native = device.type == "cuda" and torch.cuda.is_bf16_supported(including_emulation=False)
+    amp = torch.bfloat16 if bf16_native else torch.float32
+    print(f"autocast dtype: {amp} (native bf16: {bf16_native})", flush=True)
     ep_ret = np.zeros(E); recent_returns = []
     t0 = time.time(); last_log = env_steps; next_eval = (env_steps // args.eval_interval + 1) * args.eval_interval
     tm = {"collect": 0.0, "targets": 0.0, "update": 0.0}
@@ -317,7 +322,7 @@ def train(args):
             ee = np.repeat(e, K + 1)
             root_stacks = replay.stacks(pos[:, :K + 1].reshape(-1), ee)          # states t..t+K
             boot_stacks = replay.stacks(pos[:, TD:TD + K + 1].reshape(-1), ee)   # states t+TD..t+K+TD
-            with torch.no_grad(), torch.autocast(device_type=device.type, dtype=amp):
+            with torch.no_grad(), torch.autocast(device_type=device.type, dtype=amp, enabled=bf16_native):
                 x_boot = boot_stacks
                 _, vb, _ = target.initial_inference(x_boot)
                 v_boot = support.vector_to_scalar(vb).float().cpu().numpy().reshape(B, K + 1)
@@ -356,7 +361,7 @@ def train(args):
             T_ = lambda a: torch.as_tensor(a, device=device)
             val_t_, pol_t_, prefix_, mask_, cmask_, isw_ = map(T_, (val_t, pol_t, prefix, mask, cons_mask, isw))
             acts = T_(replay.act[pos[:, :K], e[:, None]])
-            with torch.autocast(device_type=device.type, dtype=amp):
+            with torch.autocast(device_type=device.type, dtype=amp, enabled=bf16_native):
                 s, v_log, p_log = model.initial_inference(obs0)
                 with torch.no_grad():
                     # one call per unroll step, as EZ-V2: each train-mode pass refreshes the BatchNorm
