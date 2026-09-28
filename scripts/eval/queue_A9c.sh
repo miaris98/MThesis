@@ -3,6 +3,7 @@
 # WoR). usage: queue_A9c.sh PORT GPU JOB...
 #   JOB = I15 | I20            arm I e15/e20 on the 19 b2d20 routes (resumes from the copied partial JSON)
 #       | E15:<k> | WOR:<k>    chunk k (1..10) of bench2drive220 minus 27515, every 10th route from position k-1
+#       | E15L:<name>:<r1,r2,..>  arm E e15 on an explicit route list as a9_E15_<name> (retry of skipped routes)
 # Lanes on one box need distinct PORTs (TM port = PORT+6000); each lane clears its own rpc range before a launch (S-091).
 # A lane relaunched with a new job list attaches to a guardian that is already running instead of duplicating it.
 # Crash routes (S-095): a route that segfaults CARLA on every attempt (like 27515) is skipped after 4 launch attempts in
@@ -34,7 +35,10 @@ routes_for() {  # label k -> the route list this label must keep using
   elif [ -f $OUT/${1}_x.json ]; then chunk $2 0    # started before route files existed: its original list
   else chunk $2 1; fi
 }
-desc() { for c in $(ps -eo pid=,ppid= | awk -v p=$1 '$2==p {print $1}'); do desc $c; echo $c; done; }
+# `local c`: without it the recursion overwrote c and printed the deepest leaf instead of each child, so the
+# evaluator was never killed, stayed alive as an orphan holding the ports, and its guardian never relaunched
+# (S-099)
+desc() { local c; for c in $(ps -eo pid=,ppid= | awk -v p=$1 '$2==p {print $1}'); do desc $c; echo $c; done; }
 clear_ports() { for q in $(seq $(( $1 - 2 )) $(( $1 + 4 ))); do for pid in $(pgrep -f "CarlaUE4.*-carla-rpc-port=$q( |$)"); do kill -9 $pid 2>/dev/null; done; done; }
 nrec() { python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['_checkpoint']['records']))" $OUT/${1}_x.json 2>/dev/null || echo 0; }
 eval_job() {  # label ckpt routes
@@ -80,6 +84,7 @@ for job in "$@"; do
     I15) eval_job v2_armI_e15 $C/carla_armI_hires_color/model_epoch_015.pth "$R19" ;;
     I20) eval_job v2_armI_e20 $C/carla_armI_hires_color/model_epoch_020.pth "$R19" ;;
     E15:*) k=${job#*:}; L=a9_E15_c$(printf %02d $k); eval_job $L $C/carla_armE_aug1_hires/model_epoch_015.pth "$(routes_for $L $k)" ;;
+    E15L:*) spec=${job#*:}; eval_job a9_E15_${spec%%:*} $C/carla_armE_aug1_hires/model_epoch_015.pth "${spec#*:}" ;;
     WOR:*) k=${job#*:}; L=a9_WOR_c$(printf %02d $k)
       ( export EVAL_AGENT=/workspace/MThesis/scripts/eval/wor_official_b2d_agent.py EVAL_AGENT_CONFIG=$WOR_CFG PCLA_ROOT=/workspace/PCLA ALLOW_NO_FROZEN_BACKBONE=1
         eval_job $L $WOR_CFG "$(routes_for $L $k)" ) ;;

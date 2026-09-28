@@ -11,24 +11,26 @@ The status block below is the only snapshot in this file: replace it, don't appe
 
 ---
 
-## Status: 2026-09-28 11:55 Athens (S-098)
+## Status: 2026-09-28 15:05 Athens (S-098, S-099)
 
 | Box | Job | State |
 |---|---|---|
-| Y (2x RTX 3090) | Arm I e20 (19/19 done, 63.9 DS), e15 (18/19 done), A9 chunks 2, 3, 9 on 4 lanes | running |
+| Y (2x RTX 3090) | Arm I done (e20 63.9, e15 59.5 on 19/19). A9 lanes: E rest of c01/c02/c03/c09 + retry, then WoR 1, 2, 3, 9 | running (relaunched 14:55, S-099) |
 | Y GPU 1 | B4: ResNet + uniform, 100k seed 0 (`S058i_resnet_100k_s0_uniform`) | running (~17k/100k, ETA ~22:45) |
-| Z (RTX 3080) | B4: GTrXL + uniform, 100k seed 0 (`S058h_gtrxl_100k_s0_uniform`) + A9 E chunk 7 | running (~17k/100k, ETA ~23:10) |
-| AA (A10) | A9 chunks 4, 5, 6, 8, 10 (E e15) on 5 lanes | running (all chunks >70% done) |
+| Z (RTX 3080) | B4: GTrXL + uniform, 100k seed 0 (`S058h_gtrxl_100k_s0_uniform`, 162.8 @30k) + A9 E retry 26956 | running (~30k/100k, ETA ~01:00) |
+| AA (A10) | A9: E rest of c04/c06/c08 + retry, WoR 4, 5, 6, 7, 8 (WoR 10 done 21/21) on 5 lanes | running (relaunched 14:55, S-099) |
 | AB (4x 2080 Ti 22GB) | GPU 2: B4 GTrXL seed 1 (`S058h_s1`), GPU 3: B4 ResNet seed 1 (`S058i_s1`) | running (launched 11:53) |
-| AB (4x 2080 Ti 22GB) | GPU 0 & 1: CARLA A9 Chunk 1 (E e15) + WoR baseline chunks on 4 lanes | setting up CARLA, lanes queued |
+| AB (4x 2080 Ti 22GB) | GPU 0: B4 GTrXL seed 2, GPU 1: B4 ResNet seed 2 (`S058{h,i}_*_s2_uniform`) | running (launched 15:00; CARLA lanes stopped, 0 records, S-099) |
 
-A9 = full Bench2Drive (219 routes) for arm E e15 and the original WoR. Arm E e15 ETA ~13:30 (accelerated by AB Chunk 1); WoR baseline ETA ~15:30.
+A9 = full Bench2Drive (219 routes) for arm E e15 and the original WoR. All lanes were hung 1.5-4 h (S-099); ~35 E and
+~188 WoR route runs remain on 10 lanes, ETA ~19:30-20:30 Athens. 8 "crash routes" skipped during the hang are
+being retried (most were probably false skips).
 **Literature scan (2026-09-28):** new items A14-A21 and B8-B14, from `docs/design/literature_scan_2026-09-28.md`.
 **Top CARLA lead (S-096, S-097):** our 6-town training set has **no** obstacle scenarios (they are all in Town12/13), so
 arms A-I never saw one. The one run that had them (8-town, S-063) fed PDM-Lite's obstacle-shifted `route` as input,
 while evaluation feeds the unshifted plan. The fix needs both: obstacle data **and** `route_original` (A14), then
 moderate oversampling (A16).
-Backups: `E:\MThesis_EXP\live_20260928_box{Y,Z,AA}_*` every 5 min, replay buffers every 3 h.
+Backups: `E:\MThesis_EXP\live_20260928_box{Y,Z,AA,AB}_*` every 5 min, replay buffers (Y, Z) every 3 h.
 Result table of 2026-09-27 (all boxes destroyed then, S-092):
 
 **Goal check (S-089, S-090):** original WoR **67.8 / 66.0** (2 runs, mean 66.9) on the 19 b2d20 routes.

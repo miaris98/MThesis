@@ -6,7 +6,10 @@
 # run script exits. When the newest attempt log of a running guardian ends in either, kill the whole process tree
 # under that attempt's run script (found as the guardian's own child, never by a name pattern - S-077); CARLA runs
 # under `su carlauser` and survives a plain kill, then blocks its ports for every later launch (S-091).
-desc() { for c in $(ps -eo pid=,ppid= | awk -v p=$1 '$2==p {print $1}'); do desc $c; echo $c; done; }
+# `local c`: without it the recursion overwrote c and printed the deepest leaf instead of each child, so the
+# evaluator was never killed, stayed alive as an orphan holding the ports, and its guardian never relaunched
+# (S-099)
+desc() { local c; for c in $(ps -eo pid=,ppid= | awk -v p=$1 '$2==p {print $1}'); do desc $c; echo $c; done; }
 while true; do
   for G in $(pgrep -f '^bash /workspace/MThesis/scripts/eval/b2d_guardian.sh '); do
     label=$(tr '\0' ' ' < /proc/$G/cmdline | awk '{print $3}')
@@ -30,6 +33,14 @@ while true; do
           cp -f "$J.bak" "$J"; echo "$(date -u '+%F %T') $label: result file unreadable after kill - restored $J.bak"
         fi
       done
+      # an evaluator orphaned by an earlier incomplete kill (ppid 1, no run script above it) still matches the
+      # guardian's `pgrep -f checkpoint=<json>`, so the guardian waits on it forever (S-099): kill it by that json
+      if [ -z "$(pgrep -P $G -f run_bench2drive.sh)" ]; then
+        for L in $(pgrep -f "leaderboard_evaluator.py.*checkpoint=$J( |$)"); do
+          echo "$(date -u '+%F %T') $label: stuck orphan evaluator $L (no run script) - killing its tree"
+          T=$(desc $L); kill -9 $T $L 2>/dev/null
+        done
+      fi
     fi
   done
   sleep 120
