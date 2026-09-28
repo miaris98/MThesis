@@ -31,6 +31,19 @@ arms A-I never saw one. The one run that had them (8-town, S-063) fed PDM-Lite's
 while evaluation feeds the unshifted plan. The fix needs both: obstacle data **and** `route_original` (A14), then
 moderate oversampling (A16).
 Backups: `E:\MThesis_EXP\live_20260928_box{Y,Z,AA,AB}_*` every 5 min, replay buffers (Y, Z) every 3 h.
+**All boxes are destroyed at 18:00 (2026-09-28).** Resume states go to `E:\MThesis_EXP\live_20260928_final_atari_resume`
+(Y 60k/50k, Z 50k, AB ResNet s1/s2 10k), and A9 results to `live_20260928_final_a9`.
+
+**Order of work from here:**
+1. *No box needed:* A9 merge (paired E vs WoR, official 220 with crashes = 0, seen/unseen towns, excluded routes)
+   -> decides whether E ties WoR at scale. B15 plasticity diagnostic on the saved GTrXL/ResNet checkpoints. HF stage 2.
+2. *Next box session, CARLA (the thesis claim):* finish A9's leftover routes (1 box, a few hours), then A14 arm J
+   (Town12/13 obstacle archives + `route_original`; cheapest first: fine-tune E e15 ~5 epochs), evaluated on b2d20 +
+   A9's 50 obstacle routes, with a matched WoR-head arm; then A16 (arm K) and A15.
+3. *Next box session, Atari:* resume GTrXL/ResNet s0 to 100k from the E: state (Ampere, bf16); seeds 1-2 fresh on
+   Ampere. Then B9 (HL-Gauss, cheap), then B16 (trunk x replay ratio, with B15's metrics logged).
+Hardware: CARLA is CPU-bound (~5 cores/lane): pick a high CPU quota. Atari needs native bf16 (Ampere or newer).
+Avoid Turing (2080 Ti: no bf16, and Vulkan hung on driver 595, S-099).
 Result table of 2026-09-27 (all boxes destroyed then, S-092):
 
 **Goal check (S-089, S-090):** original WoR **67.8 / 66.0** (2 runs, mean 66.9) on the 19 b2d20 routes.
@@ -337,6 +350,25 @@ Masks from a pretrained segmenter (SAM2/Cutie) plus ~6 labelled frames per game 
 tokens. OC-STORM beats STORM on 18/26 games. ObjectZero (2026) puts an object-centric world model
 under MCTS. It is the Atari counterpart of an input overlay; check it against the "pretrained vision only"
 rule (a pretrained segmenter is allowed; training it is not).
+
+### B15. Plasticity diagnostics on the saved checkpoints - **Next** (no box needed; before B8/B13)
+Before paying for resets (B8) or normalisation fixes (B13), measure whether our runs lose plasticity at all. For
+each saved checkpoint of GTrXL s0 and ResNet s0 (best, 40k, 50k/60k on E:), run a few replay batches through
+the model and record:
+- the dormant-neuron ratio (tau = 0.025, Sokar et al. 2023) per layer;
+- the feature effective rank (srank) of the representation;
+- the weight norm, and the gradient norm per layer on a fixed batch.
+
+Rising dormancy or falling rank from 20k to 60k, alongside a flat score, would justify B8/B13. Flat metrics
+point elsewhere (search, targets). Log the same metrics in `train_ez_offpolicy.py` at every eval from now on
+(cheap: one batch).
+
+### B16. Does the GTrXL trunk keep plasticity better than ResNet at higher replay ratios? - **Later** (thesis angle)
+The external plasticity report (2026-09-28, see the literature note section 4) cites evidence that recurrent/gated
+networks resist plasticity loss at high replay ratios (MARL, arXiv 2404.09715). Our B4 compares the two trunks
+at replay ratio ~1.2. The question "trunk x replay ratio (1.2 / 2 / 4), with B15's metrics logged" ties the
+trunk comparison to the most studied sample-efficiency lever. Either answer is reportable. Needs 6 runs x 2
+seeds at 100k: do it only after B4's baseline curves and B15.
 
 ---
 

@@ -192,6 +192,35 @@ and use the shifted `route` only as a supervision target (TF++'s "path checkpoin
 
 ---
 
+## 4. External report "Advancements in Sample-Efficient Deep RL (2022-2026)" (received 2026-09-28): what we take
+
+The report (AI-generated overview, pasted by the user) covers plasticity loss, world models (IRIS, Delta-IRIS, TWISTER,
+DIAMOND), EZ-V2/EZ-M, benchmarks beyond Atari 100k, and proposes a "G-DLAN" architecture. Several figures could
+not be checked (e.g. "AltNet 52x over SAC", "CAPO 30x"), so none of them is cited without reading the paper.
+
+**Taken:**
+- *Measure plasticity before fixing it*: dormant-neuron ratio / FAU and effective rank -> **TODO B15** (offline, cheap).
+- *Recurrent/gated nets resist plasticity loss at high replay ratio* -> **TODO B16**: GTrXL vs ResNet across replay
+  ratios. This connects the thesis trunk choice to plasticity.
+- *Plasticity interventions* (BBF soft resets, SR-SPR, ReDo, CReLU, FIRE, AltNet) -> variants of B8/B13, tried in that
+  order of cost. AltNet (a twin network with hard resets) doubles memory and compute. Only consider it if B8's resets
+  show post-reset score drops.
+
+**Not taken, and why:**
+- *DIAMOND / Delta-IRIS / pixel-space world models:* a different agent family (policy trained in imagination, no
+  search). Replacing the EZ-V2 port would discard B4's curves, and the compute (days per game) is beyond our budget.
+  TWISTER's useful part is already B11.
+- *EZ-V2 continuous control, EZ-M multi-task, "gradient-guided MCTS":* Breakout's actions are discrete, and the
+  thesis has no continuous-control task. Multi-task only with B6 (more games), much later.
+- *G-DLAN* (Delta-Transformer + diffusion verifier + triple AltNet + gradient-guided continuous MCTS): four heavy
+  systems, none of them tested in our setting, and aimed at continuous control. It cannot be built and ablated
+  within a master's budget, and it does not address either thesis question (beat WoR; GTrXL vs ResNet trunk).
+- *New benchmarks* (Crafter, Procgen, HumanoidBench, ViZDoom, MemoryMaze, SMAC, text games, SWE-bench) and the
+  RL-for-LLMs section: out of scope. Generality within Atari is B6.
+- The report has nothing on driving, so the CARLA plan (A9 -> A14/A16/A15) is unchanged.
+
+---
+
 ## Sources
 - Atari 100k overview: https://www.emergentmind.com/topics/atari-100k-benchmark
 - BBF: https://arxiv.org/abs/2305.19452 ; SR-SPR: https://openreview.net/pdf?id=OpC-9aBBVJe ; Primacy bias: https://proceedings.mlr.press/v162/nikishin22a/nikishin22a.pdf
