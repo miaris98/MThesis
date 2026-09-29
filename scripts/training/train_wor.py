@@ -147,11 +147,13 @@ def parse_args():
     parser.add_argument("--resume_from", type=str, default=None, help="Path to a model_epoch_*.pth written by a prior run of this exact config - loads the trainable-head weights and optimizer state and continues at checkpoint['epoch']+1 with a fast-forwarded LR schedule, instead of starting over at epoch 1. Use a dated model_epoch_*.pth, not latest_model.pth - only the dated snapshots reliably carry optimizer state (see WorldOnRailsTrainer.train's docstring)")
     parser.add_argument("--stop_epoch", type=int, default=None, help="Stop after this epoch while keeping the LR schedule of the full --epochs run (screening tier of docs/design/carla_iteration_protocol.md): e.g. --epochs 50 --stop_epoch 20 trains epochs 1-20 exactly as the first 20 epochs of a 50-epoch run, so --resume_from its model_epoch_020.pth later continues to 50 with no schedule discontinuity. The stop epoch always writes a dated snapshot")
     parser.add_argument("--save_freq", type=int, default=3, help="Epoch interval between dated model_epoch_*.pth snapshots (the ones --resume_from targets) and optimizer-state saves. Lower values bound how much a stopped/interrupted run can lose, at the cost of writing (and briefly holding in memory) the optimizer state - roughly 2x the trainable weights' size for AdamW - more often. 3 rather than the old default of 5: a remote box has been destroyed mid-run more than once with more than 3 epochs of progress unrecoverable")
+    parser.add_argument("--route_key", type=str, default="route", choices=["route", "route_original"], help="PDM-Lite field for the route points and overlay (TODO A14, S-096). 'route' is bent around obstacles by the expert; 'route_original' is the unshifted plan the leaderboard gives the agent at test time. Only differs on obstacle scenarios (Town12/13). Training-only: evaluation always receives the plan")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    os.environ["WOR_ROUTE_KEY"] = args.route_key  # read by WorldOnRailsDataset; inherited by DataLoader workers
 
     # Resolved once, here, because three separate things downstream need the real input shape:
     # the auto-batch-size probe (which must allocate the same shape the run will), the banner's

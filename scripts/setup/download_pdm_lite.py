@@ -35,6 +35,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -64,6 +65,9 @@ def parse_args():
                    help="Comma-separated explicit list. Still checked against the budget.")
     p.add_argument("--include-huge", action="store_true",
                    help="Allow Town12/Town13 (~117 GB each) into automatic selection.")
+    p.add_argument("--archive-regex", default=None,
+                   help="Only fetch .zip archives whose path matches this regex, e.g. "
+                        "'^Town(0[1-5]|10)/|^Town1[23]/.*(Accident|Obstacle|HazardAtSideLane|InvadingTurn|OpensDoor)'.")
     p.add_argument("--dry-run", action="store_true", help="Print the plan and exit.")
     return p.parse_args()
 
@@ -229,6 +233,10 @@ def main():
     listing = discover(candidates)
     if not listing:
         sys.exit("[FATAL] No town listings retrieved - check network access to huggingface.co.")
+    if args.archive_regex:
+        # e.g. the Town12/13 obstacle archives only (arm J, TODO A14): sizes and the plan follow the filter
+        pat = re.compile(args.archive_regex)
+        listing = {t: [(p, s) for p, s in f if not p.endswith(".zip") or pat.search(p)] for t, f in listing.items()}
 
     chosen, used, skipped, sizes = plan(listing, dest, budget, explicit)
 

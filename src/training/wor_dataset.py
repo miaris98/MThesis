@@ -139,6 +139,10 @@ class WorldOnRailsDataset(Dataset):
         # a sparse subsample keeps this closer to the Leaderboard's sparse-goal
         # convention, and this is a knob so the leakage can be ablated.
         self.route_points = route_points
+        # Which PDM-Lite route feeds the route points and the overlay (TODO A14, S-096). `route` is bent around
+        # obstacles by the expert (shift_route_around_actors), `route_original` is the plan the leaderboard hands the
+        # agent at test time. Set by train_wor.py --route_key via the environment so DataLoader workers inherit it.
+        self.route_key = os.environ.get("WOR_ROUTE_KEY", "route")
         # JPEG decode + resize is the same work every epoch for a frame that never
         # changes, and it's what capped throughput at ~280-340 samples/sec regardless
         # of batch size (batch size only changes how many already-decoded samples get
@@ -267,7 +271,8 @@ class WorldOnRailsDataset(Dataset):
                     "speed": float(meas.get("speed", 0.0)),
                     "command": self._PDM_LITE_COMMAND_MAP.get(raw_command, 3),
                     "ego_matrix": np.array(meas["ego_matrix"], dtype=np.float64),
-                    "route": self._subsample_route(meas.get("route")),
+                    # frames logged without route_original fall back to route (identical wherever nothing was shifted)
+                    "route": self._subsample_route(meas.get(self.route_key) or meas.get("route")),
                     # The expert's *intended* speed, not its current one. This is the label for
                     # the target-speed head: PDM-Lite decides a target and a controller chases
                     # it, so `speed` lags the decision while `target_speed` is the decision.
@@ -370,6 +375,8 @@ class WorldOnRailsDataset(Dataset):
         overlay = ""
         if self.route_overlay:
             overlay = f"o{self.route_points}"
+            if self.route_key != "route":  # the overlay draws a different line (S-096); default keys unchanged
+                overlay += "ro" if self.route_key == "route_original" else f"r{self.route_key}"
             if self.overlay_kwargs:
                 import hashlib
                 spec = json.dumps(self.overlay_kwargs, sort_keys=True, default=str).encode()
