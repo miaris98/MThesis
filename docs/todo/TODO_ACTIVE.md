@@ -112,7 +112,7 @@ plan (= `route_original`). When the data is on a box, check how often `changed_r
 frames and how far `route` and `route_original` diverge. The fix is A14. Also check the
 ego-speed shortcut (Li et al. CVPR 2024): does the target speed stay at 0 once the car has stopped?
 
-### A14. Obstacle data + the unshifted route (`route_original`) - **Running: arm J trained on P2, eval auto-starts ~16:15** (S-096, S-097, S-107)
+### A14. Obstacle data + the unshifted route (`route_original`) - **Works: arm J e18 +15.1 vs E on obstacle routes [+5.0, +25.3]; next the matched WoR-head arm** (S-096, S-097, S-107, S-109)
 2026-09-29: `carla_armJ_ft_obst` = E e15 fine-tuned to e20 (E's LR schedule, `--route_key route_original`, TF++
 `all_towns/model_0030_0.pth` backbone, 427k train frames incl. the 20 obstacle archives). e16: ADE 0.284 m, lat 0.056 m.
 Eval of e20 on P2 (`lanes_armJ.txt`, labels `j20_b2d20_*` / `j20_obst_*`). The matched WoR-head arm is still to do.
