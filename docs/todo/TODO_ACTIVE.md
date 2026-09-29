@@ -860,6 +860,25 @@ Turns B5's "why does GTrXL help" into something visible; no training, CPU/GPU-li
 **Uncertainty-aware search (considered, not added as novel):** Epistemic MCTS (ICLR 2025) already propagates epistemic
 uncertainty in MuZero-style search. Worth a try only as an application to our phantom-reward failures (S-058).
 
+### B29. Action-routed experts in the dynamics network - **Later** (novel twist on MoE; medium odds; zero extra FLOPs)
+Prior work: SoftMoE in deep RL (Obando-Ceron et al., ICML 2024, arXiv 2402.08609) - but "Don't flatten, tokenize!" shows
+the gain is tokenisation (one scaled expert matches four), which GTrXL already has; MoE world models route by **task**
+(Mixture-of-World Models, arXiv 2602.01270; ScaleZero), multi-task only. **Idea:** one small expert FFN per discrete action
+in the dynamics transformer block, hard-routed by the chosen action (no router, no balancing loss, one expert runs per
+step = today's FLOPs; group experts for 18-action games). Fixes EZ-V2's scalar action plane `a/|A|`, which orders
+discrete actions (B19). With B26: tie the LEFT expert to the mirrored RIGHT expert behind a soft untie gate.
+Screen: 30k, 3 seeds, Breakout + one 18-action game; also check imagined-reward calibration (S-058 probe).
+
+### B30. Amortised reanalyze: a learned gate on which states need real search - **Later** (efficiency; medium-high odds for speed)
+Reanalyze is ~71% of wall-clock and seeds are the bottleneck. A small head predicts the 16-simulation search's improved
+policy/value from the network's one-step outputs; run the real search only where the prediction is uncertain or
+disagrees (e.g. 30-50% of reanalyzed states). A learned component that *removes* compute. Prior: Thinker (arXiv 2307.14993)
+learns the improvement operator (costly); ReZero and V-MCTS cut search cost by rules. The learned gate is to be verified
+as open (add to the deep-research prompt). Check the score curve against full reanalyze; report wall-clock per 10k.
+**Efficiency rule for B29/B30 and later architecture ideas:** no extra environment steps, <= ~10-20% more wall-clock
+(ideally less), no extra seeds needed. Generic MoE and meta-learned search/optimisers (MCTSnets, arXiv 1802.04697; learned
+optimisers) fail it at single-task 100k.
+
 ### Atari: which novel direction has the best odds (2026-09-29 review of B3-B25)
 Ranking by (novel) x (probability of a clean, reportable result) x (cost), after two literature checks:
 1. **B24 first, as analysis (no training):** test-time search scaling on the saved s0 states; the score-vs-simulations

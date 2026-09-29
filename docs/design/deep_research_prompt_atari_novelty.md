@@ -62,7 +62,7 @@ Interpretability: "What model does MuZero learn?" (2023).
 **Our own planned ideas:** a world model that learns per game how much mirror/translation symmetry to use (soft gated
 symmetric attention bias + an equivariance-gap detector + symmetry-averaged search at the root); causal gated attention
 over the imagined unroll replacing the LSTM value-prefix; re-closing GTrXL gates as a gentle plasticity reset; a
-mechanistic probe study of the latent (ball/paddle, imagined-vs-real latent error, attention vs objects).
+mechanistic probe study of the latent (ball/paddle, imagined-vs-real latent error, attention vs objects). Also planned: **action-routed experts** in the dynamics (hard routing by the chosen action; MoE world models so far route by task: Mixture-of-World Models, ScaleZero; SoftMoE in RL, ICML 2024) and **amortised reanalyze** (a learned gate choosing which states get a real search; Thinker, ReZero, V-MCTS nearby) - check whether either is already published.
 
 ## What to search for
 
