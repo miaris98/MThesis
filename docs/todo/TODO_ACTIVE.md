@@ -843,6 +843,23 @@ Gains on Breakout and losses on an asymmetric game would show the symmetry is ex
 control (e.g. RoadRunner). The detector, not these guesses, decides which is which. 30k screen, 3 seeds, then 100k.
 **Risk:** gates and detector may not settle within 100k steps; the closed-gate init and step 0 bound it.
 
+### B27. Put the "XL" back, inside the imagination: attention over the imagined unroll - **Later** (novel; medium odds)
+"XL" = Transformer-XL (Dai et al. 2019): segment memory over past steps + relative positions. GTrXL (Parisotto et al. 2020)
+keeps both and adds pre-LN and GRU gating. **Our trunk has only the gating** (`TokenMixer`: 36 spatial tokens of one state,
+learned absolute positions, no memory). B26's offset bias restores the relative-position half. For memory: EZ's
+value-prefix head is an LSTM over the *imagined* unroll (`value_prefix`, `ez_model.py`). Replace it with causal gated
+attention over the imagined trajectory, so the model's own rollout is the memory. Real-time latent history is UniZero's
+(B12), so this variant is the novel one. The value-prefix head is where the port broke before (S-058, S-067): screen for
+reward calibration (the S-058 probe), not only score.
+
+### B28. What does the EZ-V2 world model learn, and what does attention add? (mechanistic study) - **Next** (analysis; high odds)
+"What model does MuZero learn?" (arXiv 2306.00840) did this for MuZero, not for EZ-V2 or attention trunks. On the saved s0
+checkpoints (10k ... 80k): linear probes of the latent for ball/paddle position and velocity; k-step imagined vs real
+latent error; GTrXL attention maps against object positions; when the "tunnel" behaviour appears (B2's bimodality).
+Turns B5's "why does GTrXL help" into something visible; no training, CPU/GPU-light.
+**Uncertainty-aware search (considered, not added as novel):** Epistemic MCTS (ICLR 2025) already propagates epistemic
+uncertainty in MuZero-style search. Worth a try only as an application to our phantom-reward failures (S-058).
+
 ### Atari: which novel direction has the best odds (2026-09-29 review of B3-B25)
 Ranking by (novel) x (probability of a clean, reportable result) x (cost), after two literature checks:
 1. **B24 first, as analysis (no training):** test-time search scaling on the saved s0 states; the score-vs-simulations
