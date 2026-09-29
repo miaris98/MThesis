@@ -821,11 +821,33 @@ gates (reset the gate bias, keep all weights) would restore the trunk's plastici
 a gentler version of BBF's resets (B8) specific to gated transformers. Not found in the literature for MCTS agents.
 Only after B15 shows plasticity loss; odds are lower than B20/B21 because the Atari evidence is one noisy seed.
 
+### B26. A world model that learns how symmetric each game is (soft, detected symmetry, used in search) - **Next** (novel; step 0 eval-only)
+User's concern (2026-09-29): a hard-wired mirror (B19/B20) only helps the few games that have one. So learn per game how much
+symmetry to use, with near-zero downside where there is none.
+**Prior work (searched 2026-09-29):** SiT (arXiv 2406.15025) already reports symmetry-invariant attention on Atari 100k, model-free
+and with *fixed* symmetries, which lowers B20's novelty. Soft/learned symmetry in general: Residual Pathway Priors (2112.01388),
+Augerino (2010.11882), learnable-augmentation symmetry discovery (2506.03914), partially equivariant RL under symmetry breaking
+(2512.00915). Exact, known symmetry in MuZero: Equivariant MuZero (ProcGen). Not found: learned, partial symmetry inside an
+MCTS latent world model, used by the search.
+1. **Candidates fixed, action map free:** h-flip, v-flip, translation. The action permutation comes from ALE's action meanings
+   (LEFT<->RIGHT, UP<->DOWN, ...), so it works for any game with no learning.
+2. **Soft symmetry in the GTrXL trunk:** offset-only symmetric attention bias (B20) plus a **gated asymmetric residual**, gate
+   closed at init and penalised (RPP). Broken symmetry opens the gate, so the model falls back to today's GTrXL.
+3. **Symmetry detector:** at every eval, the model's equivariance gap on replay (dynamics: g(Ts, sigma a) vs T g(s, a); reward
+   and value invariance). It sets the weight of an optional flip-consistency loss and is itself a per-game result.
+4. **Use it in search (the novel twist):** at the MCTS root, also evaluate T(s), map its policy back through sigma, and average,
+   weighted by the detected confidence.
+**Step 0 (no training, run first, with B24):** step 4 at test time only on the saved s0 checkpoints: flip-averaging on vs off.
+Gains on Breakout and losses on an asymmetric game would show the symmetry is exploitable and must be detected, not assumed.
+**Games:** a clear mirror (Breakout), vertical + UP/DOWN (Pong), partial/maze (MsPacman or Boxing), a directional negative
+control (e.g. RoadRunner). The detector, not these guesses, decides which is which. 30k screen, 3 seeds, then 100k.
+**Risk:** gates and detector may not settle within 100k steps; the closed-gate init and step 0 bound it.
+
 ### Atari: which novel direction has the best odds (2026-09-29 review of B3-B25)
 Ranking by (novel) x (probability of a clean, reportable result) x (cost), after two literature checks:
 1. **B24 first, as analysis (no training):** test-time search scaling on the saved s0 states; the score-vs-simulations
    slope as a model-quality measure per trunk. Near-certain to yield a result; cheap.
-2. **Recommended method: B20 + B19 step 2 - a symmetric, position-free GTrXL** (offset-only attention bias, tied
+2. **Superseded by B26 (SiT, arXiv 2406.15025, already does fixed symmetric attention on Atari 100k): B20 + B19 step 2 - a symmetric, position-free GTrXL** (offset-only attention bias, tied
    mirror-symmetric, conv-like local init). Transformer-specific (a CNN needs mirrored filters for the same prior),
    so it carries the thesis's trunk question (B5). ConViT's low-data evidence supports it; untested in latent
    MCTS models. Screen at 30k with 3 seeds (10k cannot resolve it: B1 needs ~57 seeds there), report the seed SD (B18).
