@@ -480,6 +480,23 @@ baseline is ~0.3 m per 20 Hz frame at 20 km/h, and depth from motion is undefine
 centre, exactly where the lead car is. Two frames are better used for *motion* (closing speed; A26 step 3, the
 FLARE-style feature difference), with keyframe up-weighting against the copycat shortcut (Wen et al.).
 
+### A35. Self-prompting: draw the camera's own decoded perception into the image - **Next** (one arm + token control; after A14's WoR-head arm)
+Combines A34 (TF++'s decoders work RGB-only) with the route-overlay mechanism C9 already proved. Per frame, render the
+semantic decoder's vehicle/pedestrian pixels **inside the route corridor**, shaded by decoded inverse depth (near =
+strong), into the camera image before the frozen backbone. Same camera, no new sensor, no perception training.
+**Why it should work (own evidence):** overlays are read by this frozen backbone (C9 kept); camera-only vehicle IoU 0.90
+(A34, 500 frames); collisions are our arms' largest DS loss (S-100/S-101 collision lottery); supplying missing
+information just gave +15 DS (arm J, S-109).
+**Novelty check (2 searches, 2026-09-29; do a full pass before claiming):** nearest are "Guiding Attention in End-to-End
+Driving Models" (arXiv 2405.00242: simulator GT semantics/depth guide attention as a training loss, not a test-time
+input), SUV (arXiv 2608.03084: frozen-model depth rendered as a colour map, for video generation), FROST-Drive
+(arXiv 2601.03460: frozen encoder, no rendered perception). Self-prompting an RGB-only policy with its own pretrained
+perception did not come up.
+**Plan (~1 box-day):** decoder outputs precomputed once per frame in the feature cache; **arm L** = arm J e18 + overlay,
+5 epochs (~1.5 h at arm J's 18 min/epoch); **control** = the same information as extra tokens (overlay vs token is a
+finding either way); eval b2d20 + obstacle routes + an A11 collision-heavy list, paired vs J e18. The evaluator needs
+one extra TF++ forward per frame. Risk: the overlay hides image detail (the token control covers it).
+
 ### A6. DAgger with the PDM-Lite expert - **Later** (large)
 Roll out our policy, let PDM-Lite label the visited states, add them to training. The general
 fix for compounding error and for A1-type situations the offline data never shows. Needs CARLA +
@@ -797,6 +814,25 @@ It reports **198% mean HNS vs EfficientZero's 194% at 25% of the compute**.
   by-product and the loss is nearly free.
 - **Novelty:** untested with Gumbel search and EZ-V2's mixed value target.
 - **Before building:** read the paper's exact loss form and weights. The second-pass scan could not parse the PDF.
+
+### B25. Gate re-closing as a plasticity reset for the GTrXL trunk - **Later** (novel; low-moderate odds)
+The mixer starts as the identity (GRU gates closed, bg_init = 2; zero-initialised output). Periodically re-closing the
+gates (reset the gate bias, keep all weights) would restore the trunk's plasticity without wiping learned features:
+a gentler version of BBF's resets (B8) specific to gated transformers. Not found in the literature for MCTS agents.
+Only after B15 shows plasticity loss; odds are lower than B20/B21 because the Atari evidence is one noisy seed.
+
+### Atari: which novel direction has the best odds (2026-09-29 review of B3-B25)
+Ranking by (novel) x (probability of a clean, reportable result) x (cost), after two literature checks:
+1. **B24 first, as analysis (no training):** test-time search scaling on the saved s0 states; the score-vs-simulations
+   slope as a model-quality measure per trunk. Near-certain to yield a result; cheap.
+2. **Recommended method: B20 + B19 step 2 - a symmetric, position-free GTrXL** (offset-only attention bias, tied
+   mirror-symmetric, conv-like local init). Transformer-specific (a CNN needs mirrored filters for the same prior),
+   so it carries the thesis's trunk question (B5). ConViT's low-data evidence supports it; untested in latent
+   MCTS models. Screen at 30k with 3 seeds (10k cannot resolve it: B1 needs ~57 seeds there), report the seed SD (B18).
+3. **B21 raw-score training (one flag):** the EZ line clips rewards while keeping MuZero's h-transform, and nobody has
+   ablated it (LightZero issue #239 unanswered). Moderate odds; either result is reportable.
+Lowered: B19 step 1 (mirror augmentation) - equivariant augmentation is established outside Atari, and the EfficientZero
+paper reports data augmentation gives it limited gains. Every claim needs B6 (more games) and B2 (a like-for-like eval).
 
 ### B16. Does the GTrXL trunk keep plasticity better than ResNet at higher replay ratios? - **Later** (thesis angle)
 The external plasticity report (2026-09-28, see the literature note section 4) cites evidence that recurrent/gated
