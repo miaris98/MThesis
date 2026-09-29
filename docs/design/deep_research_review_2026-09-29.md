@@ -38,3 +38,29 @@ Report produced from `deep_research_prompt_atari_novelty.md` (10 ranked proposal
 Sources checked: RoPE-ViT (arXiv 2403.13298, github naver-ai/rope-vit); What model does MuZero learn (arXiv 2306.00840);
 sigma-Reparam (arXiv 2303.06296); DiT (arXiv 2212.09748, ICCV 2023); MLR (arXiv 2201.12096, NeurIPS 2022);
 Masked Latent Transformers (arXiv 2507.04075).
+
+## Follow-up report (same day): what it adds and what it gets wrong
+
+It confirmed every correction above. Kept from it:
+- **B32 validation protocol:** (1) intrinsic check first: does lambda in [0.01, 0.05] lower the mean off-diagonal cosine
+  between heads' attention maps within 10k steps (measure our own baseline; its "0.70-0.85" is unsourced); (2) score-variance
+  test pooled over 4 games (Breakout, Pong, Q*bert, Seaquest) x 6 seeds per condition, Brown-Forsythe on per-game
+  standardised scores. Its F-test arithmetic is right: 6 vs 6 seeds cannot separate SD 11.3 from 6.0 (F = 3.55, p ~ 0.10).
+- **B29 adaLN-Zero design:** action embedding -> SiLU MLP -> per-block (gamma, beta, alpha) for the attention and FFN
+  sub-layers, last layer zero-initialised so the block starts as the identity. In our GTrXL the GRU gate already plays
+  alpha's role: modulate the LayerNorm scale/shift and keep the GRU gate, or test both.
+- **B31 vs B26 contrast:** signed 2D RoPE (translation only) vs the |dx|,|dy| offset bias (translation + mirror), on symmetric
+  (Breakout, Pong) vs asymmetric games.
+- **B34:** run it after the architecture arms; Retrace must run in raw value space (h^-1 of the two-hot expectations), then map
+  back through h, since h(E[X]) != E[h(X)].
+Errors in the follow-up:
+1. **Search description does not match our code:** `atari_qwen/mcts/gumbel_mcts.py` samples **m = 4** root actions
+   (`num_top_actions=4`) and halves 4 -> 2 -> 1; halving rounds are not depths (non-root selection is
+   argmax(improved_policy - N/(1+sum N)), so each survivor's subtree reaches depth ~2-4).
+2. **It hashes a mean-pooled latent**, which discards the ball's position and would create false transpositions; hash the
+   flattened latent (as `project()` uses).
+3. **"Depth-1 transpositions are impossible" is wrong:** distinct actions can give the same next state (action aliasing,
+   e.g. FIRE ~ NOOP in Breakout once the ball is in play). With m = 4 root slots, aliasing can waste a slot.
+4. **B34 mechanism:** EfficientZero's off-policy correction shortens the bootstrap horizon by the **age of the data**, not by
+   TD-error magnitude; the "value bounds" description of EZ-V2's search-based value estimation needs checking in the paper.
+5. Levene/Brown-Forsythe with 2 groups x 24 runs has df = (1, 46), not 22.

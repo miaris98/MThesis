@@ -884,11 +884,14 @@ optimisers) fail it at single-task 100k.
   absolute `self.pos`. Uses signed offsets, so it cannot carry B26's mirror symmetry; run it as the "translation only"
   arm next to B26's symmetric offset bias. Prior: RoPE-ViT (ECCV 2024, arXiv 2403.13298).
 - **B32. Attention-head disagreement loss** (with B18): penalise cosine similarity between heads' attention maps
-  (Li et al. 2018, arXiv 1810.10183), lambda <= 0.05. Target: GTrXL's seed SD. Pre-register a variance test; 6 seeds
-  cannot resolve SD 11.3 vs ~6 reliably.
-- **B33. Latent transposition table in Gumbel search** (offline probe first): hash expanded latents (cosine LSH +
-  verification) and count hits on saved checkpoints' searches. Build only if the hit rate is >= 5%; with 16 simulations
-  most expansions are depth 1-2.
+  (Li et al. 2018, arXiv 1810.10183), lambda <= 0.05. Target: GTrXL's seed SD. Protocol: (1) intrinsic check - head
+  cosine drops within 10k steps (measure our baseline in B18 step 1); (2) Brown-Forsythe on per-game standardised scores,
+  4 games x 6 seeds per condition. 6 vs 6 seeds on one game cannot separate SD 11.3 from 6.0 (F = 3.55, p ~ 0.10).
+- **B33. Latent transposition table in Gumbel search** (offline probe first): hash expanded latents (cosine LSH on the
+  **flattened** latent, not a pooled one, + cosine >= 0.98 verification) and count hits on saved checkpoints' searches.
+  Our search: m = 4 root actions, halving 4 -> 2 -> 1, subtrees ~2-4 deep. **Count depth-1 action aliasing first**
+  (distinct actions, same next latent, e.g. FIRE ~ NOOP mid-rally): if common, merging aliased root actions frees Gumbel's
+  4 slots and is simpler than a transposition table. Build the table only if deeper hits are >= 5%.
 - **B34. Retrace(lambda) value targets under the h-transform in reanalyze** (Later): correct targets in raw scale with
   truncated ratios pi_MCTS/mu (store mu), then map back through h. Weigh against EfficientZero's adaptive-horizon
   correction and EZ-V2's search-based value estimation before claiming novelty.
