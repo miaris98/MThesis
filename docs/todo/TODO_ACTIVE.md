@@ -11,19 +11,22 @@ The status block below is the only snapshot in this file: replace it, don't appe
 
 ---
 
-## Status: 2026-09-29 10:10 Athens (S-106)
+## Status: 2026-09-29 15:20 Athens (S-106, S-107) - **both boxes are destroyed at 22:00**
 
 | Box | Job | ETA (Athens) |
 |---|---|---|
-| P1 (RTX 5090 32 GB, 107 CPUs) | B4 seed 1: GTrXL (`S058h_gtrxl_100k_s1_uniform`) + ResNet (`S058i_resnet_100k_s1_uniform`), 100k, bf16 | ResNet ~18:30, GTrXL ~20:40 |
-| P1 | A9 leftovers, 1 lane (17 WoR + 2 E) | ~12:30 |
-| P2 (RTX 3090 24 GB, 38 CPUs) | A9 leftovers, 4 lanes (~118 WoR + ~20 E) | ~13:50 |
-| P2 | Arm J data: 6 towns + 20 Town12/13 obstacle archives (152.5 GB) | ~11:05 |
-| P2 after A9 | A14 arm J fine-tune (E e15 -> e20, `--route_key route_original`); seed-0 Atari resumes wait for a free GPU | from ~14:00 |
+| P1 (RTX 5090 32 GB, EPYC 9734) | B4 seed 0: GTrXL (`S058h_gtrxl_100k_s0_uniform`, eval 50k **320.0**) + ResNet (`S058i_resnet_100k_s0_uniform`, 50k **230.8**), resumed at 52k | 100k ~21:00 |
+| P1 | A9 leftovers, 1 lane at Low quality (`lanes_0929e_P1.txt`, 25 runs) | ~17:30 |
+| P2 (RTX 3090 24 GB, Xeon Gold 6222) | A14 arm J fine-tune `carla_armJ_ft_obst` (E e15 -> e20, `--route_key route_original`, 427k frames incl. obstacle archives, 18 min/epoch) | e20 ~16:15 |
+| P2 | A9 leftovers, 1 lane at Low (`lanes_0929e.txt` line 1, 25 runs, 0.22x real time) | ~21:00 |
+| P2 after arm J | arm J e20 eval, 3 lanes (`lanes_armJ.txt`, auto-start): b2d20's 19 routes first, then A9's 45 other obstacle routes | R19 ~18:30, obstacle ~21:30 |
+| 21:30-21:55 | final pulls to E: + HF stage 2 (Atari finals, arm J checkpoints); resume state of anything unfinished to HF | before 22:00 |
 
-A9 = full Bench2Drive (219 routes) for arm E e15 and the original WoR. All lanes were hung 1.5-4 h (S-099); ~35 E and
-~188 WoR route runs remain on 10 lanes, ETA ~19:30-20:30 Athens. 8 "crash routes" skipped during the hang are
-being retried (most were probably false skips).
+A9 = full Bench2Drive (219 routes) for arm E e15 and the original WoR. P1 lost ~1.5 h to a crash loop (S-107): on the
+RTX 5090 a `-quality-level=Low` map load segfaults at random (Epic never did), and the evaluator runs a lane's routes in
+XML order, so crash routes blocked whole lanes. Every result so far is Low, so the leftovers stay at Low, mostly on
+P2's 3090. Seed 1 (GTrXL ~12k, ResNet ~14k) is paused with its state on E: (`live_20260928_final_atari_resume\P1`).
+Seed-0 resume state (52k, with replay) is also on the private HF repo `mthesis-relay` (`s0_20260929/`, sha-checked).
 **Literature scan (2026-09-28):** new items A14-A21 and B8-B14, from `docs/design/literature_scan_2026-09-28.md`.
 Second pass (evening, section 5 there): A22-A24, B17-B18, plus additions to A6, A9, B3, B5, B8. B3 now has two
 concrete code differences from EZ-V2's replay buffer to test first. Third pass (overlays, physics, data curation,
@@ -44,9 +47,9 @@ search scaling on saved checkpoints).
 arms A-I never saw one. The one run that had them (8-town, S-063) fed PDM-Lite's obstacle-shifted `route` as input,
 while evaluation feeds the unshifted plan. The fix needs both: obstacle data **and** `route_original` (A14), then
 moderate oversampling (A16).
-Backups: `E:\MThesis_EXP\live_20260928_box{Y,Z,AA,AB}_*` every 5 min, replay buffers (Y, Z) every 3 h.
-**All boxes are destroyed at 18:00 (2026-09-28).** Resume states go to `E:\MThesis_EXP\live_20260928_final_atari_resume`
-(Y 60k/50k, Z 50k, AB ResNet s1/s2 10k), and A9 results to `live_20260928_final_a9`.
+Backups (2026-09-29): `E:\MThesis_EXP\live_20260929_boxP1_5090_atari_carla` and `live_20260929_boxP2_3090_carla`,
+every 5 min: logs, `*.txt` lane plans, A9 results, guardian logs, Atari checkpoints (not replay buffers), MLflow, and
+on P2 `checkpoints/carla_armJ_ft_obst`. Earlier sessions: `live_20260928_*` (Y, Z, AA, AB, final_a9, final_atari_resume).
 
 **Order of work from here:**
 1. *No box needed:* A9 merge (paired E vs WoR, official 220 with crashes = 0, seen/unseen towns, excluded routes)
@@ -109,7 +112,10 @@ plan (= `route_original`). When the data is on a box, check how often `changed_r
 frames and how far `route` and `route_original` diverge. The fix is A14. Also check the
 ego-speed shortcut (Li et al. CVPR 2024): does the target speed stay at 0 once the car has stopped?
 
-### A14. Obstacle data + the unshifted route (`route_original`) - **Next, first** (S-096, S-097)
+### A14. Obstacle data + the unshifted route (`route_original`) - **Running: arm J trained on P2, eval auto-starts ~16:15** (S-096, S-097, S-107)
+2026-09-29: `carla_armJ_ft_obst` = E e15 fine-tuned to e20 (E's LR schedule, `--route_key route_original`, TF++
+`all_towns/model_0030_0.pth` backbone, 427k train frames incl. the 20 obstacle archives). e16: ADE 0.284 m, lat 0.056 m.
+Eval of e20 on P2 (`lanes_armJ.txt`, labels `j20_b2d20_*` / `j20_obst_*`). The matched WoR-head arm is still to do.
 PDM-Lite logs `route` (bent around obstacles by `shift_route_around_actors` / `shift_route_for_invading_turn`)
 and `route_original` (the plan the leaderboard gives at test time), plus a `changed_route` flag.
 `wor_dataset.py` reads `route` for the route points **and** the route overlay, so on obstacle frames the training
@@ -319,7 +325,7 @@ Every CARLA eval: copy `frozen_backbone.pth` with the checkpoint, grep for "Merg
 backbone" (S-072), check per-route status strings, not only the record count (S-087), and use
 `scripts/eval/eval_watchdog.sh` (tree-kill) plus port clearing before each launch (S-091).
 
-### A9. Full Bench2Drive evaluation (220 routes) - **Running** (boxes Y+Z, 5 lanes, S-093)
+### A9. Full Bench2Drive evaluation (220 routes) - **Running: last ~50 runs on P1/P2 at Low, merge after** (S-093, S-106, S-107)
 Per-route differences vs WoR have an SD of 21 (E) to 34 (A SWA) DS, so a +/-3 DS CI needs ~190-500
 routes (S-090). The 220-route set is what the "beats WoR" claim needs, for the champion and the WoR
 original agent, not only as a final check. Plan it now: route file, the AdditionalMaps package for

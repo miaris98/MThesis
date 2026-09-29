@@ -5,6 +5,7 @@
 #       | E15:<k> | WOR:<k>    chunk k (1..10) of bench2drive220 minus 27515, every 10th route from position k-1
 #       | E15L:<name>:<r1,r2,..>  arm E e15 on an explicit route list as a9_E15_<name> (retry of skipped routes)
 #       | WORL:<name>:<r1,r2,..>  the original WoR on an explicit route list as a9_WOR_<name> (rebalanced lanes, S-099)
+#       | CKL:<label>:<ckpt>:<r1,r2,..|R19>  any of our checkpoints (path under $CHECKPOINTS) as <label> (arm J, S-107)
 # Lanes on one box need distinct PORTs (TM port = PORT+6000); each lane clears its own rpc range before a launch (S-091).
 # A lane relaunched with a new job list attaches to a guardian that is already running instead of duplicating it.
 # Crash routes (S-095): a route that segfaults CARLA on every attempt (like 27515) is skipped after 4 launch attempts in
@@ -85,6 +86,8 @@ for job in "$@"; do
     I20) eval_job v2_armI_e20 $C/carla_armI_hires_color/model_epoch_020.pth "$R19" ;;
     E15:*) k=${job#*:}; L=a9_E15_c$(printf %02d $k); eval_job $L $C/carla_armE_aug1_hires/model_epoch_015.pth "$(routes_for $L $k)" ;;
     E15L:*) spec=${job#*:}; eval_job a9_E15_${spec%%:*} $C/carla_armE_aug1_hires/model_epoch_015.pth "${spec#*:}" ;;
+    CKL:*) spec=${job#*:}; rest=${spec#*:}; rl=${rest#*:}; [ "$rl" = R19 ] && rl=$R19   # CKL:<label>:<ckpt under $C>:<routes|R19>
+      eval_job ${spec%%:*} $C/${rest%%:*} "$rl" ;;
     WORL:*) spec=${job#*:}
       ( export EVAL_AGENT=$MTHESIS_ROOT/scripts/eval/wor_official_b2d_agent.py EVAL_AGENT_CONFIG=$WOR_CFG PCLA_ROOT=$PCLA_ROOT ALLOW_NO_FROZEN_BACKBONE=1
         eval_job a9_WOR_${spec%%:*} $WOR_CFG "${spec#*:}" ) ;;
