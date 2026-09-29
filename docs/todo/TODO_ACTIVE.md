@@ -879,6 +879,22 @@ as open (add to the deep-research prompt). Check the score curve against full re
 (ideally less), no extra seeds needed. Generic MoE and meta-learned search/optimisers (MCTSnets, arXiv 1802.04697; learned
 optimisers) fail it at single-task 100k.
 
+### B31-B34. Survivors of the deep-research report (reviewed in `docs/design/deep_research_review_2026-09-29.md`)
+- **B31. 2D-axial RoPE in the GTrXL mixer** (cheap arm, with B26): translation-relative attention, ~20 lines, replaces the
+  absolute `self.pos`. Uses signed offsets, so it cannot carry B26's mirror symmetry; run it as the "translation only"
+  arm next to B26's symmetric offset bias. Prior: RoPE-ViT (ECCV 2024, arXiv 2403.13298).
+- **B32. Attention-head disagreement loss** (with B18): penalise cosine similarity between heads' attention maps
+  (Li et al. 2018, arXiv 1810.10183), lambda <= 0.05. Target: GTrXL's seed SD. Pre-register a variance test; 6 seeds
+  cannot resolve SD 11.3 vs ~6 reliably.
+- **B33. Latent transposition table in Gumbel search** (offline probe first): hash expanded latents (cosine LSH +
+  verification) and count hits on saved checkpoints' searches. Build only if the hit rate is >= 5%; with 16 simulations
+  most expansions are depth 1-2.
+- **B34. Retrace(lambda) value targets under the h-transform in reanalyze** (Later): correct targets in raw scale with
+  truncated ratios pi_MCTS/mu (store mu), then map back through h. Weigh against EfficientZero's adaptive-horizon
+  correction and EZ-V2's search-based value estimation before claiming novelty.
+- B29 update: condition the dynamics on the action with **adaLN-Zero** (per-action scale/shift, identity init; DiT found it
+  better than cross-attention), not cross-attention.
+
 ### Atari: which novel direction has the best odds (2026-09-29 review of B3-B25)
 Ranking by (novel) x (probability of a clean, reportable result) x (cost), after two literature checks:
 1. **B24 first, as analysis (no training):** test-time search scaling on the saved s0 states; the score-vs-simulations
