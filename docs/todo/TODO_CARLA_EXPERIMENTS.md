@@ -132,7 +132,7 @@ before the camera-parity fix and is no longer a target.
 ## Category 2: Visual Perception & Input Representations (Max 3 Cameras) (C8–C15)
 
 ### [x] C8. Aspect-Preserving Rectangular Input (192x512)
-- **Resolved 2026-09-25 - Done:** `--img_size 192x512 --crop_bottom_frac 0.25` is the default; 288x768 is being evaluated as arm E (S-070).
+- **Resolved 2026-09-25 - Done:** `--img_size 192x512 --crop_bottom_frac 0.25` is the default; 288x768 is being evaluated as arm E (S-070). **Correction 2026-09-28 (S-103): not the code default - `train_wor.py` still defaults to 0.0, and arms A-I trained with crop 0.0.**
 - **Hypothesis**: Squashing native CARLA 600x800 camera frames into square 256x256 distorts roadside curbs, lane lines, and vehicle aspect ratios by 2x horizontally.
 - **Method**: Train with `--img_size 192x512 --crop_bottom_frac 0.25 --vision_grid 6x16` (96 visual tokens).
 - **Metric**: Lane-keeping out-of-lane infraction reduction by >50%.
@@ -437,7 +437,7 @@ before the camera-parity fix and is no longer a target.
 - **Metric**: Waypoint stability during hard acceleration and braking transitions.
 
 ### [x] C55. Ego-Hood Visual Masking & Perspective Normalization
-- **Resolved 2026-09-25 - Done:** `--crop_bottom_frac 0.25` (the TF++ crop) is the default.
+- **Resolved 2026-09-25 - Done:** `--crop_bottom_frac 0.25` (the TF++ crop) is the default. **Correction 2026-09-28 (S-103): not the code default - `train_wor.py` still defaults to 0.0, and arms A-I trained with crop 0.0.**
 - **Hypothesis**: The bottom 20% of front camera images contains the vehicle's own hood, which wastes visual tokens and varies across vehicle models.
 - **Method**: Crop or statically mask the ego-hood area (`--crop_bottom_frac 0.20`), reallocating tokens to the distant road horizon.
 - **Metric**: 25% reduction in visual tokens with zero loss in near-field tracking.

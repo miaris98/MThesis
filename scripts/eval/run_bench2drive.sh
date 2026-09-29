@@ -19,15 +19,17 @@ set -x
 LABEL="$1"; ARCH="$2"; CKPT="$3"; ROUTES="$4"; PORT="$5"; TM_PORT="$6"; GPU_RANK="${7:-0}"
 ROUTES_SUBSET="${8:-}"
 
+# Paths (WORKSPACE, GARAGE, CARLA_DIR, B2D_OUT, MTHESIS_ROOT) and CUDA_DEVICE_ORDER=PCI_BUS_ID come from
+# common.sh. PCI order matters here: launch_b2d20.sh sets CUDA_VISIBLE_DEVICES=$GPU for the agent and this
+# script passes the same index as --gpu-rank, which becomes CARLA's -graphicsadapter (PCI order).
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
 # 2026-09-15: was /workspace/Bench2Drive, which does not exist on this box - Bench2Drive lives
 # as a subdirectory of the carla_garage checkout (/workspace/carla_garage/Bench2Drive). That path
 # predates this box; never actually exercised here until now.
-GARAGE=/workspace/carla_garage
 B2D="$GARAGE/Bench2Drive"
-REAL_CARLA=/workspace/carla
-SHIM=/workspace/carla_shim
-OUT=/workspace/bench2drive_out
-MTHESIS_ROOT=/workspace/MThesis
+REAL_CARLA="$CARLA_DIR"
+SHIM="$WORKSPACE/carla_shim"
+OUT="$B2D_OUT"
 
 # Same pluggable-agent mechanism as run_fast_eval.sh / run_leaderboard_official.sh: default is
 # our own bench2drive_agent.py (unchanged behaviour for every existing caller). Point EVAL_AGENT
@@ -40,7 +42,7 @@ MTHESIS_ROOT=/workspace/MThesis
 # checkpoint) but AGENT_CONFIG below still needs SOME string - autopilot.py's setup() ignores it.
 EVAL_AGENT="${EVAL_AGENT:-}"
 EVAL_AGENT_CONFIG="${EVAL_AGENT_CONFIG:-}"
-EVAL_PYTHON="${EVAL_PYTHON:-/workspace/venv_carla/bin/python}"
+EVAL_PYTHON="${EVAL_PYTHON:-$VENV_CARLA/bin/python}"
 if [ ! -x "$EVAL_PYTHON" ]; then
   echo "FATAL: EVAL_PYTHON=$EVAL_PYTHON is not executable."
   exit 1
@@ -86,7 +88,7 @@ chown carlauser:carlauser "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 cat > "$SHIM/CarlaUE4.sh" <<SHIMEOF
 #!/usr/bin/env bash
-exec su carlauser -c "export XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR; /workspace/carla/CarlaUE4.sh \$* -vulkan -quality-level=Low"
+exec su carlauser -c "export XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR; $REAL_CARLA/CarlaUE4.sh \$* -vulkan -quality-level=Low"
 SHIMEOF
 chmod +x "$SHIM/CarlaUE4.sh"
 
@@ -119,15 +121,7 @@ mkdir -p "$SAVE_PATH"
 # match on the comm *prefix* via /proc (pgrep -x truncates to 15 chars and never matches;
 # pkill -f on the port string can match the caller's own command line) - just triggered by the
 # evaluator's own exit instead of by a server this script launched directly.
-cleanup() {
-  local pid cmd
-  for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
-    [ -r "/proc/$pid/comm" ] || continue
-    case "$(cat "/proc/$pid/comm" 2>/dev/null)" in CarlaUE4*) ;; *) continue ;; esac
-    cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null) "
-    case "$cmd" in *"carla-rpc-port=$PORT "*) kill -9 "$pid" 2>/dev/null ;; esac
-  done
-}
+cleanup() { kill_tree $(carla_pids_on_port "$PORT"); }
 trap cleanup EXIT INT TERM
 
 cd "$B2D"

@@ -9,8 +9,13 @@ set -uo pipefail
 cd /workspace/EfficientZeroV2
 grep -q EZV2_SETUP_DONE /workspace/ezv2_setup.log 2>/dev/null || bash /workspace/ezv2_setup.sh > /workspace/ezv2_setup.log 2>&1 || { echo "EZV2 SETUP FAILED"; exit 1; }
 grep -q EZV2_SETUP_DONE /workspace/ezv2_setup.log || { echo "EZV2 SETUP FAILED"; exit 1; }
+# Ray CPUs = the container's CPU quota capped by pids.max (scripts/lib/machine.py). cpu_count() saw 48 host CPUs on
+# box W while the quota was 11.5, and 48 prestarted workers x threads exhausted pids.max 2816 (S-086); 12 was that
+# box's hand-set value and is the fallback.
+EZV2_NUM_CPUS=${EZV2_NUM_CPUS:-$(python3 /workspace/MThesis/scripts/lib/machine.py --field ezv2_num_cpus 2>/dev/null || echo 12)}
+echo "EZV2_NUM_CPUS=$EZV2_NUM_CPUS"
 export WANDB_MODE=offline RAY_OBJECT_STORE_ALLOW_SLOW_STORAGE=1 EZV2_OBJECT_STORE_GB=20 \
-  EZV2_NUM_CPUS=${EZV2_NUM_CPUS:-12} OMP_NUM_THREADS=1 MKL_NUM_THREADS=1  # container pids.max 2816: 48 prestarted workers x threads exhausted it
+  EZV2_NUM_CPUS OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 O=/workspace/ezv2_10k_eval; mkdir -p $O
 for s in 0 1 2 3 4; do
   sed "s/^  base_seed: 0/  base_seed: $s/" ez/config/exp/atari_breakout.yaml > ez/config/exp/atari_breakout_s$s.yaml

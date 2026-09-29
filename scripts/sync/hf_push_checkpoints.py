@@ -45,6 +45,12 @@ def load_hf_token() -> str:
     raise SystemExit("HF_TOKEN not set: export it or put HF_TOKEN=... in a .env at the repository root")
 
 
+#: In-progress writes. The trainers save to `<file>.tmp` (or `.tmp.npz`) and then os.replace it, so while a
+#: run is live the folder holds half-written files; uploading those is how a partial file reached the Hub
+#: under a real checkpoint's name once (memory: SHA-check HF pushes).
+IN_PROGRESS_PATTERNS = ["*.tmp", "*.tmp.*", "*.tmp[0-9]*", "**/*.tmp", "**/*.tmp.*"]
+
+
 def push_once(api, local_dir: str, repo_id: str, path_in_repo: str) -> None:
     api.upload_folder(
         repo_id=repo_id,
@@ -52,6 +58,7 @@ def push_once(api, local_dir: str, repo_id: str, path_in_repo: str) -> None:
         folder_path=local_dir,
         path_in_repo=path_in_repo,
         commit_message="Checkpoint sync",
+        ignore_patterns=IN_PROGRESS_PATTERNS,
     )
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Pushed {local_dir} -> hf://{repo_id}/{path_in_repo}")
 

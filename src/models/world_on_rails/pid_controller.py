@@ -5,9 +5,27 @@ the CNN-headed and Qwen-headed policies hand it the same (N, 2) ego-frame waypoi
 Kept importable from wor_policy for backwards compatibility.
 """
 import math
+import os
 from typing import Optional, Tuple
 
 import numpy as np
+
+
+def tfpp_brake_override(throttle: float, brake: float, speed_mps: float,
+                        target_speed_kmh: Optional[float]) -> Tuple[float, float]:
+    """TF++ longitudinal brake rule (model.py:control_pid_direct), off unless WOR_TFPP_BRAKE_RULE=1.
+
+    Full brake when the target speed is ~0 or the car is more than brake_ratio (1.1) above it. Lives here,
+    shared by both policies' act(): it used to be written into the qwen policy only, so the same environment
+    flag was silently ignored by the cnn arm (arm H) and would have confounded any head-vs-head comparison run
+    with it.
+    """
+    if target_speed_kmh is None or os.environ.get("WOR_TFPP_BRAKE_RULE") != "1":
+        return throttle, brake
+    tgt_mps = target_speed_kmh / 3.6
+    if tgt_mps < 0.01 or speed_mps / max(tgt_mps, 1e-6) > 1.1:
+        return 0.0, 1.0
+    return throttle, brake
 
 
 class PIDController:

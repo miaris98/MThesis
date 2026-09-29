@@ -204,7 +204,10 @@ def main():
                    help="Pure-inference batch size for the cache build - independent of the "
                         "--batch_size=32 pinned for training comparability, since this pass "
                         "never touches an optimizer.")
-    p.add_argument("--num_workers", type=int, default=12)
+    # JPEG decode workers for the backbone pass: the container's CPU quota minus two (cgroup-aware, not the
+    # host count, S-086), 4..16. The fixed 12 starved a 70-core box and oversubscribed an 11-core one.
+    from scripts.lib.machine import usable_cpus
+    p.add_argument("--num_workers", type=int, default=min(16, max(4, int(usable_cpus()) - 2)))
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--no_amp", action="store_true",
                    help="Build in fp32 instead of the bf16 autocast training itself uses. Off by "

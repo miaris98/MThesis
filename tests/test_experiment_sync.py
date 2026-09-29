@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -281,6 +282,34 @@ class TestRemoteTransfer(unittest.TestCase):
         self.assertTrue((dest / "MThesis" / "mlruns" / "1" / "meta.yaml").is_file())
         self.assertTrue((dest / "runs" / "training_telemetry.csv").is_file())
         self.assertEqual(sx.find_mlruns(dest), dest / "MThesis" / "mlruns")
+
+    def test_in_progress_tmp_files_are_never_sent(self):
+        ck = self.remote / "checkpoints"
+        ck.mkdir()
+        (ck / "latest_model.pth").write_bytes(b"whole")
+        (ck / "latest_model.pth.tmp").write_bytes(b"half")
+        (ck / "replay_latest.tmp.npz").write_bytes(b"half")
+        archive = self.tmp / "out.tar.gz"
+        self.assertEqual(self._run_remote(sx.build_remote_tar_cmd(self.remote.as_posix(), ["checkpoints"]),
+                                          archive), 0)
+        dest = self.tmp / "snap"
+        sx.extract_snapshot(archive, dest)
+        self.assertTrue((dest / "checkpoints" / "latest_model.pth").is_file())
+        self.assertEqual(sorted(p.name for p in (dest / "checkpoints").iterdir()), ["latest_model.pth"])
+
+    def test_since_sends_only_files_modified_after_it(self):
+        ck = self.remote / "checkpoints"
+        ck.mkdir()
+        (ck / "model_epoch_003.pth").write_bytes(b"old")
+        (ck / "model_epoch_006.pth").write_bytes(b"new")
+        os.utime(ck / "model_epoch_003.pth", (1_000_000_000, 1_000_000_000))
+        archive = self.tmp / "out.tar.gz"
+        script = sx.build_remote_tar_cmd(self.remote.as_posix(), ["checkpoints"], since=time.time() - 3600)
+        self.assertEqual(self._run_remote(script, archive), 0)
+        dest = self.tmp / "snap"
+        sx.extract_snapshot(archive, dest)
+        self.assertTrue((dest / "checkpoints" / "model_epoch_006.pth").is_file())
+        self.assertFalse((dest / "checkpoints" / "model_epoch_003.pth").exists())
 
     def test_sentinel_exit_codes(self):
         nothing = sx.build_remote_tar_cmd(self.remote.as_posix(), ["no/such/path"])

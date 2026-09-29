@@ -20,7 +20,8 @@ from src.models.world_on_rails.wor_policy import WorldOnRailsPolicy
 from src.training.wor_dataset import create_wor_train_val_dataloaders
 from src.training.wor_eval import run_validation, to_device_batch_with_features, waypoint_losses
 from src.models.world_on_rails.aux_heads import target_speed_loss
-from src.training.wor_checkpoint import CheckpointWriter, to_cpu
+from src.training.wor_checkpoint import (
+    CheckpointWriter, best_metric_so_far, load_trainable_state, to_cpu)
 from src.training.wor_optim import build_optimizer, build_warmup_cosine_scheduler
 from src.logging.csv_logger import CSVTelemetryLogger
 from src.logging.experiment_logger import ExperimentLogger
@@ -534,14 +535,14 @@ class WorldOnRailsTrainer:
         start_epoch = 1
         if resume_from:
             ckpt = torch.load(resume_from, map_location=self.device)
-            self.model.load_state_dict(ckpt["model"], strict=False)
+            load_trainable_state(self.model, ckpt["model"], self.ckpt.frozen_keys, resume_from)
             if "optimizer" in ckpt:
                 self.optimizer.load_state_dict(ckpt["optimizer"])
             else:
                 print(f"[Warning] {resume_from} has no 'optimizer' key - resuming with a "
                       f"freshly initialized optimizer (momentum/variance state is lost).")
             start_epoch = ckpt["epoch"] + 1
-            best_loss = ckpt.get("metrics", {}).get(select_on, best_loss)
+            best_loss = best_metric_so_far(self.save_dir, select_on, ckpt)
             # LambdaLR's schedule is a pure function of its internal step counter, so
             # fast-forward by replaying steps rather than reconstructing one - cheap even
             # over tens of thousands of steps.

@@ -171,6 +171,7 @@ class WorldOnRailsDataset(Dataset):
         self.color_aug_prob = float(color_aug_prob) if is_train else 0.0
 
         self.samples = []
+        self.missing_rgb = 0
         if synthetic_samples > 0:
             self.samples = list(range(synthetic_samples))
             self.is_synthetic = True
@@ -204,6 +205,9 @@ class WorldOnRailsDataset(Dataset):
             elif os.path.isdir(measurements_dir):
                 self._index_pdm_lite_route(r_dir, measurements_dir)
 
+        if self.missing_rgb:
+            print(f"[Warning] Skipped {self.missing_rgb} frames under {self.data_dir} that have "
+                  f"measurements but no rgb/ image - is the dataset still extracting?")
         if len(self.samples) == 0:
             print(f"[Warning] No frames found in {self.data_dir}. Falling back to synthetic mode.")
             self.is_synthetic = True
@@ -288,6 +292,12 @@ class WorldOnRailsDataset(Dataset):
             rgb_path = os.path.join(rgb_dir, f"{frame_id}.jpg")
             if not os.path.exists(rgb_path):
                 rgb_path = os.path.join(rgb_dir, f"{frame_id}.png")
+            if not os.path.exists(rgb_path):
+                # A frame with measurements but no image (an archive still extracting, a partial
+                # download) used to become an all-black training sample with a real label, and that
+                # black frame was then written to the decoded cache for good.
+                self.missing_rgb += 1
+                continue
 
             ref_inv = np.linalg.inv(cur["ego_matrix"])
             waypoints = []
@@ -348,7 +358,23 @@ class WorldOnRailsDataset(Dataset):
         # size: 512x192 cropped, 512x192 squashed and 512x192 with a route drawn on it are three
         # different images at identical dimensions, and serving one for another is exactly the
         # kind of silent train/eval mismatch 11.4 is a catalogue of.
-        return f"{h}x{w}{'c' if self.crop_bottom_frac else ''}{'o' if self.route_overlay else ''}"
+        #
+        # That includes what the overlay draws: the route subsampled to `route_points`, and any
+        # overlay_kwargs. The key used to be a bare 'o', so a --route_points 4 run and a 20-point
+        # run on the same dataset directory shared one cache and the second trained on the first's
+        # lines. The crop is keyed by value too ('c' alone stays the canonical 0.25, so those
+        # caches keep their names).
+        crop = ""
+        if self.crop_bottom_frac:
+            crop = "c" if abs(self.crop_bottom_frac - 0.25) < 1e-9 else f"c{self.crop_bottom_frac:g}"
+        overlay = ""
+        if self.route_overlay:
+            overlay = f"o{self.route_points}"
+            if self.overlay_kwargs:
+                import hashlib
+                spec = json.dumps(self.overlay_kwargs, sort_keys=True, default=str).encode()
+                overlay += "k" + hashlib.sha1(spec).hexdigest()[:6]
+        return f"{h}x{w}{crop}{overlay}"
 
     def _feature_cache_path(self, rgb_path: str) -> Optional[str]:
         """This instance's sidecar path for one frame, or None when feature caching is off."""
@@ -399,7 +425,8 @@ class WorldOnRailsDataset(Dataset):
                                  route_xy=route_xy, overlay=self.route_overlay,
                                  overlay_kwargs=self.overlay_kwargs)
         else:
-            rgb = np.zeros((h, w, 3), dtype=np.uint8)
+            # Never cached: a black frame written to the cache would outlive the image arriving.
+            return np.zeros((h, w, 3), dtype=np.uint8)
 
         if cache_path is not None:
             try:

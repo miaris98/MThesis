@@ -1,3 +1,6 @@
 graphify-out/graph.json merge=graphify
 # git apply needs byte-exact LF patches; Windows autocrlf must not touch these.
 patches/*.patch -text eol=lf
+# Shell scripts run on Linux boxes; a CRLF copy relayed from this Windows tree (tar | ssh) fails with
+# "$'': command not found". Keep them LF in the working tree regardless of core.autocrlf.
+*.sh text eol=lf

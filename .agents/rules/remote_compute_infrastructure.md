@@ -88,7 +88,23 @@ When writing any new script that SSHes into a remote box:
 3. Never import `paramiko` in setup/scratch scripts; use `subprocess` + `cfg.ssh_T()` for stdin piping.
 4. Do not add `HOST =` or `PORT =` module-level constants.
 
-### 6. Files Modified in the 2026-09-23 Migration
+### 6. Sizing and paths on the box (added 2026-09-28)
+
+- **Do not write a new `check_*.py` per run.** Use `python scripts/setup/box.py probe|status|env`; `status` takes
+  `-p PATTERN` and `-l LOG`, and prints the box's real container limits.
+- **Size jobs from `scripts/lib/machine.py`, never from `os.cpu_count()` / `multiprocessing.cpu_count()`.** Those
+  count every host CPU, not the cgroup quota; `pids.max` also caps processes plus threads (S-086). In shell:
+  `eval "$(python3 scripts/lib/machine.py --export)"` gives `REC_DATALOADER_WORKERS`, `REC_EZV2_NUM_CPUS`,
+  `REC_CARLA_LANES`, `REC_EVAL_OMP_THREADS`, `REC_BF16`.
+- **Shell scripts source `scripts/lib/common.sh`** for paths (`WORKSPACE`, `MTHESIS_ROOT`, `GARAGE`, ... all
+  env-overridable), `CUDA_DEVICE_ORDER=PCI_BUS_ID` (so CUDA indices match CARLA's `-graphicsadapter`), and the only
+  copies of `kill_tree` / `clear_carla_ports`. Never kill with a bare `pkill -f` pattern.
+- **Several CARLA lanes on one GPU require `scripts/setup/patch_bench2drive.py`**, applied by
+  `launch_b2d20.sh setup|run`. Unpatched, one lane's crash kills every CARLA server on that GPU.
+- The one-off scripts listed in section 7 are being retired (archive and reasons:
+  `E:\MThesis_EXP\local_repo_logs_20260928\scripts_cleanup_20260928\MANIFEST.md`).
+
+### 7. Files Modified in the 2026-09-23 Migration
 
 All 25 box-specific scripts were migrated. The complete list:
 

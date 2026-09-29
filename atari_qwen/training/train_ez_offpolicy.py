@@ -82,6 +82,10 @@ class EZReplay:
         self.act[t], self.rew[t], self.done[t] = actions, rewards, dones
         self.pi[t], self.root_v[t] = policies, root_values
         self.ep_start[t] = self.cur_start
+        # EZ-V2 (replay_buffer.save_trajectory): new data enters at the buffer's *current* max priority. This
+        # used a running maximum that never came down, so one early outlier error (a value head inflating
+        # itself, S058a) set the entry priority of every later transition.
+        self.max_prio = float(self.prio[:t].max()) if t > 0 else 1.0
         self.prio[t] = self.max_prio
         self.cur_start = np.where(dones, t + 1, self.cur_start)
         self.size += 1
@@ -97,21 +101,31 @@ class EZReplay:
         return f.reshape(f.shape[0], -1, *f.shape[3:]).float().div_(255.0)
 
     def update_priorities(self, t, e, p):
-        p = np.asarray(p, dtype=np.float64)
-        self.prio[t, e] = p
-        self.max_prio = max(self.max_prio, float(p.max()))
+        self.prio[t, e] = np.asarray(p, dtype=np.float64)
 
     def sample(self, B: int, horizon: int, beta: float = 1.0):
-        """(t, e) window starts with horizon future steps stored, priority-sampled; IS weights."""
+        """(t, e) window starts with horizon future steps stored, priority-sampled; IS weights.
+
+        Prioritised (alpha > 0) sampling follows EZ-V2's _prepare_batch_context: no repeats within a batch,
+        and IS weights normalised by their max and clipped to [0.1, 1]. This drew with replacement and left the
+        weights unclipped, so at alpha = 1 a few high-error (reward) windows could fill many slots of one batch
+        while every one of them carried a near-zero weight (S-067: the prioritised screens miscalibrated the
+        reward head). Uniform sampling keeps its original draw, so alpha = 0 runs reproduce bit for bit."""
         n = self.size - horizon
         if n <= 0:
             raise ValueError("not enough data for a window")
         p = self.prio[:n].reshape(-1) ** self.alpha
         p = p / p.sum()
-        flat = np.random.choice(p.size, size=B, p=p)
+        if self.alpha > 0:
+            flat = np.random.choice(p.size, size=B, p=p, replace=p.size < B)
+        else:
+            flat = np.random.choice(p.size, size=B, p=p)
         t, e = flat // self.E, flat % self.E
         w = (p[flat] * p.size) ** (-beta)
-        return t, e, (w / w.max()).astype(np.float32)
+        w = w / w.max()
+        if self.alpha > 0:
+            w = w.clip(0.1, 1.0)
+        return t, e, w.astype(np.float32)
 
     def save(self, path: Path):
         tmp = Path(str(path) + ".tmp.npz")
@@ -280,6 +294,7 @@ def train(args):
     tm = {"collect": 0.0, "targets": 0.0, "update": 0.0}
     upd_credit = 0.0
     horizon = K + TD
+    stepped = False
 
     while updates < total_updates:
         # ---------------- collect (stops at total_steps; the rest is offline training) ----------
@@ -396,13 +411,16 @@ def train(args):
             gn = nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
             opt.step()
             updates += 1
+            stepped = True
             replay.update_priorities(t, e, np.abs(v0.float().cpu().numpy() - val_t[:, 0]) + 1e-6)
             if updates % args.target_update_interval == 0:
                 target.load_state_dict(model.state_dict())
             tm["update"] += time.perf_counter() - tu
 
         # ---------------- logging / eval / checkpoints -----------------------------------------
-        if env_steps - last_log >= 1000 or (env_steps >= args.total_steps and updates % 1000 == 0):
+        # `stepped` guard: the losses printed below exist only once this process has run an update. With
+        # num_envs * replay_ratio < 1 the first post-warm-up iterations run none (NameError).
+        if stepped and (env_steps - last_log >= 1000 or (env_steps >= args.total_steps and updates % 1000 == 0)):
             last_log = env_steps
             el = time.time() - t0
             tot = max(sum(tm.values()), 1e-9)

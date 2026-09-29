@@ -76,8 +76,11 @@ def parse_args():
     # Scale with the machine instead of a flat 4: JPEG decode/resize throughput is
     # what capped epoch time regardless of batch size (see auto_batch_size discussion),
     # and more parallel workers is the cheap half of the fix. Leave a few cores free
-    # for the main process, CARLA (if co-running), and OS overhead.
-    default_workers = 0 if os.name == "nt" else max(4, (os.cpu_count() or 8) - 4)
+    # for the main process, CARLA (if co-running), and OS overhead. Count the container's CPU quota, not
+    # os.cpu_count(): that is every host CPU (a 70-core quota on a 128-CPU host would get 124 workers, each
+    # holding a dataset copy; S-086). Capped at 32, past which decode throughput stopped mattering.
+    from scripts.lib.machine import usable_cpus
+    default_workers = 0 if os.name == "nt" else min(32, max(4, int(usable_cpus()) - 4))
     parser.add_argument("--num_workers", type=int, default=default_workers, help="DataLoader subprocess workers")
     parser.add_argument("--cache_decoded", type=int, default=1, help="Cache each decoded+resized RGB frame as a sibling .npy so repeat epochs skip JPEG decode entirely (1=True, 0=False)")
     parser.add_argument("--weights_path", type=str, default=None, help="Path to CARLA-pretrained backbone weights (e.g., LAV, TransFuser++, WoR, or PCLA)")

@@ -13,14 +13,13 @@ frozen vision encoder, same route conditioning, same PID conversion to vehicle
 controls, same WorldOnRailsTrainer/WorldOnRailsDataset training pipeline - with only
 the CNN+MLP head swapped for a Qwen transformer trunk.
 """
-import os
 from typing import Dict, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
 
 from src.models.world_on_rails.wor_policy import (
-    PretrainedVisionEncoder, PIDController, build_vision_encoder)
+    PretrainedVisionEncoder, PIDController, build_vision_encoder, tfpp_brake_override)
 from src.models.transformer.layers import RMSNorm, QwenTransformerBlock
 from src.models.world_on_rails.ray_geometry import (
     RAY_GEOMETRY_CHANNELS, append_ray_geometry)
@@ -400,10 +399,5 @@ class QwenWorldOnRailsPolicy(nn.Module):
             current_speed_kmh=current_speed_kmh,
             target_speed_kmh=target_speed_kmh
         )
-        # TF++ longitudinal brake rule (model.py:control_pid_direct): brake when the target speed is
-        # ~0 or we are more than brake_ratio (1.1) above it. Off unless WOR_TFPP_BRAKE_RULE=1.
-        if target_speed_kmh is not None and os.environ.get("WOR_TFPP_BRAKE_RULE") == "1":
-            tgt_mps = target_speed_kmh / 3.6
-            if tgt_mps < 0.01 or speed_mps / max(tgt_mps, 1e-6) > 1.1:
-                throttle, brake = 0.0, 1.0
+        throttle, brake = tfpp_brake_override(throttle, brake, speed_mps, target_speed_kmh)
         return steer, throttle, brake

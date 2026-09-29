@@ -197,12 +197,14 @@ def load_wor_model(
                 state_dict = {**frozen_sd, **state_dict}
                 print(f"✓ Merged {len(frozen_sd)} frozen backbone tensors from: {frozen_path}")
             else:
-                # Not fatal: the backbone falls back to whatever the model was built
-                # with (ImageNet, or --weights_path). Loud, because that silently
-                # changes which perception stack the policy heads sit on.
-                print(f"[Warning] Checkpoint is partial but {frozen_path} is missing - "
-                      f"the vision backbone will keep its freshly initialized weights, "
-                      f"which likely does NOT match what these heads were trained on.")
+                # Fatal. This used to be a warning, and the backbone kept its fresh init: random for
+                # regnety (built with pretrained=False), ImageNet for resnet. An eval box that received
+                # only model_epoch_*.pth scored 50-60 DS on a random backbone and those numbers had to
+                # be thrown away (S-072). There is no configuration in which these heads mean anything
+                # without the backbone they were trained on.
+                raise FileNotFoundError(
+                    f"{checkpoint_path} is a heads-only checkpoint but {frozen_path} is missing. "
+                    f"Copy frozen_backbone.pth from the training run's save_dir next to it.")
 
         clean_dict = {}
         for k, v in state_dict.items():

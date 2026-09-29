@@ -179,19 +179,30 @@ def resolve_includes(names: List[str]) -> List[str]:
     return selected
 
 
-def build_remote_tar_cmd(remote_root: str, rel_paths: List[str]) -> str:
+#: In-progress writes. The trainers write <file>.tmp (or .tmp.npz / .tmp<pid>.npy) and then os.replace it,
+#: so a matching file is incomplete by definition and is never worth sending.
+TMP_EXCLUDES = ("*.tmp", "*.tmp.*", "*.tmp[0-9]*")
+
+
+def build_remote_tar_cmd(remote_root: str, rel_paths: List[str], since: Optional[float] = None) -> str:
     """Remote shell snippet that tars only the paths that actually exist.
 
     Filtering on the remote side keeps a missing checkpoint or video from failing
     the whole transfer, which is the normal case mid-run. Exit 9 = bad root,
     exit 8 = nothing to send; both are reported as advice rather than a stack trace.
+
+    `since` (Unix time) sends only files modified after it (GNU tar --newer-mtime). pull_loop.py uses it so
+    each cycle sends what changed rather than every checkpoint again - a full re-send every 3 minutes is
+    terabytes a day, and some hosts bill ~$27/TB.
     """
     quoted = " ".join("'" + p + "'" for p in rel_paths)
+    excludes = " ".join("--exclude='" + x + "'" for x in TMP_EXCLUDES)
+    newer = " --newer-mtime=@%d" % int(since) if since else ""
     return (
         "cd '" + remote_root + "' 2>/dev/null || exit 9; "
         "L=''; for p in " + quoted + '; do [ -e "$p" ] && L="$L $p"; done; '
         'if [ -z "$L" ]; then exit 8; fi; '
-        "tar -czf - $L 2>/dev/null"
+        "tar -czf - " + excludes + newer + " $L 2>/dev/null"
     )
 
 
@@ -253,14 +264,17 @@ def _run_with_progress(cmd: List[str], sink_path: Path) -> int:
 
 
 def pull(port: str, user_host: str, remote_root: str, includes: List[str], dest: Path,
-         ssh_opts: Optional[List[str]] = None, ssh_bin: str = "ssh") -> Path:
-    """Stream the selected remote output into ``dest`` and return that directory."""
+         ssh_opts: Optional[List[str]] = None, ssh_bin: str = "ssh", since: Optional[float] = None) -> Path:
+    """Stream the selected remote output into ``dest`` and return that directory.
+
+    ``since`` limits the transfer to files modified after that Unix time (see build_remote_tar_cmd).
+    """
     rel_paths = resolve_includes(includes)
     dest.mkdir(parents=True, exist_ok=True)
 
     cmd = [ssh_bin, "-p", str(port)]
     cmd += ssh_opts or ["-o", "StrictHostKeyChecking=accept-new", "-o", "ServerAliveInterval=30"]
-    cmd += [user_host, build_remote_tar_cmd(remote_root, rel_paths)]
+    cmd += [user_host, build_remote_tar_cmd(remote_root, rel_paths, since=since)]
 
     print("--> Pulling %s from %s:%s" % (", ".join(includes), user_host, remote_root))
     print("    Paths: " + ", ".join(rel_paths))
@@ -276,10 +290,15 @@ def pull(port: str, user_host: str, remote_root: str, includes: List[str], dest:
         if returncode == 8:
             raise SystemExit("None of the requested paths exist on the instance yet - nothing to pull.")
         size = tmp_path.stat().st_size
-        if returncode != 0 or size == 0:
+        # GNU tar exits 1 for "file changed as we read it", which is routine on a live run (MLflow appends
+        # metrics constantly). The archive is still complete and extracts cleanly; treating 1 as a failure
+        # threw away every pull of a running job.
+        if returncode not in (0, 1) or size == 0:
             raise SystemExit(
                 "Transfer failed (ssh exit %s, %d bytes received)." % (returncode, size)
             )
+        if returncode == 1:
+            print("    note: some files changed while being read; the next pass picks them up again.")
 
         print("    Received %.1f MB in %s, extracting..." % (size / 1e6, _format_eta(time.time() - started)))
         extract_snapshot(tmp_path, dest)

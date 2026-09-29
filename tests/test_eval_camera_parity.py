@@ -34,8 +34,14 @@ def test_eval_wor_imports_the_canonical_camera():
     assert "PDM_LITE_CAMERA" in _read("scripts/eval/eval_wor.py")
 
 
-def test_eval_wor_closed_loop_imports_the_canonical_camera():
-    assert "PDM_LITE_CAMERA" in _read("scripts/eval/eval_wor_closed_loop.py")
+def test_eval_wor_closed_loop_takes_its_camera_from_the_agent():
+    """eval_wor_closed_loop.py no longer spawns a camera of its own: AgentWrapper.setup_sensors()
+    spawns exactly what agent.sensors() declares, and WorldOnRailsAgent.sensors() is
+    camera_sensor_spec(), i.e. PDM_LITE_CAMERA. Pinned so nobody re-adds a local camera."""
+    text = _read("scripts/eval/eval_wor_closed_loop.py")
+    assert "AgentWrapper(agent)" in text and ".setup_sensors(" in text
+    assert "sensor.camera.rgb" not in text, "eval_wor_closed_loop.py spawns its own camera again"
+    assert "camera_sensor_spec" in _read("src/agents/wor_agent.py")
 
 
 def test_neither_file_hardcodes_the_old_broken_geometry():
@@ -59,8 +65,9 @@ def test_reshape_targets_are_no_longer_the_stale_256_square():
 def test_camera_spawn_parameters_are_read_from_pdm_lite_camera():
     """Pins the actual mechanism, not just the absence of the old literals: the width/height/fov
     passed to set_attribute must trace to PDM_LITE_CAMERA, so a future edit that reads from some
-    other, possibly-drifted source is still caught."""
-    for path in ("scripts/eval/eval_wor.py", "scripts/eval/eval_wor_closed_loop.py"):
+    other, possibly-drifted source is still caught. Only eval_wor.py spawns its own camera; the
+    closed-loop harness takes the agent's (see the test above)."""
+    for path in ("scripts/eval/eval_wor.py",):
         text = _read(path)
         assert re.search(r'set_attribute\("image_size_x",\s*str\(PDM_LITE_CAMERA\["width"\]\)\)',
                          text), f"{path}'s camera width is not sourced from PDM_LITE_CAMERA"

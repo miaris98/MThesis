@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # Re-exported so `from ...wor_policy import PIDController` keeps working.
-from src.models.world_on_rails.pid_controller import PIDController
+from src.models.world_on_rails.pid_controller import PIDController, tfpp_brake_override
 
 
 # Re-exported so `from ...wor_policy import PretrainedVisionEncoder` (and build_vision_encoder)
@@ -417,4 +417,5 @@ class WorldOnRailsPolicy(nn.Module):
             current_speed_kmh=current_speed_kmh,
             target_speed_kmh=target_speed_kmh
         )
+        throttle, brake = tfpp_brake_override(throttle, brake, speed_mps, target_speed_kmh)
         return steer, throttle, brake
