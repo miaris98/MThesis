@@ -454,6 +454,32 @@ input only, per the sensor rule). Needed before any AEB-style fallback (C48) is 
 extra sensors. Was C25, C26, C28, C31, C48; also the "TF++ BEV / depth / semantic auxiliary
 supervision" line in `tried_and_ruled_out.md`.
 
+### A34. TF++'s own depth / semantic / BEV decoders as extra inputs from the one RGB camera - **Next** (step 1 offline)
+The TF++ checkpoint we already take the backbone from (`all_towns/model_0030_0.pth`, 1332 tensors) also holds
+pretrained `depth_decoder`, `semantic_decoder` (7 classes), `bev_semantic_decoder` (11 classes) and CenterNet box
+heads (`head.*`), all CARLA-trained, so no new perception training and no ImageNet model (sensor and backbone rules).
+Different from A5: with the backbone frozen, auxiliary *targets* on its features cannot change what the policy sees;
+the decoders' *outputs* (depth, drivable area, vehicles/pedestrians, lead-car boxes) fed in as extra tokens can.
+**Catch:** TF++ is TransFuser. Its decoders read image features after fusion with the LiDAR branch
+(`backbone.transformers`, `lidar_encoder`), and we have no LiDAR.
+1. **Offline, no CARLA:** run TF++ with an all-zero LiDAR BEV on ~500 PDM-Lite frames, compare decoded depth and
+   semantics with the dataset's ground truth (PDM-Lite logs both). If near its reported quality, the decoders work
+   RGB-only. If not, feed pseudo-LiDAR from the decoded depth (allowed by the sensor rule) and check again.
+   **First result (2026-09-29, P2, 20 frames; 500-frame run in `/workspace/tfpp_check`, MLflow `A34_tfpp_decoders_rgb_only`,
+   `scripts/analysis/tfpp_decoders_rgb_only.py`):** the full TF++ model loads 1332/1332 tensors. Semantics survive a
+   blank LiDAR almost untouched: pixel accuracy 99.35% -> 99.32%, mIoU 0.799 -> 0.795; vehicle IoU 0.927 -> 0.926,
+   road 0.956 -> 0.955, sidewalk 0.92, road line 0.64, traffic light 0.36 -> 0.34. Depth degrades: normalised L1
+   0.025 -> 0.040 overall, 0.016 -> 0.032 on the nearest 30% of pixels. So the semantic decoder can run on our camera
+   alone as-is; depth works, but at about twice the near-range error.
+   **500 frames / 60 routes (all towns):** mIoU 0.803 -> 0.798, vehicle IoU 0.909 -> 0.903, road 0.937 -> 0.934,
+   sidewalk 0.897 -> 0.883, traffic light 0.588 -> 0.584; depth L1 0.027 -> 0.038, nearest 30% 0.018 -> 0.029. Confirmed.
+2. **Arm:** depth + semantic maps pooled to the 4x4 vision grid as extra tokens (or the lead-car box as 1/TTC for
+   A26). Run the decoders once per frame in the feature cache, so training cost barely moves.
+**Two-frame depth (previous + current image) is weaker than it sounds:** ego motion is forward, so the stereo
+baseline is ~0.3 m per 20 Hz frame at 20 km/h, and depth from motion is undefined at the focus of expansion - the image
+centre, exactly where the lead car is. Two frames are better used for *motion* (closing speed; A26 step 3, the
+FLARE-style feature difference), with keyframe up-weighting against the copycat shortcut (Wen et al.).
+
 ### A6. DAgger with the PDM-Lite expert - **Later** (large)
 Roll out our policy, let PDM-Lite label the visited states, add them to training. The general
 fix for compounding error and for A1-type situations the offline data never shows. Needs CARLA +
