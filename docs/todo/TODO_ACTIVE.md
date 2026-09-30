@@ -51,6 +51,14 @@ Backups (2026-09-29): `E:\MThesis_EXP\live_20260929_boxP1_5090_atari_carla` and 
 every 5 min: logs, `*.txt` lane plans, A9 results, guardian logs, Atari checkpoints (not replay buffers), MLflow, and
 on P2 `checkpoints/carla_armJ_ft_obst`. Earlier sessions: `live_20260928_*` (Y, Z, AA, AB, final_a9, final_atari_resume).
 
+**Resume plan (2026-09-30 evening, S-111).** Boxes destroyed ~20:00. At 18:45 `final_0930.sh` stops every unfinished Atari
+run right after its next save. Box F (GTrXL s1-s3, restarted fresh at 13:50 on F) -> HF `mthesis-relay/resume_20260930/`
+directly. Box E (ResNet s1-s3, GTrXL s0 if not done) uploads to HF at ~125 kB/s, so its state is pulled to
+`E:\MThesis_EXPesume_20260930\` (sha256 in `E_final_state.txt` vs `E_local_sha.txt`) and pushed from the home PC to the
+same HF folder overnight (`E_hf_push.log`, ends `E_HF_DONE`). Next box: `hf_relay.py down resume_20260930`, move each folder to
+`results/100k_benchmark/S058_ezv2_match/<label>/checkpoints/`, `run_100k.sh GPU LABEL "--trunk T --norm batch --priority-alpha 0
+--seed N"` resumes. Pick a modern-CPU box (Zen 4/5): the runs are launch-bound (F 9950X ~195 upd/min alone vs E Broadwell 69).
+
 **Order of work from here:**
 1. *No box needed:* A9 merge (paired E vs WoR, official 220 with crashes = 0, seen/unseen towns, excluded routes)
    -> decides whether E ties WoR at scale; add Bench2Drive's ability scores (A9). A30 step 1 is done (S-100): plan
