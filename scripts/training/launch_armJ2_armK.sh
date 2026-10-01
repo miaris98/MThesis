@@ -2,7 +2,8 @@
 # CARLA box day (S-111 plan): two fine-tunes of arm E e15 on arm J's data (6 towns + Town12/13 obstacle archives,
 # route_original), one per GPU, each on arm J's exact recipe (run_config of carla_armJ_ft_obst) with ONE change:
 #   GPU 0  carla_armJ_ft_obst_s1   --seed 1          is arm J's +15 on obstacle routes one lucky run? (second seed)
-#   GPU 1  carla_armK_swerve10     --swerve_frac 0.1 TODO A16: swerve frames drawn as 10% of each epoch (arm J ~natural)
+#   GPU 1  carla_armK_swerve25     --swerve_frac 0.25 TODO A16: swerve frames drawn as 25% of each epoch, ~2x their
+#                                  natural share (S-112: ~10% shifted >0.5 m, ~14% with the approach window; 0.1 was a no-op)
 # Needs: /workspace/dataset/wor_trajectories (download_pdm_lite.py with arm J's --archive-regex), the TF++ weights,
 # and checkpoints/carla_armE_aug1_hires/{model_epoch_015,frozen_backbone}.pth + run_config.json.
 cd /workspace/MThesis
@@ -18,7 +19,7 @@ run() {  # GPU LABEL extra-args
   sleep 5
 }
 run 0 carla_armJ_ft_obst_s1 "--seed 1"
-run 1 carla_armK_swerve10 "--seed 0 --swerve_frac 0.1"
+run 1 carla_armK_swerve25 "--seed 0 --swerve_frac 0.25"
 sleep 240
-for L in carla_armJ_ft_obst_s1 carla_armK_swerve10; do echo "== $L"; grep -aE "Resumed|Validation split|Swerve sampler|Error|Traceback" /workspace/$L.log | tail -4; done
+for L in carla_armJ_ft_obst_s1 carla_armK_swerve25; do echo "== $L"; grep -aE "Resumed|Validation split|Swerve sampler|Error|Traceback" /workspace/$L.log | tail -4; done
 nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader

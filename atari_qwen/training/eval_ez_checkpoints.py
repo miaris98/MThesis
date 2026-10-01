@@ -112,7 +112,7 @@ def process_run(run_dir: Path, device, state: dict) -> bool:
             st["mlflow"], st["run"] = mlflow_run(run_dir.name, a)
         if st["mlflow"]:
             try:
-                st["mlflow"].log_metrics({"eval_score": mean, "eval_se": se, "eval_hns": hns}, step=env)
+                st["mlflow"].log_metrics({"eval/score": mean, "eval/se": se, "eval/hns": hns}, step=env)
             except Exception:
                 pass
         summ_p = ckdir / "eval_summary.json"
