@@ -470,10 +470,13 @@ def train(args):
         writer.close()
     if mlrun:
         try:
-            mlflow.log_metric("best_eval", best); mlflow.end_run()
+            if np.isfinite(best):  # deferred mode: eval_ez_checkpoints.py logs best_eval on the <label>_eval run
+                mlflow.log_metric("best_eval", best)
+            mlflow.end_run()
         except Exception:
             pass
-    print(f"done: best eval {best:.2f}", flush=True)
+    print(f"done: best eval {best:.2f}" if np.isfinite(best) else
+          "done: evals deferred to eval_ez_checkpoints.py", flush=True)
     return best
 
 

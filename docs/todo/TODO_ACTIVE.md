@@ -11,51 +11,20 @@ The status block below is the only snapshot in this file: replace it, don't appe
 
 ---
 
-## Status: 2026-09-29 15:20 Athens (S-106, S-107) - **both boxes are destroyed at 22:00**
+## Status: 2026-10-01 18:30 Athens (S-112) - **no boxes running**
 
-| Box | Job | ETA (Athens) |
-|---|---|---|
-| P1 (RTX 5090 32 GB, EPYC 9734) | B4 seed 0: GTrXL (`S058h_gtrxl_100k_s0_uniform`, eval 50k **320.0**) + ResNet (`S058i_resnet_100k_s0_uniform`, 50k **230.8**), resumed at 52k | 100k ~21:00 |
-| P1 | A9 leftovers, 1 lane at Low quality (`lanes_0929e_P1.txt`, 25 runs) | ~17:30 |
-| P2 (RTX 3090 24 GB, Xeon Gold 6222) | A14 arm J fine-tune `carla_armJ_ft_obst` (E e15 -> e20, `--route_key route_original`, 427k frames incl. obstacle archives, 18 min/epoch) | e20 ~16:15 |
-| P2 | A9 leftovers, 1 lane at Low (`lanes_0929e.txt` line 1, 25 runs, 0.22x real time) | ~21:00 |
-| P2 after arm J | arm J e20 eval, 3 lanes (`lanes_armJ.txt`, auto-start): b2d20's 19 routes first, then A9's 45 other obstacle routes | R19 ~18:30, obstacle ~21:30 |
-| 21:30-21:55 | final pulls to E: + HF stage 2 (Atari finals, arm J checkpoints); resume state of anything unfinished to HF | before 22:00 |
+| Item | Result (2026-10-01) |
+|---|---|
+| Deferred Atari eval | **MATCH**: re-scoring an inline env10000 checkpoint in its own process gives the same 10 episode scores |
+| A28 median decoding (arm J e18) | **-22.9 DS** [-33.5, -12.6] vs mean decoding: the agent stops and deadlocks (blocked 15 vs 1). Mean stays |
+| Arm J seed 1 (A14 robustness) | vs arm E e15 on A9's obstacle routes: e18 +4.1 [-4.6, +12.4], **e20 +9.2 [+1.8, +17.3]** (arm J seed 0: +17.5 / +14.3 re-run) |
+| Arm K swerve 0.25 (A16) | natural swerve share 15.3% (0.1 was a no-op); vs J e18: e18 obstacle -9.6, e20 -0.7; vs E e15 obstacle e20 +13.6 [+6.0, +22.1]. No gain over J |
+| B35 30k screen | done: ResNet s4 (0.0), s5 (250.8), GTrXL s6, s7 (env30000 to score); resume state on HF: GTrXL s1, s2, s4, s5 (20k); not started: ResNet s6, s7 |
 
-A9 = full Bench2Drive (219 routes) for arm E e15 and the original WoR. P1 lost ~1.5 h to a crash loop (S-107): on the
-RTX 5090 a `-quality-level=Low` map load segfaults at random (Epic never did), and the evaluator runs a lane's routes in
-XML order, so crash routes blocked whole lanes. Every result so far is Low, so the leftovers stay at Low, mostly on
-P2's 3090. Seed 1 (GTrXL ~12k, ResNet ~14k) is paused with its state on E: (`live_20260928_final_atari_resume\P1`).
-Seed-0 resume state (52k, with replay) is also on the private HF repo `mthesis-relay` (`s0_20260929/`, sha-checked).
-**Literature scan (2026-09-28):** new items A14-A21 and B8-B14, from `docs/design/literature_scan_2026-09-28.md`.
-Second pass (evening, section 5 there): A22-A24, B17-B18, plus additions to A6, A9, B3, B5, B8. B3 now has two
-concrete code differences from EZ-V2's replay buffer to test first. Third pass (overlays, physics, data curation,
-section 6): A25-A27, B19, plus notes on A17 and B14. Fourth pass (maths/physics, section 7): A28 (speed head as
-a Bayes decision), A29 (grey-box IDM), A30 (fixed-route-set statistics), plus notes on B2, B13, B19. Fifth pass
-(the maths run on our own data, S-100, section 8): A30 measured (run noise, not the route set, is the lever; our
-arms are 1.2-2.4x noisier than WoR); we lose 18 DS/route to penalties where WoR loses 28 to timeouts (A28's case);
-the flat-ground overlay is fine on hills (no item); new A31 (foveal tokens) and B20 (symmetric position bias).
-Sixth pass (S-101, section 9): run noise is a Poisson collision lottery with a closed form; systematic vs lottery
-collisions; repeat-hit physics (creep into parked cars; side-swipes on HighwayExit, evidence for A13); new B21
-(raw-score training through the existing h-transform); B2 protocol correction (Atari-100k has no sticky actions).
-Seventh pass (energy, latent space, noise, transforms, vectorisation; section 10): A32 (sinusoidal speed/route
-embeddings), B22 (SimNorm latent), B23 (sync-free CUDA-graph search, then several seeds per process); A28 gets
-temperature scaling + HL-Gauss, plus a derivation showing a kinetic-energy cost alone favours creeping.
-Eval-only additions (2026-09-28 night): A33 (ensemble the heads over the shared frozen backbone) and B24 (test-time
-search scaling on saved checkpoints).
-**Top CARLA lead (S-096, S-097):** our 6-town training set has **no** obstacle scenarios (they are all in Town12/13), so
-arms A-I never saw one. The one run that had them (8-town, S-063) fed PDM-Lite's obstacle-shifted `route` as input,
-while evaluation feeds the unshifted plan. The fix needs both: obstacle data **and** `route_original` (A14), then
-moderate oversampling (A16).
-Backups (2026-09-29): `E:\MThesis_EXP\live_20260929_boxP1_5090_atari_carla` and `live_20260929_boxP2_3090_carla`,
-every 5 min: logs, `*.txt` lane plans, A9 results, guardian logs, Atari checkpoints (not replay buffers), MLflow, and
-on P2 `checkpoints/carla_armJ_ft_obst`. Earlier sessions: `live_20260928_*` (Y, Z, AA, AB, final_a9, final_atari_resume).
-
-**Atari state after 2026-09-30 (S-111): nothing to resume.** Boxes E/F were destroyed at ~19:00 before the end-of-day save
-finished, so no replay buffer of an unfinished run survived (`resume_20260930/` is empty). On E:
-(`live_20260930_boxE_4x3090_atari`, `live_20260930_boxF_2xpro4500_atari`): eval checkpoints, best/latest weights, logs, MLflow.
-ResNet s0 is complete (final 291.6). GTrXL s0 ends at 100k env (100k eval 260.2; offline tail unfinished). The 100k seed plan
-(B4 seeds 1-3) is replaced by the 30k screen B35; their env30000 evals count as screen points.
+Results: `E:\MThesis_EXP\live_20261001_boxH_2xA40_carla` (CARLA), `live_20261001_boxG_4x3090_atari` (Atari, checkpoints under
+`hf_checkpoints/`), `live_20261001_testbox_3060_verify`. HF `mthesis-relay`: `armJ2K_20261001/`, `b35_20261001/`, `b35_20261001_resume/`.
+Older status: A9 final (arm E e15 beats original WoR +14.3 DS [+8.9, +19.8] paired, 185 routes; official 61.1 vs 45.6); arm JH
+(matched WoR head) below arm J (S-111).
 
 **Order of work from here:**
 1. *No box needed:* A9 merge (paired E vs WoR, official 220 with crashes = 0, seen/unseen towns, excluded routes)
@@ -118,7 +87,10 @@ plan (= `route_original`). When the data is on a box, check how often `changed_r
 frames and how far `route` and `route_original` diverge. The fix is A14. Also check the
 ego-speed shortcut (Li et al. CVPR 2024): does the target speed stay at 0 once the car has stopped?
 
-### A14. Obstacle data + the unshifted route (`route_original`) - **Works: arm J e18 +15.1 vs E on obstacle routes [+5.0, +25.3]; next the matched WoR-head arm** (S-096, S-097, S-107, S-109)
+### A14. Obstacle data + the unshifted route (`route_original`) - **Works, smaller than seed 0 showed: vs E e15 on obstacle routes seed 0 +17.5, seed 1 +4.1 (e18) / +9.2 (e20); next a third seed** (S-096, S-097, S-107, S-109, S-111, S-112)
+2026-10-01 (S-112): arm J seed 1 on box H. Paired vs arm J e18 re-run on the same box: e18 obstacle -11.3 [-21.6, -1.7], e20 -5.1
+[-12.2, +1.6]. Paired vs arm E e15 (A9 records): e18 +4.1 [-4.6, +12.4], e20 +9.2 [+1.8, +17.3]; b2d20 within noise. Box effect
+(arm J e18 on H vs on P2) only -3.7 on obstacle routes. Report the gain as seed- and epoch-dependent; a third seed decides the size.
 2026-09-29: `carla_armJ_ft_obst` = E e15 fine-tuned to e20 (E's LR schedule, `--route_key route_original`, TF++
 `all_towns/model_0030_0.pth` backbone, 427k train frames incl. the 20 obstacle archives). e16: ADE 0.284 m, lat 0.056 m.
 Eval of e20 on P2 (`lanes_armJ.txt`, labels `j20_b2d20_*` / `j20_obst_*`). The matched WoR-head arm is still to do.
@@ -143,7 +115,10 @@ collisions 0.68 -> 0.0; SimLingo: fewer static-object collisions. Target = PDM-L
 existing two-hot target speed. Absorbs the "TF++ path checkpoints" line in `tried_and_ruled_out.md` and
 part of A7.
 
-### A16. Oversample obstacle/swerve frames and drop redundant ones - **Code ready (2026-10-01): `--swerve_frac`, arm K = arm J + 0.1** (S-111)
+### A16. Oversample obstacle/swerve frames and drop redundant ones - **Done: arm K (`--swerve_frac 0.25`) no gain over arm J** (S-111, S-112)
+2026-10-01 (S-112): the natural swerve share in arm J's data is 15.3% (65,522 / 427,310 train frames), so 0.1 was a no-op;
+arm K used 0.25 (x1.8). Paired vs arm J e18 (same box): K e18 obstacle -9.6, b2d20 +8.2; K e20 obstacle -0.7 [-9.8, +8.2],
+b2d20 -0.7. vs E e15 obstacle: K e20 +13.6 [+6.0, +22.1]. Emphasis on swerve frames adds nothing measurable over J.
 `src/training/swerve.py`: a swerve frame = the expert's `route` >0.5 m lateral off `route_original` in the first 4 points (the
 `route_shift_stats.py` measure) or one of the `--swerve_window` (8, ~2 s) frames before; the train loader draws them as
 `--swerve_frac` of each epoch (seeded WeightedRandomSampler, epoch length unchanged, never below the natural share).
@@ -239,7 +214,10 @@ both braking and lane changes (NOVA, 2026).
    keyframe up-weighting (Wen et al. 2021, shown in CARLA) against the copycat shortcut. CarLLaVA's null result
    for generic temporal input still applies.
 
-### A28. Read the speed head as a decision, not a mean - **Code ready (2026-10-01): `WOR_SPEED_DECODE`, queue job `CKD`** (S-111)
+### A28. Read the speed head as a decision, not a mean - **Median tested: -22.9 DS (deadlocks); mean stays** (S-111, S-112)
+2026-10-01 (S-112): arm J e18 with `WOR_SPEED_DECODE=median` on the 64 routes arm J ran, paired vs mean decoding: 40.6 vs
+63.5, -22.9 [-33.5, -12.6]; Agent got blocked 15 vs 1, TickRuntime 15 vs 7. The median snaps to the stop mode. Only tau > 0.5
+or the HMM filter remain; low priority.
 `TargetSpeedHead` reads `WOR_SPEED_DECODE` = mean (default, bit-identical to before) | median | quantile:<tau> as the slowest bin
 whose CDF reaches tau (not interpolated: interpolation brings the creep back). Eval lane job
 `CKD:<label>:<ckpt>:<routes|R19>:<decode>`; the agent log prints `[A28] target-speed decode`. Steps 1-2 done; the HMM filter
@@ -585,7 +563,11 @@ history), C30 (waypoint horizon), C37 (braking-margin loss, see A11).
 
 No run of our port has gone past 10k env steps; the Atari-100k benchmark itself (B4) is not started.
 
-### B35. Trunk screen at 30k env steps, 8 seeds per trunk - **Code ready (2026-10-01), next box** (S-111 plan B)
+### B35. Trunk screen at 30k env steps, 8 seeds per trunk - **Running across boxes: 4 of 10 new runs at 30k** (S-111 plan B, S-112)
+2026-10-01 (S-112, box G): metric = the env30000 checkpoint at upd28004 (what the inline runs scored). Done: ResNet s4 0.0,
+s5 250.8; GTrXL s6, s7 reached 30k, checkpoints on HF `b35_20261001/` (score with `eval_ez_checkpoints.py`). Resume from HF
+`b35_20261001_resume/` (checkpoint_latest + replay_latest): GTrXL s1, s2, s4, s5 at 20k. Not started: ResNet s6, s7.
+Deferred eval verified bit-exact vs inline. One GTrXL per GPU (two per 3090 ran at ~57 upd/min, ~9 h per run).
 Replaces more 100k seeds (B4): 3 seeds per trunk at 100k cannot separate the trunks unless the gap is very large, and Breakout
 is one game. A 30k run is an exact prefix of the 100k run with the same seed (`--schedule-steps 100000`), so the env30000
 evals already on E: count: GTrXL s0 162.8, s3 319.9; ResNet s0 43.0, s1 172.9, s2 23.6, s3 74.4. To run: GTrXL s1, s2, s4-s7 and
