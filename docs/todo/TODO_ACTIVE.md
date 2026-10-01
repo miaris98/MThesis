@@ -51,14 +51,11 @@ Backups (2026-09-29): `E:\MThesis_EXP\live_20260929_boxP1_5090_atari_carla` and 
 every 5 min: logs, `*.txt` lane plans, A9 results, guardian logs, Atari checkpoints (not replay buffers), MLflow, and
 on P2 `checkpoints/carla_armJ_ft_obst`. Earlier sessions: `live_20260928_*` (Y, Z, AA, AB, final_a9, final_atari_resume).
 
-**Resume plan (2026-09-30 evening, S-111).** Boxes destroyed ~20:00. At 18:45 `final_0930.sh` stops every unfinished Atari
-run right after its next save. Box F (GTrXL s1-s3, restarted fresh at 13:50 on F) -> HF `mthesis-relay/resume_20260930/`
-directly. Box E (ResNet s1-s3, GTrXL s0 if not done) uploads to HF at ~125 kB/s, so its state is pulled to
-`E:\MThesis_EXP
-esume_20260930\` (sha256 in `E_final_state.txt` vs `E_local_sha.txt`) and pushed from the home PC to the
-same HF folder overnight (`E_hf_push.log`, ends `E_HF_DONE`). Next box: `hf_relay.py down resume_20260930`, move each folder to
-`results/100k_benchmark/S058_ezv2_match/<label>/checkpoints/`, `run_100k.sh GPU LABEL "--trunk T --norm batch --priority-alpha 0
---seed N"` resumes. Pick a modern-CPU box (Zen 4/5): the runs are launch-bound (F 9950X ~195 upd/min alone vs E Broadwell 69).
+**Atari state after 2026-09-30 (S-111): nothing to resume.** Boxes E/F were destroyed at ~19:00 before the end-of-day save
+finished, so no replay buffer of an unfinished run survived (`resume_20260930/` is empty). On E:
+(`live_20260930_boxE_4x3090_atari`, `live_20260930_boxF_2xpro4500_atari`): eval checkpoints, best/latest weights, logs, MLflow.
+ResNet s0 is complete (final 291.6). GTrXL s0 ends at 100k env (100k eval 260.2; offline tail unfinished). The 100k seed plan
+(B4 seeds 1-3) is replaced by the 30k screen B35; their env30000 evals count as screen points.
 
 **Order of work from here:**
 1. *No box needed:* A9 merge (paired E vs WoR, official 220 with crashes = 0, seen/unseen towns, excluded routes)
