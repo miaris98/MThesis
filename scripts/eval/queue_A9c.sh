@@ -6,6 +6,8 @@
 #       | E15L:<name>:<r1,r2,..>  arm E e15 on an explicit route list as a9_E15_<name> (retry of skipped routes)
 #       | WORL:<name>:<r1,r2,..>  the original WoR on an explicit route list as a9_WOR_<name> (rebalanced lanes, S-099)
 #       | CKL:<label>:<ckpt>:<r1,r2,..|R19>  any of our checkpoints (path under $CHECKPOINTS) as <label> (arm J, S-107)
+#       | CKD:<label>:<ckpt>:<r1,r2,..|R19>:<decode>  as CKL with the speed head read as mean | median | quantile:<tau>
+#                                     (WOR_SPEED_DECODE, TODO A28); quantile:0.3 keeps its colon, it is the last field
 # Lanes on one box need distinct PORTs (TM port = PORT+6000); each lane clears its own rpc range before a launch (S-091).
 # A lane relaunched with a new job list attaches to a guardian that is already running instead of duplicating it.
 # Crash routes (S-095): a route that segfaults CARLA on every attempt (like 27515) is skipped after 4 launch attempts in
@@ -88,6 +90,9 @@ for job in "$@"; do
     E15L:*) spec=${job#*:}; eval_job a9_E15_${spec%%:*} $C/carla_armE_aug1_hires/model_epoch_015.pth "${spec#*:}" ;;
     CKL:*) spec=${job#*:}; rest=${spec#*:}; rl=${rest#*:}; [ "$rl" = R19 ] && rl=$R19   # CKL:<label>:<ckpt under $C>:<routes|R19>
       eval_job ${spec%%:*} $C/${rest%%:*} "$rl" ;;
+    CKD:*) spec=${job#*:}; lab=${spec%%:*}; rest=${spec#*:}; ck=${rest%%:*}; rest=${rest#*:}
+      rl=${rest%%:*}; dec=${rest#*:}; [ "$rl" = R19 ] && rl=$R19   # CKD:<label>:<ckpt>:<routes|R19>:<mean|median|quantile:T>
+      ( export WOR_SPEED_DECODE=$dec; eval_job $lab $C/$ck "$rl" ) ;;
     WORL:*) spec=${job#*:}
       ( export EVAL_AGENT=$MTHESIS_ROOT/scripts/eval/wor_official_b2d_agent.py EVAL_AGENT_CONFIG=$WOR_CFG PCLA_ROOT=$PCLA_ROOT ALLOW_NO_FROZEN_BACKBONE=1
         eval_job a9_WOR_${spec%%:*} $WOR_CFG "${spec#*:}" ) ;;

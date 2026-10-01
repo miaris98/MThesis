@@ -23,6 +23,7 @@ structure the encoder already encodes. They cannot create it. The gain is real b
 which is why the backbone was also moved to CARLA-pretrained weights (carla_encoder.py), whose
 features were themselves trained under exactly this supervision.
 """
+import os
 from typing import Dict, List, Optional, Sequence
 
 import torch
@@ -33,6 +34,28 @@ import torch.nn.functional as F
 # bin is exactly 0.0 and that is the point: it lets the policy command a full stop as a class
 # rather than having to express "stopped" as waypoints that happen to coincide.
 TARGET_SPEEDS: Sequence[float] = (0.0, 4.0, 8.0, 10.0, 13.88888888, 16.0, 17.77777777, 20.0)
+
+
+def parse_speed_decode(spec: str) -> Optional[float]:
+    """"mean" -> None (softmax-weighted average); "median" -> 0.5; "quantile:<tau>" -> tau in (0, 1)."""
+    spec = (spec or "mean").strip().lower()
+    if spec == "mean":
+        return None
+    if spec == "median":
+        return 0.5
+    if spec.startswith("quantile:"):
+        tau = float(spec.split(":", 1)[1])
+        if not 0.0 < tau < 1.0:
+            raise ValueError(f"speed decode quantile must be in (0, 1), got {tau}")
+        return tau
+    raise ValueError(f"unknown speed decode {spec!r}: use mean, median or quantile:<tau>")
+
+
+def speed_quantile(probs: torch.Tensor, bins: torch.Tensor, tau: float) -> torch.Tensor:
+    """(..., num_bins) probabilities -> (...) speed: the slowest bin whose CDF reaches tau."""
+    cdf = probs.cumsum(dim=-1)
+    idx = (cdf < tau - 1e-6).sum(dim=-1).clamp(max=bins.numel() - 1)
+    return bins[idx]
 
 
 class TargetSpeedHead(nn.Module):
@@ -58,10 +81,17 @@ class TargetSpeedHead(nn.Module):
     mean of the modes - the one speed the expert never drives.
     """
 
-    def __init__(self, in_dim: int, num_bins: int = len(TARGET_SPEEDS), hidden: int = 256):
+    def __init__(self, in_dim: int, num_bins: int = len(TARGET_SPEEDS), hidden: int = 256,
+                 decode: Optional[str] = None):
         super().__init__()
         self.num_bins = num_bins
         self.register_buffer("bins", torch.tensor(TARGET_SPEEDS, dtype=torch.float32))
+        # Inference-time read-out of the bin distribution (TODO A28): "mean" (default, what every arm so far
+        # was evaluated with), "median", or "quantile:<tau>". Set per eval with WOR_SPEED_DECODE, so a
+        # checkpoint can be re-evaluated with another decoder without retraining or touching its weights.
+        self.decode = parse_speed_decode(decode if decode is not None else os.environ.get("WOR_SPEED_DECODE", "mean"))
+        if self.decode is not None:  # greppable in the eval logs: proves a lane really ran the non-default decoder
+            print(f"[A28] target-speed decode: quantile tau={self.decode}", flush=True)
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden),
             nn.GELU(),
@@ -78,8 +108,16 @@ class TargetSpeedHead(nn.Module):
         Used at inference. The argmax bin would be the harder commitment, but a soft average is
         what makes the head usable as a PID target without chattering between adjacent bins;
         because bin 0 is exactly 0.0, a confident stop still yields a near-zero speed.
+
+        The mean has the regression problem back at inference, though: P(0) = P(8 m/s) = 0.5 gives 4 m/s, a
+        creep the expert never drives. `decode` = "median" / "quantile:<tau>" reads the tau-quantile of the
+        distribution instead (Bayes-optimal under absolute / pinball loss; tau < 0.5 makes too fast cost more
+        than too slow): the slowest bin whose CDF reaches tau. It is deliberately not interpolated between
+        bins - interpolation brings the creep back (P(0) = 0.4, P(8) = 0.6 would give 4.7 m/s, not 8).
         """
-        return (logits.softmax(dim=-1) * self.bins).sum(dim=-1)
+        if self.decode is None:
+            return (logits.softmax(dim=-1) * self.bins).sum(dim=-1)
+        return speed_quantile(logits.float().softmax(dim=-1), self.bins, self.decode)
 
 
 def two_hot_target_speed(speeds: torch.Tensor,

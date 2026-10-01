@@ -14,6 +14,7 @@ import numpy as np
 from torch.utils.data import DataLoader, Subset
 
 from src.training.seeding import make_generator, make_worker_init_fn
+from src.training.swerve import swerve_sampler
 from src.training.wor_dataset import WorldOnRailsDataset
 
 
@@ -42,6 +43,10 @@ def _wrap_loader(dataset, batch_size: int, num_workers: int, is_train: bool,
     # before a single batch was read.
     if num_workers > 0:
         kwargs["prefetch_factor"] = 4
+    frac = float(os.environ.get("WOR_SWERVE_FRAC", "0") or 0)
+    if is_train and frac > 0:
+        kwargs.pop("shuffle")
+        kwargs["sampler"] = swerve_sampler(dataset, frac, seed)  # TODO A16, arm K (src/training/swerve.py)
     return DataLoader(dataset, **kwargs)
 
 

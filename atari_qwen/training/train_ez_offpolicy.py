@@ -439,7 +439,16 @@ def train(args):
                  "train/policy_target_entropy": float(-(pol_t[:, 0] * np.log(pol_t[:, 0] + 1e-8)).sum(-1).mean())},
                 env_steps)
         done_all = updates >= total_updates
-        if (env_steps >= next_eval and env_steps <= args.total_steps) or done_all:
+        if ((env_steps >= next_eval and env_steps <= args.total_steps) or done_all) and args.eval_mode == "deferred":
+            # S-111: evals took 1-2 h each (a policy that stops pressing FIRE plays the 27k-step cap) and
+            # blocked training. Save the weights here; eval_ez_checkpoints.py scores them in its own process.
+            next_eval += args.eval_interval
+            tag = "final" if done_all else f"env{env_steps}"
+            save(f"env{env_steps}_upd{updates}", {"eval_pending": True, "eval_tag": tag})
+            save("latest", {"eval_pending": True, "eval_tag": tag})
+            print(f"[EVAL-DEFERRED] {tag} env {env_steps} upd {updates}: checkpoint_env{env_steps}_upd{updates}.pt",
+                  flush=True)
+        elif (env_steps >= next_eval and env_steps <= args.total_steps) or done_all:
             next_eval += args.eval_interval
             sc = evaluate(model, mcts, args.env_id, device, args.eval_episodes, args.frame_size, args.seed)
             mean, se = float(sc.mean()), float(sc.std() / np.sqrt(len(sc)))
@@ -504,6 +513,9 @@ def parse_args(argv=None):
     ap.add_argument("--mixed-value-threshold", type=int, default=5_000, help="transitions counted as 'recent'")
     ap.add_argument("--eval-interval", type=int, default=10_000)
     ap.add_argument("--eval-episodes", type=int, default=10)
+    ap.add_argument("--eval-mode", default="inline", choices=["inline", "deferred"],
+                    help="deferred: only save checkpoint_env*_upd*.pt at eval points; score them with "
+                         "eval_ez_checkpoints.py in a separate process (training does not wait)")
     ap.add_argument("--ckpt-interval", type=int, default=2_500, help="updates between checkpoint_latest saves")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--run-label", default=None)

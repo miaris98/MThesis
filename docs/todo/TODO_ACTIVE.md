@@ -54,7 +54,8 @@ on P2 `checkpoints/carla_armJ_ft_obst`. Earlier sessions: `live_20260928_*` (Y, 
 **Resume plan (2026-09-30 evening, S-111).** Boxes destroyed ~20:00. At 18:45 `final_0930.sh` stops every unfinished Atari
 run right after its next save. Box F (GTrXL s1-s3, restarted fresh at 13:50 on F) -> HF `mthesis-relay/resume_20260930/`
 directly. Box E (ResNet s1-s3, GTrXL s0 if not done) uploads to HF at ~125 kB/s, so its state is pulled to
-`E:\MThesis_EXPesume_20260930\` (sha256 in `E_final_state.txt` vs `E_local_sha.txt`) and pushed from the home PC to the
+`E:\MThesis_EXP
+esume_20260930\` (sha256 in `E_final_state.txt` vs `E_local_sha.txt`) and pushed from the home PC to the
 same HF folder overnight (`E_hf_push.log`, ends `E_HF_DONE`). Next box: `hf_relay.py down resume_20260930`, move each folder to
 `results/100k_benchmark/S058_ezv2_match/<label>/checkpoints/`, `run_100k.sh GPU LABEL "--trunk T --norm batch --priority-alpha 0
 --seed N"` resumes. Pick a modern-CPU box (Zen 4/5): the runs are launch-bound (F 9950X ~195 upd/min alone vs E Broadwell 69).
@@ -145,7 +146,11 @@ collisions 0.68 -> 0.0; SimLingo: fewer static-object collisions. Target = PDM-L
 existing two-hot target speed. Absorbs the "TF++ path checkpoints" line in `tried_and_ruled_out.md` and
 part of A7.
 
-### A16. Oversample obstacle/swerve frames and drop redundant ones - **Next** (arm K = arm J + sampler)
+### A16. Oversample obstacle/swerve frames and drop redundant ones - **Code ready (2026-10-01): `--swerve_frac`, arm K = arm J + 0.1** (S-111)
+`src/training/swerve.py`: a swerve frame = the expert's `route` >0.5 m lateral off `route_original` in the first 4 points (the
+`route_shift_stats.py` measure) or one of the `--swerve_window` (8, ~2 s) frames before; the train loader draws them as
+`--swerve_frac` of each epoch (seeded WeightedRandomSampler, epoch length unchanged, never below the natural share).
+Tests: `tests/test_swerve_sampler.py`. Launch with arm J seed 2 on one box: `scripts/training/launch_armJ2_armK.sh`.
 CarLLaVA trains on buckets (acceleration, steering, hazards, red lights, walkers, **swerving obstacles**, plus
 a whole-dataset bucket; 2.9M -> 650k samples/epoch). The PDM-Lite dataset-bias paper keeps frames whose
 target changes (>0.1 m/s or >0.5 deg) plus 14% random: -49% data, DS equal or better. Sampler weights from
@@ -237,7 +242,11 @@ both braking and lane changes (NOVA, 2026).
    keyframe up-weighting (Wen et al. 2021, shown in CARLA) against the copycat shortcut. CarLLaVA's null result
    for generic temporal input still applies.
 
-### A28. Read the speed head as a decision, not a mean - **Next** (inference-only; no training)
+### A28. Read the speed head as a decision, not a mean - **Code ready (2026-10-01): `WOR_SPEED_DECODE`, queue job `CKD`** (S-111)
+`TargetSpeedHead` reads `WOR_SPEED_DECODE` = mean (default, bit-identical to before) | median | quantile:<tau> as the slowest bin
+whose CDF reaches tau (not interpolated: interpolation brings the creep back). Eval lane job
+`CKD:<label>:<ckpt>:<routes|R19>:<decode>`; the agent log prints `[A28] target-speed decode`. Steps 1-2 done; the HMM filter
+(step 3) is not. First run: arm J e18, median, on the 64 routes arm J ran (paired vs j18). Tests: `tests/test_speed_decode.py`.
 `TargetSpeedHead.expected_speed` sends the softmax-weighted **mean** of the bins to the PID. The class's own
 docstring warns that a multi-modal target's mean is "the one speed the expert never drives", and inference brings
 that averaging back. P(stop) = P(8 m/s) = 0.5 gives 4 m/s: a creep toward whatever caused the stop.
@@ -578,6 +587,14 @@ history), C30 (waypoint horizon), C37 (braking-margin loss, see A11).
 ## Atari (EZ-V2 port, Breakout)
 
 No run of our port has gone past 10k env steps; the Atari-100k benchmark itself (B4) is not started.
+
+### B35. Trunk screen at 30k env steps, 8 seeds per trunk - **Code ready (2026-10-01), next box** (S-111 plan B)
+Replaces more 100k seeds (B4): 3 seeds per trunk at 100k cannot separate the trunks unless the gap is very large, and Breakout
+is one game. A 30k run is an exact prefix of the 100k run with the same seed (`--schedule-steps 100000`), so the env30000
+evals already on E: count: GTrXL s0 162.8, s3 319.9; ResNet s0 43.0, s1 172.9, s2 23.6, s3 74.4. To run: GTrXL s1, s2, s4-s7 and
+ResNet s4-s7 (10 runs). Evals run in their own process (`--eval-mode deferred` + `eval_ez_checkpoints.py --watch`; the
+1-2 h inline evals blocked training, S-111): `scripts/atari/run_screen_30k.sh GPU TRUNK:SEED ...`. Metric: env30000 eval
+(10 episodes), compared per seed (rank / bootstrap). Box: 4x 3090-class, 2 runs per GPU (GPU-bound when shared).
 
 ### B4. Scale the budget: GTrXL + uniform to 100k - **Running** (GTrXL box Z, ResNet box Y, S-093)
 Atari-100k is the standard benchmark; EZ-V2's own run here gives 321.2 at 100k (paper 400.1;

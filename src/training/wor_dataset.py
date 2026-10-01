@@ -22,6 +22,7 @@ import torch
 from torch.utils.data import Dataset
 
 from src.config.camera import preprocess_rgb
+from src.training.swerve import route_shift, swerve_flags
 
 
 def _camera_offset_matrix(translation_y: float, rotation_yaw_deg: float) -> np.ndarray:
@@ -285,9 +286,12 @@ class WorldOnRailsDataset(Dataset):
                     # --augment.
                     "augmentation_translation": float(meas.get("augmentation_translation", 0.0)),
                     "augmentation_rotation": float(meas.get("augmentation_rotation", 0.0)),
+                    "route_shift": route_shift(meas.get("route"), meas.get("route_original")),
                 }
             except Exception:
                 parsed[i] = None
+        # TODO A16 (arm K): only marked here; the train loader oversamples them when --swerve_frac > 0 (src/training/swerve.py)
+        swerve = swerve_flags([p and p["route_shift"] for p in parsed], int(os.environ.get("WOR_SWERVE_WINDOW", "8")))
 
         for i in range(5, num_frames - pred_len - 2):
             cur = parsed[i]
@@ -321,7 +325,8 @@ class WorldOnRailsDataset(Dataset):
                 "command": cur["command"],
                 "route": cur["route"],
                 "target_speed": cur["target_speed"],
-                "waypoints": waypoints
+                "waypoints": waypoints,
+                "swerve": bool(swerve[i])
             })
 
             # Recovery-augmentation sample: a second, genuinely re-rendered camera at this
@@ -348,7 +353,8 @@ class WorldOnRailsDataset(Dataset):
                         "route": aug_route,
                         "target_speed": cur["target_speed"],
                         "waypoints": aug_waypoints,
-                        "is_recovery_augmented": True
+                        "is_recovery_augmented": True,
+                        "swerve": bool(swerve[i])
                     })
 
     def __len__(self) -> int:
