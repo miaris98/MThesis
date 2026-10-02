@@ -11,15 +11,15 @@ The status block below is the only snapshot in this file: replace it, don't appe
 
 ---
 
-## Status: 2026-10-01 18:30 Athens (S-112) - **no boxes running**
+## Status: 2026-10-02 14:30 Athens (S-113) - **no boxes running**
 
-| Item | Result (2026-10-01) |
+| Item | Result |
 |---|---|
-| Deferred Atari eval | **MATCH**: re-scoring an inline env10000 checkpoint in its own process gives the same 10 episode scores |
-| A28 median decoding (arm J e18) | **-22.9 DS** [-33.5, -12.6] vs mean decoding: the agent stops and deadlocks (blocked 15 vs 1). Mean stays |
-| Arm J seed 1 (A14 robustness) | vs arm E e15 on A9's obstacle routes: e18 +4.1 [-4.6, +12.4], **e20 +9.2 [+1.8, +17.3]** (arm J seed 0: +17.5 / +14.3 re-run) |
-| Arm K swerve 0.25 (A16) | natural swerve share 15.3% (0.1 was a no-op); vs J e18: e18 obstacle -9.6, e20 -0.7; vs E e15 obstacle e20 +13.6 [+6.0, +22.1]. No gain over J |
-| B35 30k screen | done: ResNet s4 (0.0), s5 (250.8), GTrXL s6, s7 (env30000 to score); resume state on HF: GTrXL s1, s2, s4, s5 (20k); not started: ResNet s6, s7 |
+| **A14, 4 seeds** | vs arm E e15 on A9's obstacle routes, **e20: seed 1 +9.2, seed 2 +9.0, seed 3 +11.0 (all CIs exclude 0)**; e18 unstable (+0.4 to +17.5; seed 0 +17.5). b2d20 within noise. Report e20, ~+10 DS |
+| **B35 done (8 seeds per trunk, env30000)** | GTrXL mean 100.2 / median 69.3, ResNet 95.4 / 59.7; paired +4.9 [-87.2, +98.5], 4/8 wins: **no trunk difference at 30k** |
+| Deferred Atari eval | MATCH with inline (S-112) |
+| A28 median decoding | -22.9 DS, deadlocks; mean stays (S-112) |
+| A16 arm K swerve 0.25 | no gain over arm J (S-112) |
 
 Results: `E:\MThesis_EXP\live_20261001_boxH_2xA40_carla` (CARLA), `live_20261001_boxG_4x3090_atari` (Atari, checkpoints under
 `hf_checkpoints/`), `live_20261001_testbox_3060_verify`. HF `mthesis-relay`: `armJ2K_20261001/`, `b35_20261001/`, `b35_20261001_resume/`.
@@ -87,7 +87,9 @@ plan (= `route_original`). When the data is on a box, check how often `changed_r
 frames and how far `route` and `route_original` diverge. The fix is A14. Also check the
 ego-speed shortcut (Li et al. CVPR 2024): does the target speed stay at 0 once the car has stopped?
 
-### A14. Obstacle data + the unshifted route (`route_original`) - **Works, smaller than seed 0 showed: vs E e15 on obstacle routes seed 0 +17.5, seed 1 +4.1 (e18) / +9.2 (e20); next a third seed** (S-096, S-097, S-107, S-109, S-111, S-112)
+### A14. Obstacle data + the unshifted route (`route_original`) - **Done, 4 seeds: at e20 every seed beats E e15 on obstacle routes by +9 to +11 DS** (S-096, S-097, S-107, S-109, S-111, S-112, S-113)
+2026-10-02 (S-113): seeds 2 and 3 on box I. vs E e15, obstacle: s2 e18 +8.6, e20 +9.0 [+0.8, +17.7]; s3 e18 +0.4, e20 +11.0
+[+3.3, +19.4]. With s1 e20 +9.2 [+1.8, +17.3]: e20 is stable at ~+10 DS, e18 is not. b2d20 unchanged within noise.
 2026-10-01 (S-112): arm J seed 1 on box H. Paired vs arm J e18 re-run on the same box: e18 obstacle -11.3 [-21.6, -1.7], e20 -5.1
 [-12.2, +1.6]. Paired vs arm E e15 (A9 records): e18 +4.1 [-4.6, +12.4], e20 +9.2 [+1.8, +17.3]; b2d20 within noise. Box effect
 (arm J e18 on H vs on P2) only -3.7 on obstacle routes. Report the gain as seed- and epoch-dependent; a third seed decides the size.
@@ -563,7 +565,10 @@ history), C30 (waypoint horizon), C37 (braking-margin loss, see A11).
 
 No run of our port has gone past 10k env steps; the Atari-100k benchmark itself (B4) is not started.
 
-### B35. Trunk screen at 30k env steps, 8 seeds per trunk - **Running across boxes: 4 of 10 new runs at 30k** (S-111 plan B, S-112)
+### B35. Trunk screen at 30k env steps, 8 seeds per trunk - **Done: no trunk difference at 30k** (S-111 plan B, S-112, S-113)
+2026-10-02 (S-113): all 16 runs scored at env30000 (upd28004). GTrXL s0-s7 162.8, 30.7, 0.0, 319.9, 85.6, 53.0, 46.0, 103.8;
+ResNet s0-s7 43.0, 172.9, 23.6, 74.4, 0.0, 250.8, 45.0, 153.1. Paired GTrXL - ResNet +4.9 [-87.2, +98.5], 4/8. Seed spread
+(0-320 at one 10-episode eval) dominates; a trunk claim on Breakout needs more episodes per eval (B2) or more games (B6).
 2026-10-01 (S-112, box G): metric = the env30000 checkpoint at upd28004 (what the inline runs scored). Done: ResNet s4 0.0,
 s5 250.8; GTrXL s6, s7 reached 30k, checkpoints on HF `b35_20261001/` (score with `eval_ez_checkpoints.py`). Resume from HF
 `b35_20261001_resume/` (checkpoint_latest + replay_latest): GTrXL s1, s2, s4, s5 at 20k. Not started: ResNet s6, s7.
