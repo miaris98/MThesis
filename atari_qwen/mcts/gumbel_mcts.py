@@ -220,8 +220,12 @@ class GraphedSearch:
     tree depth bound (see `search(depth_bound=...)`) and replayed with one launch. Results are bit-identical to the
     eager search; a tree deeper than the bound (counted in `fallbacks`) is re-searched eagerly with the same noise."""
 
-    def __init__(self, mcts: "GumbelMCTS", model, depth_bound: int = 6):
-        self.mcts, self.model, self.depth = mcts, model, depth_bound
+    #: deepest tree seen on real Breakout states (1,800 trees each, S-116): 16 sims -> 6, 32 -> 12, 64 -> 17
+    DEPTHS = {16: 6, 32: 14, 64: 20}
+
+    def __init__(self, mcts: "GumbelMCTS", model, depth_bound: int = None):
+        self.mcts, self.model = mcts, model
+        self.depth = depth_bound or self.DEPTHS.get(mcts.S, min(mcts.S, int(0.3 * mcts.S) + 3))
         self.entries, self.fallbacks, self.calls = {}, 0, 0
 
     def _capture(self, states, values, logits):

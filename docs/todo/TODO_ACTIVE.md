@@ -596,7 +596,7 @@ uniform replay, checkpoint and eval every 10k so the curve can be set against EZ
 it a lost box restarts a 14 h run from zero (S-064, `tried_and_ruled_out.md`); check its size against
 the box's bandwidth price first. Run alongside B3, not after it.
 
-### B3. Diff our prioritized replay against EZ-V2's - **Code matched (S-104); screen running** (box Q, S-115)
+### B3. Diff our prioritized replay against EZ-V2's - **Screen done (S-116): alpha = beta = 1 on the fixed code gives 16.2 / 12.8 vs uniform 15.0 / 15.3 - no gain, no break (2 seeds, 10k)**
 Priorities alpha = beta = 1 miscalibrate our reward head (S-067); uniform fixes it. Compare priority
 computation, beta annealing and where importance weights are applied (value vs reward loss).
 Uniform stays the default until this is done. It also decides how to read B4: at 100k, uniform may
@@ -645,12 +645,16 @@ from the backward view plus periodic whole-buffer reanalyze, for less search tim
 score. V-MCTS (2022): adaptive simulation budget. Seeds are the bottleneck for every Atari claim (B1), so
 wall-clock is sample size.
 
-### B2. An evaluation that can carry the claim - **Running** (box Q overnight, S-115: 30 episodes, no sticky, 16 sims, 16 B35 checkpoints)
+### B2. An evaluation that can carry the claim - **Done for the deterministic protocol (S-116): GTrXL 105.9 vs ResNet 98.6, +7.2 [-79, +98]; sticky-action column still to do**
 Both harnesses repeat episodes: ours (10 episodes, deterministic search, 1-30 no-op starts, e.g.
 [57, 57, 57, 33, 57, ...]) and EZ-V2's own (seed 0's 30 episodes gave only 3 distinct scores: 5, 6,
 13; S-086). Re-evaluate every final checkpoint of both (our 12 ResNet/GTrXL 10k finals, EZ-V2 seeds
 0-4) with 30+ episodes and sticky actions (p = 0.25) in **one** harness, so the comparison with
 EZ-V2 is like for like.
+**Result 2026-10-03 (S-116, 16 B35 checkpoints, 30 episodes, no sticky, 16 sims):** GTrXL 105.9 / ResNet 98.6, +7.2 [-78.7, +97.7],
+permutation p 0.89; tunnel rate 19% vs 15%. **The 30 episodes are ~4 independent games per checkpoint** (4 distinct scores): n = seeds.
+Sticky actions (p 0.25) give 21-27 distinct scores and ~1/3 of the deterministic score. To do: the sticky column for all 16
+(`eval_ez_checkpoints.py --sticky 0.25 --graph`, 5 of 16 done), now cheap with B23's graphed search.
 **Protocol note (literature note 9.4):** the Atari-100k protocol (SPR, EfficientZero, BBF) evaluates **without**
 sticky actions. Sticky p = 0.25 is fine for the one-harness comparison and as a robustness check, but comparisons
 with EZ-V2's published 400.1 need the no-sticky protocol (more episodes, distinct no-op starts). Breakout scores turn
@@ -673,7 +677,17 @@ separated. At GTrXL's seed spread, ~57 seeds per trunk would be needed for 80% p
 so more 10k seeds are not the way to the claim; B4 (100k) and B5 are. Seeds 6-7 were lost with box T
 (S-085) and are not rerun.
 
-### B5. Why does GTrXL beat ResNet? - **Later** (after B4)
+### B36. Make the GTrXL mixer actually train (weight-decay exemption) - **Next** (S-116; the highest-value Atari item)
+**Finding (2026-10-03):** all mixer weights shrink by x0.13 per 10k updates under SGD lr 0.2, wd 1e-4, momentum 0.9 (|Wq| 6.5 -> 0.026
+at 30k, 0 at 40k, identical in all 8 seeds; attention uniform, gates at 0.5, only `out.bias` alive). B1/B35/B4/B2 therefore compared
+ResNet with ResNet. **Test:** `train_ez_offpolicy.py --mixer-weight-decay 0` (flag exists), 30k screen, 8 seeds, vs the 8 ResNet seeds of B35
+(and vs the dead-mixer GTrXL, already on E:); check |Wq| grows and attention entropy < 1 before looking at scores. If the mixer still
+does not train with wd 0 (zero-init `out` starves it of gradient), next: non-zero `out` init or AdamW for the mixer (lr ~1e-3), QK-norm
+(B18). Everything transformer-specific (B5, B18-B20, B26, B27, B29) needs this first. A 5000-step control on box Q (S-116) shows the
+mixer stops decaying with wd 0 (73.34 -> 73.40) and the output projection grows (0 -> 1.35 / 2.20), but q/k/v/FFN are still at their
+init values at 5k (closed gate, zero-init output): the 30k screen has to show whether they train.
+
+### B5. Why does GTrXL beat ResNet? - **Later** (after B4; after B36: the current GTrXL has a dead mixer)
 Parameter-count-matched ResNet control, and a GTrXL without gating, at the budget where B4 shows a
 real gap. Decides whether the thesis can attribute the gain to the transformer trunk.
 Literature (2025): "Don't flatten, tokenize!" shows SoftMoE's gain comes from **tokenizing the encoder output**
@@ -733,7 +747,7 @@ transition, so it is extra data for free under the 100k budget.
     planes.
 - **Only for games with a symmetry** (B6): Pong has a vertical flip with UP/DOWN swapped; many games have none.
 
-### B15. Plasticity diagnostics on the saved checkpoints - **Next** (no box needed; before B8/B13)
+### B15. Plasticity diagnostics on the saved checkpoints - **Done (S-116): no rank collapse, dormancy plateaus by 50k - B8/B13's premise not supported at 100k**
 Before paying for resets (B8) or normalisation fixes (B13), measure whether our runs lose plasticity at all. For
 each saved checkpoint of GTrXL s0 and ResNet s0 (best, 40k, 50k/60k on E:), run a few replay batches through
 the model and record:
@@ -745,7 +759,7 @@ Rising dormancy or falling rank from 20k to 60k, alongside a flat score, would j
 point elsewhere (search, targets). Log the same metrics in `train_ez_offpolicy.py` at every eval from now on
 (cheap: one batch).
 
-### B18. GTrXL seed variance: attention entropy, then QK-norm - **Next** (step 1 needs no box, with B15)
+### B18. GTrXL seed variance: attention entropy, then QK-norm - **Step 1 done (S-116): entropy is maximal (uniform) because the mixer weights decayed to 0 - see B36; QK-norm is moot until the mixer trains**
 GTrXL's 10k seed SD is 11.3 vs ResNet's 3.5 (B1: 38.6 ... 8.8; s1 scored 0.0 at upd 8004). At that spread,
 ~57 seeds per trunk are needed for the claim. Matching ResNet's spread would cut that roughly tenfold.
 Zhai et al. (ICML 2023): transformer training instability coincides with **attention-entropy collapse**.
@@ -782,7 +796,7 @@ The port trains on sign-clipped rewards (`clip_reward=True`, EZ-V2's recipe) and
 - **Evidence is thin:** DQN-family agents find the tunnel under clipping anyway. Either result is reportable, since
   the EZ line has never ablated it.
 
-### B24. Test-time search scaling on saved checkpoints - **Running** (64 sims on box P overnight, S-115; eval-only; no training)
+### B24. Test-time search scaling on saved checkpoints - **Running** (64 sims, box P, 6 of 16 done; restart the rest with `--graph`) (S-115/S-116)
 Training and evaluation both use 16 simulations (ours and EZ-V2's). Atari-100k limits environment steps, not
 compute, so search depth at test time is a free, reportable knob.
 - **Run:** evaluate the saved checkpoints (the 12 GTrXL/ResNet 10k finals, and the B4 s0 30k-60k states) at
@@ -806,7 +820,7 @@ imagined states (S-058: phantom reward at depth 1, value inflation), and GTrXL's
 
 The evidence is continuous control, not Atari.
 
-### B23. Vectorise: a sync-free, graph-captured search, then several seeds per process - **Next** (engineering)
+### B23. Vectorise: a sync-free, graph-captured search, then several seeds per process - **Step 1 done for evaluation (S-116: bit-identical, 5.4-8.8x at 16-64 sims); training/reanalyze and step 2 next**
 Seeds are the binding constraint for every Atari claim (B1: ~57 per trunk at GTrXL's spread).
 - **Step 1, the search.** `gumbel_mcts.py` runs `bool(active.any())`, a GPU-to-host sync, inside the selection loop,
   itself inside the 16-simulation loop. It also issues many small kernels, on the reanalyze path that is 71% of
@@ -853,7 +867,7 @@ MCTS latent world model, used by the search.
    and value invariance). It sets the weight of an optional flip-consistency loss and is itself a per-game result.
 4. **Use it in search (the novel twist):** at the MCTS root, also evaluate T(s), map its policy back through sigma, and average,
    weighted by the detected confidence.
-**Step 0 (no training, run first, with B24):** step 4 at test time only on the saved s0 checkpoints: flip-averaging on vs off.
+**Step 0 (no training, run first, with B24):** step 4 at test time only on the saved s0 checkpoints: flip-averaging on vs off. **Done on 4 B35 checkpoints (S-116, `--flip-avg`): -22, -73, +73, -25 points (mean -12): no consistent gain from mirror-averaging the root.**
 Gains on Breakout and losses on an asymmetric game would show the symmetry is exploitable and must be detected, not assumed.
 **Games:** a clear mirror (Breakout), vertical + UP/DOWN (Pong), partial/maze (MsPacman or Boxing), a directional negative
 control (e.g. RoadRunner). The detector, not these guesses, decides which is which. 30k screen, 3 seeds, then 100k.
