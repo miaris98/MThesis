@@ -11,37 +11,51 @@ The status block below is the only snapshot in this file: replace it, don't appe
 
 ---
 
-## Status: 2026-10-03 15:30 Athens (S-115) - **P and Q running unattended overnight (Atari evals + B3)**
+## Status: 2026-10-03 19:10 Athens (S-115, S-116) - **no boxes running; everything verified on E: and HF**
 
 | Item | Result |
 |---|---|
-| **A14 with repeat runs** | arm J e20 vs E e15, 46 obstacle-type routes, E 3 runs + J 2 runs per route: s0 +7.8 [+0.7, +14.9], s1 +7.0, s2 +6.2, s3 +7.6; **4-seed per-route mean +7.2 [+0.7, +13.7]** - CI excludes 0. All 60 routes +4.5 [-1.0, +10.3]; non-obstacle -4.1 (n.s.). Overtaking success J 15.9-18.3% vs E 5.7% |
-| **A9 all 5 abilities** | Traffic_Signs from the .xodr maps, no server (`b2d_junction_fractions.py`): **E e15 mean 37.3 vs WoR 28.0** |
-| B2 / B24 (Atari, overnight) | 30 episodes at 16 sims (box Q) / 64 sims (box P) on the 16 B35 checkpoints; first 10 episodes reproduce the stored scores exactly. Early: 64 sims lower on 3 of 4 checkpoints |
-| B3 screen (overnight) | prioritized replay alpha = beta = 1 on the S-104 code, ResNet 10k, 2 seeds (box Q) |
-| B26 step 0 | `--flip-avg` in the evaluator (root averaged with its mirror image); smoke-tested on Q |
+| **A14 with repeat runs (CARLA)** | arm J e20 vs E e15 on the 46 obstacle-type routes, E 3 runs + J 2 runs per route: s0 +7.8 [+0.7, +14.9], s1 +7.0, s2 +6.2, s3 +7.6; **4-seed per-route mean +7.2 [+0.7, +13.7], CI excludes 0**. All 60 routes +4.5 [-1.0, +10.3]; non-obstacle (14) -4.1 [-14.0, +5.1] n.s. Overtaking success J 15.9-18.3% vs E 5.7% (+10 to +13 pts, CI excludes 0 for 3 of 4 seeds) |
+| **A9 all 5 abilities** | Traffic_Signs computed offline from the .xodr maps (`b2d_junction_fractions.py`, 15 s, no server): **E e15 mean 37.3 vs original WoR 28.0** |
+| **B2 (Atari, 16 B35 checkpoints, 30 ep, no sticky, 16 sims)** | GTrXL 105.9 vs ResNet 98.6, +7.2 [-79, +98], p 0.89: no trunk difference. **30 episodes = ~4 independent games per checkpoint (n = seeds)**; sticky 0.25 gives 21-27 distinct scores at ~1/3 of the score (5 of 16 done) |
+| **GTrXL mixer is dead (B18 step 1)** | all mixer weights decay x0.13 per 10k updates under SGD wd 1e-4 (|Wq| 6.5 -> 0.026 at 30k, identical in 8 seeds; attention uniform; gates 0.5): **B1/B35/B4/B2 compared ResNet with ResNet**. With `--mixer-weight-decay 0` the weights stop decaying and the output projection grows, but q/k/v/FFN are still at init at 5k -> **B36** |
+| B23 graphed search | bit-identical to eager on real states (ResNet + GTrXL), 5.4-8.8x faster at 16/32/64 sims; evaluation only so far |
+| B15 / B24 / B3 / B26 step 0 | B15: no rank collapse, dormancy plateaus by 50k. B24: 6 of 16 at 64 sims, deeper search lowered the score on 4 of 6 (10 slow zero-scorers unfinished). B3: prioritized replay 16.2 / 12.8 vs uniform 15.0 / 15.3, no gain. B26 step 0: mirror-averaging -12 mean (-22, -73, +73, -25) |
 
-Results: `E:\MThesis_EXP\live_20261003_box{O,P}_*_carla`, `live_20261003_boxQ_3090_atari`, `live_20261003_boxP_4x2080Ti_atari`.
-HF `mthesis-relay`: `carla_rep_20261003/`, `b35_100k_env30000/`, `atari_20261003/boxQ|boxP` (finishers push hourly + at the end;
-"FINISHED" in `/workspace/finisher.log`). **Next session first:** verify both finishers' final pushes on HF and E:, then destroy P and Q.
-Older status: A14 at 4 seeds, one run each: +7 to +9 per seed, CIs touching 0 (S-113/S-114); B35 no trunk difference at 30k.
+Results: `E:\MThesis_EXP\live_20261003_box{O_2xTitanRTX_carla, P_4x2080Ti_carla, P_4x2080Ti_atari, Q_3090_atari}`; HF `mthesis-relay`:
+`carla_rep_20261003/box{O,P}`, `b35_100k_env30000/`, `atari_20261003/box{P,Q}{,_eod,_eod2}`, `atari_20261003/b3_checkpoints`.
+Ops tools for the next box session: `scripts/ops/` (README there). Boxes O, N (earlier), P, Q destroyed.
+Older status: A14 at 4 seeds, one run each (+7 to +9, CIs touching 0, S-113/S-114); B35 no trunk difference at 30k (now explained).
 
-**Order of work from here:**
-1. *No box needed:* A9 merge (paired E vs WoR, official 220 with crashes = 0, seen/unseen towns, excluded routes)
-   -> decides whether E ties WoR at scale; add Bench2Drive's ability scores (A9). A30 step 1 is done (S-100): plan
-   A9's leftover session with repeats on the noisy routes (Neyman). A28's offline mode check. B15 plasticity diagnostic on the
-   saved GTrXL/ResNet checkpoints, with B18's attention entropy on the same pass. HF stage 2.
-2. *Next box session, CARLA (the thesis claim):* finish A9's leftover routes (1 box, a few hours), then A14 arm J
-   (Town12/13 obstacle archives + `route_original`; cheapest first: fine-tune E e15 ~5 epochs), evaluated on b2d20 +
-   A9's 50 obstacle routes, with a matched WoR-head arm; then A16 (arm K) and A15.
-3. *Next box session, Atari:* resume GTrXL/ResNet s0 to 100k from the E: state (Ampere, bf16); seeds 1-2 fresh on
-   Ampere. In spare headroom: B3's two replay switches (10k screen, 2 seeds). Then B9 (HL-Gauss, cheap), then B16
-   (trunk x replay ratio, with B15's metrics logged).
-   CARLA after arm J: A24 (attention mask, thesis claim), A25 (IDM braking-gap overlay, cheapest) and A22
-   (control head) are one arm each. A26 step 1 (tau-dot before each collision) is eval-only and goes with A11.
-   A28 (median / quantile speed decoding) needs no training: run it on the first eval box, on E e15.
-Hardware: CARLA is CPU-bound (~5 cores/lane): pick a high CPU quota. Atari needs native bf16 (Ampere or newer).
-Avoid Turing (2080 Ti: no bf16, and Vulkan hung on driver 595, S-099).
+**Order of work for 2026-10-04** (times Athens; two box sessions in parallel, one CARLA, one Atari; you log off ~17:00)
+0. *Me, no box, first ~1.5 h:* B23 step 1b - wire `GraphedSearch` into the trainer's acting search and the reanalyze targets
+   (`--graph-search`, off by default; a trained run is a prefix of the same recipe, so numerics must match: unit-test on CPU, check
+   bit-equality on a box in item 2a). Write `scripts/atari/run_b36.sh`. Re-read B36 below.
+1. *CARLA box session (the thesis claim), 2 boxes like O+P (Turing works for eval, ~$0.9/h for the pair; 3-4 lanes per 22-24 GB GPU,
+   ~6.3 GB per lane; `scripts/ops/provision_eval.sh`, ckpts on HF `e15_20260930`, `armJ_20260929`, `armJ2K_20261001`,
+   `armJ23_20261002`):* (a) **original WoR x2 repeats on the same 60 routes** (`WORL:<name>:<routes>` jobs, labels `a9_WOR_r*`):
+   E has 3 runs per route and arm J 2, WoR only 1, so J-vs-WoR on obstacle routes is the noisiest comparison of the thesis claim;
+   (b) **arm J e20 seeds 0-1 on the other 160 routes of the 220** (E and WoR already have them from A9) -> official 220-route DS of
+   J vs E 63.0 vs WoR 48.8 and all 5 abilities; (c) seeds 2-3 if time. ETA 3-6 h: the 4 min per run measured on the 60 short
+   routes is *not* the rate of the other 160 (longer routes) - quote the measured rate after the first hour. Then `a9_merge.py` /
+   `a9_abilities.py --junctions E:/MThesis_EXP/b2d_junctions.json`; A30's fixed-route-set test of "beats WoR" on the result.
+2. *Atari box session, 1 box with 4x 24 GB Ampere/Ada GPUs (3090/4090/A5000), >= 64 threads, 150 GB disk, **probe HF first**:*
+   (a) 30 min: bit-equality of the graphed trainer vs eager on 200 updates; (b) **B36 pilot: GTrXL 30k with `--mixer-weight-decay 0`,
+   seeds 0-3** (compare to ResNet s0-3 and the dead-mixer GTrXL s0-3 on E:); at 10k and 20k run `b15_b18_diagnostics.py` on the
+   checkpoints and read |Wq| / attention entropy / gate opening **before** trusting scores. Decision rule: blocks still at init at
+   10k (|Wq| ~6.5, entropy 1.0, gate bias ~2.0) -> stop, switch to a non-zero `out` init or AdamW for the mixer, restart; trained ->
+   run seeds 4-7 and the 8-seed comparison; (c) spare GPU headroom: B24's 10 remaining checkpoints at 64 sims with `--graph`
+   (`scripts/ops/run_b24_P.sh`), and B2's sticky-action column for all 16 (`--sticky 0.25 --graph`).
+3. *No box, in parallel:* A30 (fixed-route-set claim) and A3 (failure classification) on the new CARLA records; B28 probes (ResNet
+   now, GTrXL after B36); write-up of A9/A14/B2/B36 (the dead-mixer finding changes the Atari thesis chapter).
+4. *Decisions for you:* (i) ~4-6 h of two cheap CARLA boxes for item 1; (ii) B36 pilot with 4 seeds (decisive readout is the
+   diagnostics, not the scores: n = 4 cannot separate SD 100) vs 8 straight away; (iii) whether to also train the next CARLA arm
+   (A25 IDM overlay or A32 sinusoidal embeddings: one arm each, needs the 150-500 GB dataset box) - my advice: not tomorrow, first
+   lock arm J's claim with item 1.
+Hardware: CARLA is CPU-bound (~5 cores/lane): high CPU quota. Atari training needs native bf16 (Ampere or newer); Turing (2080 Ti,
+Titan RTX) ran CARLA evals fine on drivers 570/580 (S-115) but not Atari training. First command on a new box: HF reachability
+(`getent ahosts huggingface.co`, S-115 box N). HF token only in `/dev/shm`, never edit authorized_keys, never `pkill -f` and relaunch in
+one ssh command.
 Result table of 2026-09-27 (all boxes destroyed then, S-092):
 
 **Goal check (S-089, S-090):** original WoR **67.8 / 66.0** (2 runs, mean 66.9) on the 19 b2d20 routes.
@@ -88,6 +102,7 @@ frames and how far `route` and `route_original` diverge. The fix is A14. Also ch
 ego-speed shortcut (Li et al. CVPR 2024): does the target speed stay at 0 once the car has stopped?
 
 ### A14. Obstacle data + the unshifted route (`route_original`) - **Done: +7.2 DS [+0.7, +13.7] over E e15 on obstacle routes (4 seeds, repeat runs), overtaking success ~3x** (S-096, S-097, S-107, S-109, S-111, S-112, S-113, S-115)
+2026-10-03 (S-115, final): repeat runs on boxes O + P (60 routes: b2d20 + A9's obstacle list minus the 4 crash routes; E e15 3 runs, each J seed 2 runs). Obstacle-type routes (46), J e20 minus E e15: s0 +7.8 [+0.7, +14.9], s1 +7.0 [+0.5, +14.0], s2 +6.2 [-1.0, +13.6], s3 +7.6 [-0.1, +15.8]; **pooled +7.2 [+0.7, +13.7]**. All 60 routes +4.5 [-1.0, +10.3]; non-obstacle (14) -4.1 [-14.0, +5.1] (n.s., same sign every seed - watch it). Overtaking success (official ability rule) J 15.9-18.3% vs E 5.7%. Still to do: original WoR repeats on the same routes and the 220-route run of arm J (order of work, item 1).
 2026-10-03 correction: on all 46 obstacle-type routes (`a9_merge.py --pool`, route XML classification) e20 vs E e15: s0 +8.8 [-0.0, +17.7],
 s1 +6.8, s2 +7.5, s3 +7.7; per-route mean of the 4 seeds +6.0 [-1.1, +13.4]. vs the original WoR: E -3.6, arm J +3 to +6, K +7.6
 [+0.1, +15.7]. The numbers below (S-113) used the 41-route subset without b2d20's obstacle routes and overstate the effect.
