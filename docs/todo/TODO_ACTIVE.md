@@ -15,7 +15,7 @@ The status block below is the only snapshot in this file: replace it, don't appe
 
 | Item | Result |
 |---|---|
-| **A14, 4 seeds** | vs arm E e15 on A9's obstacle routes, **e20: seed 1 +9.2, seed 2 +9.0, seed 3 +11.0 (all CIs exclude 0)**; e18 unstable (+0.4 to +17.5; seed 0 +17.5). b2d20 within noise. Report e20, ~+10 DS |
+| **A14, 4 seeds** | vs arm E e15 on all 46 obstacle-type routes (`a9_merge.py`), **e20: s0 +8.8, s1 +6.8, s2 +7.5, s3 +7.7; per-route seed mean +6.0 [-1.1, +13.4]** - consistent direction, each CI touches 0 (corrected 2026-10-03; the earlier "CIs exclude 0" used a 41-route subset). vs WoR on obstacle routes: E -3.6, arm J seeds +3 to +6 (n.s.). e18 unstable |
 | **B35 done (8 seeds per trunk, env30000)** | GTrXL mean 100.2 / median 69.3, ResNet 95.4 / 59.7; paired +4.9 [-87.2, +98.5], 4/8 wins: **no trunk difference at 30k** |
 | Deferred Atari eval | MATCH with inline (S-112) |
 | A28 median decoding | -22.9 DS, deadlocks; mean stays (S-112) |
@@ -87,7 +87,10 @@ plan (= `route_original`). When the data is on a box, check how often `changed_r
 frames and how far `route` and `route_original` diverge. The fix is A14. Also check the
 ego-speed shortcut (Li et al. CVPR 2024): does the target speed stay at 0 once the car has stopped?
 
-### A14. Obstacle data + the unshifted route (`route_original`) - **Done, 4 seeds: at e20 every seed beats E e15 on obstacle routes by +9 to +11 DS** (S-096, S-097, S-107, S-109, S-111, S-112, S-113)
+### A14. Obstacle data + the unshifted route (`route_original`) - **Done, 4 seeds: at e20 every seed is +7 to +9 DS over E e15 on obstacle routes, each CI touching 0** (S-096, S-097, S-107, S-109, S-111, S-112, S-113)
+2026-10-03 correction: on all 46 obstacle-type routes (`a9_merge.py --pool`, route XML classification) e20 vs E e15: s0 +8.8 [-0.0, +17.7],
+s1 +6.8, s2 +7.5, s3 +7.7; per-route mean of the 4 seeds +6.0 [-1.1, +13.4]. vs the original WoR: E -3.6, arm J +3 to +6, K +7.6
+[+0.1, +15.7]. The numbers below (S-113) used the 41-route subset without b2d20's obstacle routes and overstate the effect.
 2026-10-02 (S-113): seeds 2 and 3 on box I. vs E e15, obstacle: s2 e18 +8.6, e20 +9.0 [+0.8, +17.7]; s3 e18 +0.4, e20 +11.0
 [+3.3, +19.4]. With s1 e20 +9.2 [+1.8, +17.3]: e20 is stable at ~+10 DS, e18 is not. b2d20 unchanged within noise.
 2026-10-01 (S-112): arm J seed 1 on box H. Paired vs arm J e18 re-run on the same box: e18 obstacle -11.3 [-21.6, -1.7], e20 -5.1
@@ -319,7 +322,9 @@ Every CARLA eval: copy `frozen_backbone.pth` with the checkpoint, grep for "Merg
 backbone" (S-072), check per-route status strings, not only the record count (S-087), and use
 `scripts/eval/eval_watchdog.sh` (tree-kill) plus port clearing before each launch (S-091).
 
-### A9. Full Bench2Drive evaluation (220 routes) - **Running: last ~50 runs on P1/P2 at Low, merge after** (S-093, S-106, S-107)
+### A9. Full Bench2Drive evaluation (220 routes) - **Merged: E e15 vs WoR +14.0 [+8.9, +19.2] paired (200 routes), official 63.0 vs 48.8; ability scores still to do** (S-093, S-106, S-107, S-108, S-113)
+Re-run any time: `py scripts/analysis/a9_merge.py E:/MThesis_EXP/live_2026092[89]_* E:/MThesis_EXP/live_202610*_* --reference WOR`
+(arm J seeds: labels J18/J20 + J{18,20}s{1,2,3}, `--pool J20pool=J20,J20s1,J20s2,J20s3`).
 Per-route differences vs WoR have an SD of 21 (E) to 34 (A SWA) DS, so a +/-3 DS CI needs ~190-500
 routes (S-090). The 220-route set is what the "beats WoR" claim needs, for the champion and the WoR
 original agent, not only as a final check. Plan it now: route file, the AdditionalMaps package for

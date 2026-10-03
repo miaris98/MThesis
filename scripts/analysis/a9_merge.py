@@ -34,13 +34,19 @@ INFRA = ("couldn't be set up", "Simulation crashed", "Agent crashed")
 OBSTACLE_TYPES = ("Accident", "Obstacle", "HazardAtSideLane", "InvadingTurn", "OpensDoor")
 TRAIN_TOWNS = {"Town01", "Town02", "Town03", "Town04", "Town05", "Town10HD"}
 #: result-file label -> arm; first match wins
-ARMS = [(r"^a9_E15_", "E15"), (r"^a9_WOR_", "WOR"), (r"^j20_", "J20"), (r"^j18_", "J18")]
+ARMS = [(r"^a9_E15_", "E15"), (r"^a9_WOR_", "WOR"), (r"^j20_", "J20"), (r"^j18_", "J18"),
+        # S-112/S-113: arm J seeds 1-3 (j<s>s<epoch>), arm J e18 re-run on the A40 box (j18H), arm K, A28 median decode
+        (r"^j18H_", "J18H"), (r"^j([1-9])s(\d\d)_", None), (r"^k(\d\d)_", None), (r"^a28m18_", "J18med")]
 
 
 def arm_of(name: str):
     for pat, arm in ARMS:
-        if re.match(pat, name):
-            return arm
+        m = re.match(pat, name)
+        if m:
+            if arm is not None:
+                return arm
+            g = m.groups()  # j<seed>s<epoch> -> J20s2, k<epoch> -> K20
+            return f"J{g[1]}s{g[0]}" if len(g) == 2 else f"K{g[0]}"
     return None
 
 
@@ -55,6 +61,10 @@ def main() -> int:
     ap.add_argument("roots", nargs="+", help="directories (globs allowed) searched recursively for result JSONs")
     ap.add_argument("--reference", default="WOR")
     ap.add_argument("--json-out", default=None, help="also write the per-route table here")
+    ap.add_argument("--pool", action="append", default=[], metavar="NAME=ARM1,ARM2,..",
+                    help="add an arm whose per-route DS is the mean over these arms (several seeds of one recipe); "
+                         "only routes all of them drove (repeatable)")
+    ap.add_argument("--arms", default=None, help="comma list: only report these arms (default: all)")
     a = ap.parse_args()
 
     routes = {}
@@ -87,6 +97,16 @@ def main() -> int:
                     else:
                         drives[arm][rid].append(float(rec["scores"]["score_composed"]))
     ds = {arm: {r: statistics.fmean(v) for r, v in rr.items()} for arm, rr in drives.items()}
+    for spec in a.pool:
+        name, members = spec.split("=", 1)
+        members = [m for m in members.split(",") if m in ds]
+        if members:
+            common = set.intersection(*(set(ds[m]) for m in members))
+            ds[name] = {r: statistics.fmean(ds[m][r] for m in members) for r in common}
+            print(f"pool {name} = mean of {','.join(members)} on {len(common)} routes all of them drove")
+    if a.arms:
+        keep = set(a.arms.split(",")) | {a.reference}
+        ds = {k: v for k, v in ds.items() if k in keep}
 
     print(f"{'arm':5s} {'driven':>6s} {'official DS (220, missing=0)':>29s} {'mean DS on driven':>18s} {'success %':>9s}")
     for arm in sorted(ds):
