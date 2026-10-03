@@ -8,6 +8,7 @@ Tools used on rented Vast.ai boxes; every one was run for real that day. HF toke
 | `sync_forever3.sh PORT HOST LOCALDIR "PATHS" [SEC]` | home (bash) | mtime-aware box -> E: backup loop; run as a background task and **restart before 2 h** (the task dies silently); check `.sync_status.log` times |
 | `push_verify.py LOCAL_ROOT HF_SUBDIR` | box | upload a folder to the HF relay, then sha256-check every file against HF's LFS records (nested subdirs OK) |
 | `finisher.sh HF_SUBDIR "[p]attern" PATH...` | box | unattended: push results hourly while jobs matching the pattern run, once more when they end, "FINISHED" in `/workspace/finisher.log` |
+| `provision_atari_box.sh [restore]` | box | Atari box: **HF reachability check first**, deps, the B15 diagnostics state file (HF `diag/b15_states_512.npy`), optionally the 16 B35 checkpoints |
 | `provision_eval.sh` | box | eval-only CARLA box: CARLA + venv_carla + checkpoints from HF (sha-checked) + `PROVISION_DONE` marker |
 | `launch_lanes_nokill.sh BOX LANEFILE` | box (stdin) | start one `queue_A9c.sh` lane per `BOX PORT GPU JOBS...` line; stops stray evaluators first |
 | `followon.sh BOX CAP NGPU PORT0 ROUTE...` | box | single-route lanes started as GPU slots free up (CAP lanes per GPU) |

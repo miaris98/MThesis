@@ -218,13 +218,18 @@ class GraphedSearch:
     One 16-simulation search is ~7,400 tiny kernel launches and ~250 GPU-to-host syncs for ~17 ms of GPU work, so an
     evaluation process is bound by one CPU core, not by the GPU. The search is captured once per batch size with a fixed
     tree depth bound (see `search(depth_bound=...)`) and replayed with one launch. Results are bit-identical to the
-    eager search; a tree deeper than the bound (counted in `fallbacks`) is re-searched eagerly with the same noise."""
+    eager search; a tree deeper than the bound (counted in `fallbacks`) is re-searched eagerly with the same noise.
+
+    Training use (TODO B23 step 1b): the graph reads the model's parameters and BatchNorm buffers in place, so it follows
+    optimizer steps and `target.load_state_dict` without recapture. `amp_dtype` fixes the autocast of the captured search
+    (None = fp32) with `cache_enabled=False`: under autocast's weight-cast cache a cast made before capture would be reused
+    inside it, the graph would then read a stale bf16 copy and never see later weight updates."""
 
     #: deepest tree seen on real Breakout states (1,800 trees each, S-116): 16 sims -> 6, 32 -> 12, 64 -> 17
     DEPTHS = {16: 6, 32: 14, 64: 20}
 
-    def __init__(self, mcts: "GumbelMCTS", model, depth_bound: int = None):
-        self.mcts, self.model = mcts, model
+    def __init__(self, mcts: "GumbelMCTS", model, depth_bound: int = None, amp_dtype=None):
+        self.mcts, self.model, self.amp_dtype = mcts, model, amp_dtype
         self.depth = depth_bound or self.DEPTHS.get(mcts.S, min(mcts.S, int(0.3 * mcts.S) + 3))
         self.entries, self.fallbacks, self.calls = {}, 0, 0
 
@@ -232,14 +237,16 @@ class GraphedSearch:
         B, A = states.shape[0], self.mcts.A
         e = {"s": states.clone(), "v": values.clone().float(), "l": logits.clone().float(),
              "g": torch.zeros(B, A, device=states.device)}
+        amp = (torch.autocast(device_type="cuda", enabled=False) if self.amp_dtype is None
+               else torch.autocast(device_type="cuda", dtype=self.amp_dtype, cache_enabled=False))
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(stream):  # warm-up: cuDNN / cuBLAS handles and allocator pools before capture
+        with torch.cuda.stream(stream), amp:  # warm-up: cuDNN / cuBLAS handles and allocator pools before capture
             for _ in range(2):
                 self.mcts.search(self.model, e["s"], e["v"], e["l"], g=e["g"], depth_bound=self.depth)
         torch.cuda.current_stream().wait_stream(stream)
         e["graph"] = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(e["graph"]):
+        with torch.cuda.graph(e["graph"]), amp:
             e["out"] = self.mcts.search(self.model, e["s"], e["v"], e["l"], g=e["g"], depth_bound=self.depth)
         return e
 

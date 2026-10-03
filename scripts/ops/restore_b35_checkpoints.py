@@ -5,7 +5,7 @@ import hashlib, os, re, sys, time
 from huggingface_hub import HfApi, hf_hub_download
 
 api = HfApi(token=open("/dev/shm/hf_token").read().strip()); repo = api.whoami()["name"] + "/mthesis-relay"
-ROOT = "/workspace/MThesis_atari/results/100k_benchmark/S058_ezv2_match"
+ROOT = "/workspace/MThesis/results/100k_benchmark/S058_ezv2_match"
 WANT = ("checkpoint_env30000_upd28004.pt", "eval_env30000_upd28004.json")
 RUN = re.compile(r"(S058[hi]_(gtrxl|resnet)_(?:30k|100k)_s\d+_uniform)")
 

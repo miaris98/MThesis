@@ -38,8 +38,8 @@ from atari_qwen.models.ez_model import DiscreteSupport, EZV2Model  # noqa: E402
 TAU, DELTA = 0.025, 0.01
 
 
-def stacks_from_replay(path: str, n: int, seed: int = 0) -> torch.Tensor:
-    """n 4-frame stacks (12, 96, 96) in [0, 1], oldest frame first, from replay frames (T, env, 3, H, W)."""
+def stacks_from_replay(path: str, n: int, seed: int = 0) -> np.ndarray:
+    """n 4-frame stacks (n, 12, 96, 96) uint8, oldest frame first, from replay frames (T, env, 3, H, W)."""
     z = np.load(path, mmap_mode="r")
     frames, ep_start = z["frames"], z["ep_start"]
     T, E = frames.shape[:2]
@@ -50,7 +50,7 @@ def stacks_from_replay(path: str, n: int, seed: int = 0) -> torch.Tensor:
         if (ep_start[t - 3:t + 1, e] != ep_start[t, e]).any():  # a stack must not cross an episode start
             continue
         out.append(np.concatenate([frames[t - 3 + k, e] for k in range(4)], axis=0))
-    return torch.from_numpy(np.stack(out)).float().div_(255.0)
+    return np.stack(out)
 
 
 def load(ck_path: str):
@@ -165,14 +165,26 @@ def diagnose(ck_path: str, x: torch.Tensor) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("checkpoints", nargs="+")
-    ap.add_argument("--replay", required=True, help="replay_latest.npz the states are cut from")
+    ap.add_argument("checkpoints", nargs="*")
+    ap.add_argument("--replay", default=None, help="replay_latest.npz the states are cut from")
+    ap.add_argument("--states-file", default=None, help=".npy of uint8 stacks (n, 12, 96, 96) instead of --replay")
+    ap.add_argument("--save-states", default=None, help="write the sampled stacks here (to reuse the same inputs on a box)")
     ap.add_argument("--states", type=int, default=512)
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
     torch.manual_seed(0)
-    x = stacks_from_replay(a.replay, a.states)
+    if a.states_file:
+        stacks = np.load(a.states_file)
+    elif a.replay:
+        stacks = stacks_from_replay(a.replay, a.states)
+    else:
+        ap.error("give --replay or --states-file")
+    if a.save_states:
+        np.save(a.save_states, stacks)
+    x = torch.from_numpy(stacks).float().div_(255.0)
     rows = []
+    if not a.checkpoints:
+        return 0 if a.save_states else ap.error("no checkpoints given")
     for ck in a.checkpoints:
         r = diagnose(ck, x)
         rows.append(r)

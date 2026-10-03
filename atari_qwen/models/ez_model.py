@@ -115,7 +115,7 @@ class TokenMixer(nn.Module):
     Learned 2-D position embedding; GRU-gated residuals with a closed gate at init (bg_init=2 ->
     ~88% skip), so the mixer starts near identity on top of the conv state."""
     def __init__(self, channels: int, hw: int, dim: int = 128, depth: int = 2, heads: int = 4,
-                 bg_init: float = 2.0):
+                 bg_init: float = 2.0, out_init_std: float = 0.0):
         super().__init__()
         self.inp = nn.Linear(channels, dim)
         self.pos = nn.Parameter(torch.zeros(1, hw, dim))
@@ -123,7 +123,12 @@ class TokenMixer(nn.Module):
         self.blocks = nn.ModuleList([GTrXLBlock(dim=dim, num_heads=heads, ffn_dim=4 * dim, bg_init=bg_init)
                                      for _ in range(depth)])
         self.out = nn.Linear(dim, channels)
-        nn.init.zeros_(self.out.weight)
+        # 0 = exact identity at init (the original). With SGD and weight decay the blocks behind a zero output projection
+        # got no gradient and decayed to 0 (S-116); out_init_std > 0 lets gradient reach them from the first update (TODO B36).
+        if out_init_std > 0:
+            nn.init.normal_(self.out.weight, std=out_init_std)
+        else:
+            nn.init.zeros_(self.out.weight)
         nn.init.zeros_(self.out.bias)
 
     def forward(self, x):
@@ -161,7 +166,8 @@ class EZV2Model(nn.Module):
                  reduced_channels: int = 16, state_hw: int = 6, fc_layers=(32,),
                  lstm_hidden: int = 512, proj_hidden: int = 1024, proj_out: int = 1024,
                  head_hidden: int = 256, action_embed_dim: int = 16, support: Optional[DiscreteSupport] = None,
-                 trunk: str = "resnet", mixer_dim: int = 128, mixer_depth: int = 2, norm: str = "batch"):
+                 trunk: str = "resnet", mixer_dim: int = 128, mixer_depth: int = 2, norm: str = "batch",
+                 mixer_out_init_std: float = 0.0):
         super().__init__()
         assert trunk in ("resnet", "gtrxl")
         self.action_dim, self.C, self.hw, self.trunk = action_dim, num_channels, state_hw, trunk
@@ -201,8 +207,8 @@ class EZV2Model(nn.Module):
         # thesis variant: transformer token mixing in representation and dynamics
         if trunk == "gtrxl":
             hw2 = state_hw * state_hw
-            self.repr_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth)
-            self.dyn_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth)
+            self.repr_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth, out_init_std=mixer_out_init_std)
+            self.dyn_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth, out_init_std=mixer_out_init_std)
         self.lstm_hidden = lstm_hidden
         # norm: "batch" = EZ-V2; "heads" = LayerNorm in reward/value/policy heads; "all" = LayerNorm
         # everywhere except the SimSiam projection (its BatchNorm is what prevents collapse).

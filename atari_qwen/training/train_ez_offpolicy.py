@@ -271,8 +271,14 @@ def train(args):
     A = envs.single_action_space.n
     support = DiscreteSupport()
     model = EZV2Model(A, obs_channels=3 * 4, support=support, trunk=args.trunk, norm=args.norm,
-                      state_hw=int(np.ceil(args.frame_size / 16))).to(device)
+                      state_hw=int(np.ceil(args.frame_size / 16)),
+                      mixer_out_init_std=args.mixer_out_init_std).to(device)
     target = copy.deepcopy(model).eval()
+    # bf16 autocast only where the GPU has native bf16 (Ampere+). is_bf16_supported() also returns True for
+    # emulated bf16, which ran ~4.5x slower than fp16 on a 2080 Ti (S-099); there is no GradScaler for fp16,
+    # so pre-Ampere GPUs run in fp32 instead.
+    bf16_native = device.type == "cuda" and torch.cuda.is_bf16_supported(including_emulation=False)
+    amp = torch.bfloat16 if bf16_native else torch.float32
     for p in target.parameters():
         p.requires_grad_(False)
     if args.mixer_weight_decay is None:
@@ -283,6 +289,12 @@ def train(args):
         opt = torch.optim.SGD([{"params": rest, "weight_decay": args.weight_decay},
                                {"params": mix, "weight_decay": args.mixer_weight_decay}], lr=args.lr, momentum=0.9)
     mcts = GumbelMCTS(A, support, num_simulations=args.num_simulations, discount=gamma, lstm_horizon=H)
+    # TODO B23 step 1b: replay the acting search (B = num_envs) and the reanalyze search (B = batch x (K+1), on the target
+    # network, bf16 where native) from CUDA graphs; bit-identical to eager (see GraphedSearch), far fewer kernel launches
+    mk = lambda: GumbelMCTS(A, support, num_simulations=args.num_simulations, discount=gamma, lstm_horizon=H)
+    graph_on = args.graph_search and device.type == "cuda"
+    act_graph = GraphedSearch(mk(), model) if graph_on else None
+    re_graph = GraphedSearch(mk(), target, amp_dtype=amp if bf16_native else None) if graph_on else None
     print(f"--> {run_name}: trunk={args.trunk} params={sum(p.numel() for p in model.parameters()) / 1e6:.2f}M "
           f"envs={E} sims={args.num_simulations} batch={args.batch_size} gamma/step={gamma:.4f}", flush=True)
 
@@ -318,12 +330,7 @@ def train(args):
             replay.save(ckpt_dir / "replay_latest.npz")
 
     obs, _ = envs.reset(seed=args.seed)
-    # bf16 autocast only where the GPU has native bf16 (Ampere+). is_bf16_supported() also returns True for
-    # emulated bf16, which ran ~4.5x slower than fp16 on a 2080 Ti (S-099); there is no GradScaler for fp16,
-    # so pre-Ampere GPUs run in fp32 instead.
-    bf16_native = device.type == "cuda" and torch.cuda.is_bf16_supported(including_emulation=False)
-    amp = torch.bfloat16 if bf16_native else torch.float32
-    print(f"autocast dtype: {amp} (native bf16: {bf16_native})", flush=True)
+    print(f"autocast dtype: {amp} (native bf16: {bf16_native}); graph search: {graph_on}", flush=True)
     ep_ret = np.zeros(E); recent_returns = []
     t0 = time.time(); last_log = env_steps; next_eval = (env_steps // args.eval_interval + 1) * args.eval_interval
     tm = {"collect": 0.0, "targets": 0.0, "update": 0.0}
@@ -336,7 +343,7 @@ def train(args):
         if env_steps < args.total_steps:
             tc = time.perf_counter()
             model.eval()
-            rv, rp_, ra = run_search(model, mcts, to_input(obs, device), add_noise=True)
+            rv, rp_, ra = run_search(model, mcts, to_input(obs, device), add_noise=True, graphed=act_graph)
             nobs, r, term, trunc, _ = envs.step(ra)
             d = np.logical_or(term, trunc)
             replay.add(obs[:, -3:], ra, r, d, rp_, rv)
@@ -378,7 +385,9 @@ def train(args):
                 v_boot = support.vector_to_scalar(vb).float().cpu().numpy().reshape(B, K + 1)
                 x_root = root_stacks
                 s_re, v_re, p_re = target.initial_inference(x_root)
-                srch_v, srch_pi, _ = mcts.search(target, s_re, support.vector_to_scalar(v_re), p_re, add_noise=True)
+                v_root = support.vector_to_scalar(v_re)
+                srch_v, srch_pi, _ = (re_graph(s_re, v_root, p_re, True) if re_graph is not None
+                                      else mcts.search(target, s_re, v_root, p_re, add_noise=True))
             srch_v = srch_v.reshape(B, K + 1); srch_pi = srch_pi.reshape(B, K + 1, A)
             disc = gamma ** np.arange(TD)
             val_t = np.zeros((B, K + 1), np.float32)
@@ -489,7 +498,8 @@ def train(args):
                   flush=True)
         elif (env_steps >= next_eval and env_steps <= args.total_steps) or done_all:
             next_eval += args.eval_interval
-            sc = evaluate(model, mcts, args.env_id, device, args.eval_episodes, args.frame_size, args.seed)
+            sc = evaluate(model, mcts, args.env_id, device, args.eval_episodes, args.frame_size, args.seed,
+                          graph=args.graph_search)
             mean, se = float(sc.mean()), float(sc.std() / np.sqrt(len(sc)))
             tag = "final" if done_all else f"env{env_steps}"
             print(f"[EVAL] {tag} env {env_steps} upd {updates}: {mean:.2f} +/- {se:.2f} SE "
@@ -542,6 +552,11 @@ def parse_args(argv=None):
     ap.add_argument("--lr-warmup", type=float, default=0.01)
     ap.add_argument("--lr-decay-steps", type=int, default=100_000)
     ap.add_argument("--weight-decay", type=float, default=1e-4)
+    ap.add_argument("--mixer-out-init-std", type=float, default=0.0,
+                    help="std of the GTrXL mixer's output projection at init (0 = zero-init, exact identity, the original)")
+    ap.add_argument("--graph-search", action="store_true",
+                    help="replay the acting, reanalyze and inline-eval searches from CUDA graphs (TODO B23 step 1b); "
+                         "bit-identical to the eager search, CUDA only")
     ap.add_argument("--mixer-weight-decay", type=float, default=None,
                     help="weight decay of the GTrXL token mixer's parameters (default: --weight-decay). With SGD lr 0.2, "
                          "wd 1e-4 and momentum 0.9 every mixer weight shrank by 0.13 per 10k updates and was ~0 by 40k "
