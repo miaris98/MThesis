@@ -11,20 +11,20 @@ The status block below is the only snapshot in this file: replace it, don't appe
 
 ---
 
-## Status: 2026-10-02 14:30 Athens (S-113) - **no boxes running**
+## Status: 2026-10-03 15:30 Athens (S-115) - **P and Q running unattended overnight (Atari evals + B3)**
 
 | Item | Result |
 |---|---|
-| **A14, 4 seeds** | vs arm E e15 on all 46 obstacle-type routes (`a9_merge.py`), **e20: s0 +8.8, s1 +6.8, s2 +7.5, s3 +7.7; per-route seed mean +6.0 [-1.1, +13.4]** - consistent direction, each CI touches 0 (corrected 2026-10-03; the earlier "CIs exclude 0" used a 41-route subset). vs WoR on obstacle routes: E -3.6, arm J seeds +3 to +6 (n.s.). e18 unstable |
-| **B35 done (8 seeds per trunk, env30000)** | GTrXL mean 100.2 / median 69.3, ResNet 95.4 / 59.7; paired +4.9 [-87.2, +98.5], 4/8 wins: **no trunk difference at 30k** |
-| Deferred Atari eval | MATCH with inline (S-112) |
-| A28 median decoding | -22.9 DS, deadlocks; mean stays (S-112) |
-| A16 arm K swerve 0.25 | no gain over arm J (S-112) |
+| **A14 with repeat runs** | arm J e20 vs E e15, 46 obstacle-type routes, E 3 runs + J 2 runs per route: s0 +7.8 [+0.7, +14.9], s1 +7.0, s2 +6.2, s3 +7.6; **4-seed per-route mean +7.2 [+0.7, +13.7]** - CI excludes 0. All 60 routes +4.5 [-1.0, +10.3]; non-obstacle -4.1 (n.s.). Overtaking success J 15.9-18.3% vs E 5.7% |
+| **A9 all 5 abilities** | Traffic_Signs from the .xodr maps, no server (`b2d_junction_fractions.py`): **E e15 mean 37.3 vs WoR 28.0** |
+| B2 / B24 (Atari, overnight) | 30 episodes at 16 sims (box Q) / 64 sims (box P) on the 16 B35 checkpoints; first 10 episodes reproduce the stored scores exactly. Early: 64 sims lower on 3 of 4 checkpoints |
+| B3 screen (overnight) | prioritized replay alpha = beta = 1 on the S-104 code, ResNet 10k, 2 seeds (box Q) |
+| B26 step 0 | `--flip-avg` in the evaluator (root averaged with its mirror image); smoke-tested on Q |
 
-Results: `E:\MThesis_EXP\live_20261001_boxH_2xA40_carla` (CARLA), `live_20261001_boxG_4x3090_atari` (Atari, checkpoints under
-`hf_checkpoints/`), `live_20261001_testbox_3060_verify`. HF `mthesis-relay`: `armJ2K_20261001/`, `b35_20261001/`, `b35_20261001_resume/`.
-Older status: A9 final (arm E e15 beats original WoR +14.3 DS [+8.9, +19.8] paired, 185 routes; official 61.1 vs 45.6); arm JH
-(matched WoR head) below arm J (S-111).
+Results: `E:\MThesis_EXP\live_20261003_box{O,P}_*_carla`, `live_20261003_boxQ_3090_atari`, `live_20261003_boxP_4x2080Ti_atari`.
+HF `mthesis-relay`: `carla_rep_20261003/`, `b35_100k_env30000/`, `atari_20261003/boxQ|boxP` (finishers push hourly + at the end;
+"FINISHED" in `/workspace/finisher.log`). **Next session first:** verify both finishers' final pushes on HF and E:, then destroy P and Q.
+Older status: A14 at 4 seeds, one run each: +7 to +9 per seed, CIs touching 0 (S-113/S-114); B35 no trunk difference at 30k.
 
 **Order of work from here:**
 1. *No box needed:* A9 merge (paired E vs WoR, official 220 with crashes = 0, seen/unseen towns, excluded routes)
@@ -87,7 +87,7 @@ plan (= `route_original`). When the data is on a box, check how often `changed_r
 frames and how far `route` and `route_original` diverge. The fix is A14. Also check the
 ego-speed shortcut (Li et al. CVPR 2024): does the target speed stay at 0 once the car has stopped?
 
-### A14. Obstacle data + the unshifted route (`route_original`) - **Done, 4 seeds: at e20 every seed is +7 to +9 DS over E e15 on obstacle routes, each CI touching 0** (S-096, S-097, S-107, S-109, S-111, S-112, S-113)
+### A14. Obstacle data + the unshifted route (`route_original`) - **Done: +7.2 DS [+0.7, +13.7] over E e15 on obstacle routes (4 seeds, repeat runs), overtaking success ~3x** (S-096, S-097, S-107, S-109, S-111, S-112, S-113, S-115)
 2026-10-03 correction: on all 46 obstacle-type routes (`a9_merge.py --pool`, route XML classification) e20 vs E e15: s0 +8.8 [-0.0, +17.7],
 s1 +6.8, s2 +7.5, s3 +7.7; per-route mean of the 4 seeds +6.0 [-1.1, +13.4]. vs the original WoR: E -3.6, arm J +3 to +6, K +7.6
 [+0.1, +15.7]. The numbers below (S-113) used the 41-route subset without b2d20's obstacle routes and overstate the effect.
@@ -322,7 +322,7 @@ Every CARLA eval: copy `frozen_backbone.pth` with the checkpoint, grep for "Merg
 backbone" (S-072), check per-route status strings, not only the record count (S-087), and use
 `scripts/eval/eval_watchdog.sh` (tree-kill) plus port clearing before each launch (S-091).
 
-### A9. Full Bench2Drive evaluation (220 routes) - **Merged + 4 of 5 ability scores: E vs WoR +14.0 DS; Merging +22 pts, Overtaking -7.5; Traffic_Signs needs a CARLA box** (S-093, S-106, S-107, S-108, S-113, S-114)
+### A9. Full Bench2Drive evaluation (220 routes) - **Done: E vs WoR +14.0 DS; all 5 abilities E 37.3 vs WoR 28.0 (Merging +22 pts, Overtaking -7.5)** (S-093, S-106, S-107, S-108, S-113, S-114, S-115)
 Abilities: `py scripts/analysis/a9_abilities.py <same roots> --arms E15,WOR` (official success rule, no CARLA). Traffic_Signs: on the
 next CARLA box, dump each route's completion fraction at its first junction waypoint (+8, as the official tool) to JSON and pass `--junctions`.
 Re-run any time: `py scripts/analysis/a9_merge.py E:/MThesis_EXP/live_2026092[89]_* E:/MThesis_EXP/live_202610*_* --reference WOR`
@@ -596,7 +596,7 @@ uniform replay, checkpoint and eval every 10k so the curve can be set against EZ
 it a lost box restarts a 14 h run from zero (S-064, `tried_and_ruled_out.md`); check its size against
 the box's bandwidth price first. Run alongside B3, not after it.
 
-### B3. Diff our prioritized replay against EZ-V2's - **Code matched (S-104); screen next**
+### B3. Diff our prioritized replay against EZ-V2's - **Code matched (S-104); screen running** (box Q, S-115)
 Priorities alpha = beta = 1 miscalibrate our reward head (S-067); uniform fixes it. Compare priority
 computation, beta annealing and where importance weights are applied (value vs reward loss).
 Uniform stays the default until this is done. It also decides how to read B4: at 100k, uniform may
@@ -645,7 +645,7 @@ from the backward view plus periodic whole-buffer reanalyze, for less search tim
 score. V-MCTS (2022): adaptive simulation budget. Seeds are the bottleneck for every Atari claim (B1), so
 wall-clock is sample size.
 
-### B2. An evaluation that can carry the claim - **Next**
+### B2. An evaluation that can carry the claim - **Running** (box Q overnight, S-115: 30 episodes, no sticky, 16 sims, 16 B35 checkpoints)
 Both harnesses repeat episodes: ours (10 episodes, deterministic search, 1-30 no-op starts, e.g.
 [57, 57, 57, 33, 57, ...]) and EZ-V2's own (seed 0's 30 episodes gave only 3 distinct scores: 5, 6,
 13; S-086). Re-evaluate every final checkpoint of both (our 12 ResNet/GTrXL 10k finals, EZ-V2 seeds
@@ -782,7 +782,7 @@ The port trains on sign-clipped rewards (`clip_reward=True`, EZ-V2's recipe) and
 - **Evidence is thin:** DQN-family agents find the tunnel under clipping anyway. Either result is reportable, since
   the EZ line has never ablated it.
 
-### B24. Test-time search scaling on saved checkpoints - **Next** (eval-only; no training)
+### B24. Test-time search scaling on saved checkpoints - **Running** (64 sims on box P overnight, S-115; eval-only; no training)
 Training and evaluation both use 16 simulations (ours and EZ-V2's). Atari-100k limits environment steps, not
 compute, so search depth at test time is a free, reportable knob.
 - **Run:** evaluate the saved checkpoints (the 12 GTrXL/ResNet 10k finals, and the B4 s0 30k-60k states) at
@@ -837,7 +837,7 @@ gates (reset the gate bias, keep all weights) would restore the trunk's plastici
 a gentler version of BBF's resets (B8) specific to gated transformers. Not found in the literature for MCTS agents.
 Only after B15 shows plasticity loss; odds are lower than B20/B21 because the Atari evidence is one noisy seed.
 
-### B26. A world model that learns how symmetric each game is (soft, detected symmetry, used in search) - **Next** (novel; step 0 eval-only)
+### B26. A world model that learns how symmetric each game is (soft, detected symmetry, used in search) - **Next** (novel; step 0 eval-only, code ready: `eval_ez_checkpoints.py --flip-avg`, S-115)
 User's concern (2026-09-29): a hard-wired mirror (B19/B20) only helps the few games that have one. So learn per game how much
 symmetry to use, with near-zero downside where there is none.
 **Prior work (searched 2026-09-29):** SiT (arXiv 2406.15025) already reports symmetry-invariant attention on Atari 100k, model-free

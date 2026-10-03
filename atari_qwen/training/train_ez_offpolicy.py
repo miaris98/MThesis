@@ -168,29 +168,51 @@ def to_input(stacks_u8: np.ndarray, device) -> torch.Tensor:
 
 
 @torch.no_grad()
-def run_search(model, mcts: GumbelMCTS, obs: torch.Tensor, add_noise: bool, chunk: int = 2048):
+def mirror_permutation(action_meanings) -> np.ndarray:
+    """perm[a] = the action that mirrors a under a horizontal flip (LEFT <-> RIGHT; others map to themselves)."""
+    idx = {m: i for i, m in enumerate(action_meanings)}
+    swap = lambda m: m.replace("LEFT", "\0").replace("RIGHT", "LEFT").replace("\0", "RIGHT")
+    return np.array([idx.get(swap(m), i) for i, m in enumerate(action_meanings)])
+
+
+def run_search(model, mcts: GumbelMCTS, obs: torch.Tensor, add_noise: bool, chunk: int = 2048, flip_perm=None):
+    """flip_perm (TODO B26 step 0, eval only): also run the root inference on the horizontally flipped frames and
+    average its value and policy logits (mapped back through flip_perm) into the root's before searching."""
     vals, pols, acts = [], [], []
     for i in range(0, obs.shape[0], chunk):
-        s, v, p = model.initial_inference(obs[i:i + chunk])
-        rv, rp, ra = mcts.search(model, s, model.support.vector_to_scalar(v), p, add_noise=add_noise)
+        x = obs[i:i + chunk]
+        s, v, p = model.initial_inference(x)
+        v = model.support.vector_to_scalar(v)
+        if flip_perm is not None:
+            _, vf, pf = model.initial_inference(torch.flip(x, dims=[-1]))
+            v = 0.5 * (v + model.support.vector_to_scalar(vf))
+            p = 0.5 * (p + pf[:, torch.as_tensor(flip_perm, device=p.device)])
+        rv, rp, ra = mcts.search(model, s, v, p, add_noise=add_noise)
         vals.append(rv); pols.append(rp); acts.append(ra)
     return np.concatenate(vals), np.concatenate(pols), np.concatenate(acts)
 
 
 @torch.no_grad()
 def evaluate(model, mcts, env_id: str, device, episodes: int, frame_size: int, seed: int,
-             max_steps: int = 27_000, sticky: float = 0.0) -> np.ndarray:
+             max_steps: int = 27_000, sticky: float = 0.0, flip_avg: bool = False) -> np.ndarray:
     """One full-game episode (no episodic life, raw reward) per parallel env, search without noise.
-    sticky > 0: ALE sticky actions with that probability (B2's robustness protocol; off for Atari-100k)."""
+    sticky > 0: ALE sticky actions with that probability (B2's robustness protocol; off for Atari-100k).
+    flip_avg: average the root with its mirror image (run_search's flip_perm, TODO B26 step 0)."""
     model.eval()
     envs = make_vector_atari_envs(env_id, num_envs=episodes, seed=seed + 10_000, clip_reward=False,
                                   episodic_life=False, frame_size=frame_size, grayscale=False,
                                   fire_reset=False, max_episode_steps=max_steps, repeat_action_probability=sticky)
     obs, _ = envs.reset(seed=seed + 10_000)
+    perm = None
+    if flip_avg:
+        from atari_qwen.envs.atari_wrappers import gym  # the module that registers the ALE envs
+        probe = gym.make(env_id)
+        perm = mirror_permutation(probe.unwrapped.get_action_meanings())
+        probe.close()
     scores = np.zeros(episodes)
     finished = np.zeros(episodes, dtype=bool)
     for _ in range(max_steps):
-        _, _, a = run_search(model, mcts, to_input(obs, device), add_noise=False)
+        _, _, a = run_search(model, mcts, to_input(obs, device), add_noise=False, flip_perm=perm)
         obs, r, term, trunc, _ = envs.step(a)
         scores += np.where(finished, 0.0, r)
         finished |= np.logical_or(term, trunc)

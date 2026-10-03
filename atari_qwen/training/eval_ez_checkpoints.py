@@ -11,10 +11,10 @@ usage:
   eval_ez_checkpoints.py RUN_DIR --watch                  # keep scoring new checkpoints until the final one is done
   eval_ez_checkpoints.py --verify CKPT                    # re-score a checkpoint that already holds inline
                                                           # eval_scores and compare (bit-exact check of the setup)
-  eval_ez_checkpoints.py RUN_DIR... --episodes 30 --sims 64 [--sticky 0.25] [--env-steps 30000]
+  eval_ez_checkpoints.py RUN_DIR... --episodes 30 --sims 64 [--sticky 0.25] [--flip-avg] [--env-steps 30000]
                                                           # another protocol (B2 / B24): own files, see below
 
-Protocol overrides (TODO B2, B24): --episodes / --sims / --sticky re-score saved checkpoints under another evaluation
+Protocol overrides (TODO B2, B24, B26 step 0): --episodes / --sims / --sticky / --flip-avg re-score saved checkpoints under another evaluation
 protocol. Those results go to `eval_<tag>_env{N}_upd{U}.json` and `eval_summary_<tag>.json` (tag = --protocol, by
 default e.g. `ep30_sim64_st0`), add the median and the tunnel rate P(score >= 200), and never touch
 `checkpoint_best.pt`: model selection stays on the training protocol. Episode i uses the same env seed as episode i of
@@ -73,13 +73,13 @@ def score(ck_path: Path, device, proto=None):
         sc = evaluate(model, mcts, a.env_id, device, a.eval_episodes, a.frame_size, a.seed)
     else:
         sc = evaluate(model, mcts, a.env_id, device, proto["episodes"] or a.eval_episodes, a.frame_size, a.seed,
-                      sticky=proto["sticky"])
+                      sticky=proto["sticky"], flip_avg=proto["flip"])
     return ck, a, sc, time.time() - t0
 
 
 def protocol_tag(proto, a) -> str:
     return proto["tag"] or (f"ep{proto['episodes'] or a.eval_episodes}_sim{proto['sims'] or a.num_simulations}"
-                            f"_st{proto['sticky']:g}")
+                            f"_st{proto['sticky']:g}" + ("_flip" if proto["flip"] else ""))
 
 
 def mlflow_run(label: str, a, proto=None, tag=None):
@@ -132,7 +132,7 @@ def process_run(run_dir: Path, device, state: dict, proto=None, env_steps=None) 
                "scores": sc.tolist(), "eval_seconds": round(secs, 1), "checkpoint": p.name}
         if tag:
             res.update(protocol=tag, episodes=len(sc), simulations=proto["sims"] or a.num_simulations,
-                       sticky=proto["sticky"], median=float(np.median(sc)), tunnel_rate=float(np.mean(sc >= 200)))
+                       sticky=proto["sticky"], flip_avg=proto["flip"], median=float(np.median(sc)), tunnel_rate=float(np.mean(sc >= 200)))
         tmp = out.with_suffix(".json.tmp"); tmp.write_text(json.dumps(res, indent=1)); os.replace(tmp, out)
         print(f"[EVAL{' ' + tag if tag else ''}] {run_dir.name} {res['tag']} env {env} upd {upd}: {mean:.2f} +/- {se:.2f} SE (HNS {hns:.1f}%) "
               f"scores={sc.tolist()} ({secs / 60:.1f} min)", flush=True)
@@ -199,13 +199,16 @@ def main(argv=None):
     ap.add_argument("--episodes", type=int, default=None, help="protocol override: episodes (default: the run's)")
     ap.add_argument("--sims", type=int, default=None, help="protocol override: search simulations (default: the run's)")
     ap.add_argument("--sticky", type=float, default=0.0, help="protocol override: sticky-action probability")
+    ap.add_argument("--flip-avg", action="store_true",
+                    help="protocol override: average the search root with its mirror image (TODO B26 step 0)")
     ap.add_argument("--protocol", default=None, help="name for the override protocol's result files")
     ap.add_argument("--env-steps", type=lambda s: {int(x) for x in s.split(",")}, default=None,
                     help="only score the checkpoints at these env steps (comma list)")
     args = ap.parse_args(argv)
     proto = None
-    if args.episodes or args.sims or args.sticky > 0 or args.protocol:
-        proto = {"episodes": args.episodes, "sims": args.sims, "sticky": args.sticky, "tag": args.protocol}
+    if args.episodes or args.sims or args.sticky > 0 or args.flip_avg or args.protocol:
+        proto = {"episodes": args.episodes, "sims": args.sims, "sticky": args.sticky, "flip": args.flip_avg,
+                 "tag": args.protocol}
         args.watch = False  # protocol runs score saved checkpoints; there is no final checkpoint to wait for
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if args.verify:
