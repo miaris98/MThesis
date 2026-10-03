@@ -268,10 +268,15 @@ def make_atari_env(
     grayscale: bool = True,
     fire_reset: bool = True,
     max_episode_steps: Optional[int] = None,
+    repeat_action_probability: float = 0.0,
 ) -> Callable[[], gym.Env]:
-    """Factory creating a fully wrapped single Atari environment instance."""
+    """Factory creating a fully wrapped single Atari environment instance.
+
+    repeat_action_probability > 0 turns on ALE sticky actions (Machado et al. 2018: p = 0.25); the default keeps
+    the env id's own setting (none for the NoFrameskip-v4 ids, the Atari-100k protocol)."""
     def _thunk() -> gym.Env:
-        env = gym.make(env_id)
+        env = (gym.make(env_id, repeat_action_probability=repeat_action_probability)
+               if repeat_action_probability > 0 else gym.make(env_id))
         env.action_space.seed(seed + idx)
         
         # 1. No-op reset

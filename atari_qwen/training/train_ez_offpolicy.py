@@ -179,12 +179,13 @@ def run_search(model, mcts: GumbelMCTS, obs: torch.Tensor, add_noise: bool, chun
 
 @torch.no_grad()
 def evaluate(model, mcts, env_id: str, device, episodes: int, frame_size: int, seed: int,
-             max_steps: int = 27_000) -> np.ndarray:
-    """One full-game episode (no episodic life, raw reward) per parallel env, search without noise."""
+             max_steps: int = 27_000, sticky: float = 0.0) -> np.ndarray:
+    """One full-game episode (no episodic life, raw reward) per parallel env, search without noise.
+    sticky > 0: ALE sticky actions with that probability (B2's robustness protocol; off for Atari-100k)."""
     model.eval()
     envs = make_vector_atari_envs(env_id, num_envs=episodes, seed=seed + 10_000, clip_reward=False,
                                   episodic_life=False, frame_size=frame_size, grayscale=False,
-                                  fire_reset=False, max_episode_steps=max_steps)
+                                  fire_reset=False, max_episode_steps=max_steps, repeat_action_probability=sticky)
     obs, _ = envs.reset(seed=seed + 10_000)
     scores = np.zeros(episodes)
     finished = np.zeros(episodes, dtype=bool)
