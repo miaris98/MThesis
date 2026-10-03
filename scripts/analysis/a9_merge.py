@@ -56,26 +56,23 @@ def boot_ci(diffs, n=20000, seed=0):
     return means[int(0.025 * n)], means[int(0.975 * n)]
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("roots", nargs="+", help="directories (globs allowed) searched recursively for result JSONs")
-    ap.add_argument("--reference", default="WOR")
-    ap.add_argument("--json-out", default=None, help="also write the per-route table here")
-    ap.add_argument("--pool", action="append", default=[], metavar="NAME=ARM1,ARM2,..",
-                    help="add an arm whose per-route DS is the mean over these arms (several seeds of one recipe); "
-                         "only routes all of them drove (repeatable)")
-    ap.add_argument("--arms", default=None, help="comma list: only report these arms (default: all)")
-    a = ap.parse_args()
-
+def route_table() -> dict:
+    """route id -> {town, obstacle, scenario}: A9's obstacle classification is by scenario type in the route XML."""
     routes = {}
     for r in ET.parse(XML).iter("route"):
         types = [s.get("type") or "" for s in r.iter("scenario")]
-        routes[int(r.get("id"))] = {"town": r.get("town"),
+        routes[int(r.get("id"))] = {"town": r.get("town"), "scenario": types[0] if types else "",
                                     "obstacle": any(k in t for t in types for k in OBSTACLE_TYPES)}
-    drives = collections.defaultdict(lambda: collections.defaultdict(list))  # arm -> route -> [DS]
+    return routes
+
+
+def collect(roots):
+    """Driving records per arm and route from every *_x.json under the roots (globs allowed), de-duplicated across the
+    live_* mirrors; harness failures are left out of the records and returned separately as {arm: {route ids}}."""
+    records = collections.defaultdict(lambda: collections.defaultdict(list))  # arm -> route -> [record]
     infra = collections.defaultdict(set)
-    seen_files = set()
-    for root in a.roots:
+    seen = set()
+    for root in roots:
         for d in glob.glob(root):
             for f in glob.glob(os.path.join(d, "**", "*_x.json"), recursive=True):
                 name = os.path.basename(f)
@@ -89,13 +86,30 @@ def main() -> int:
                 for rec in recs:
                     rid = int(rec["route_id"].split("_")[1])
                     key = (name, rid, rec["scores"]["score_composed"], rec["status"])
-                    if key in seen_files:  # the same record pulled into several live_* mirrors
+                    if key in seen:  # the same record pulled into several live_* mirrors
                         continue
-                    seen_files.add(key)
+                    seen.add(key)
                     if any(k in rec["status"] for k in INFRA):
                         infra[arm].add(rid)
                     else:
-                        drives[arm][rid].append(float(rec["scores"]["score_composed"]))
+                        records[arm][rid].append(rec)
+    return records, infra
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("roots", nargs="+", help="directories (globs allowed) searched recursively for result JSONs")
+    ap.add_argument("--reference", default="WOR")
+    ap.add_argument("--json-out", default=None, help="also write the per-route table here")
+    ap.add_argument("--pool", action="append", default=[], metavar="NAME=ARM1,ARM2,..",
+                    help="add an arm whose per-route DS is the mean over these arms (several seeds of one recipe); "
+                         "only routes all of them drove (repeatable)")
+    ap.add_argument("--arms", default=None, help="comma list: only report these arms (default: all)")
+    a = ap.parse_args()
+
+    routes = route_table()
+    records, infra = collect(a.roots)
+    drives = {arm: {r: [float(x["scores"]["score_composed"]) for x in v] for r, v in rr.items()} for arm, rr in records.items()}
     ds = {arm: {r: statistics.fmean(v) for r, v in rr.items()} for arm, rr in drives.items()}
     for spec in a.pool:
         name, members = spec.split("=", 1)

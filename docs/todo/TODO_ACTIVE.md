@@ -322,7 +322,9 @@ Every CARLA eval: copy `frozen_backbone.pth` with the checkpoint, grep for "Merg
 backbone" (S-072), check per-route status strings, not only the record count (S-087), and use
 `scripts/eval/eval_watchdog.sh` (tree-kill) plus port clearing before each launch (S-091).
 
-### A9. Full Bench2Drive evaluation (220 routes) - **Merged: E e15 vs WoR +14.0 [+8.9, +19.2] paired (200 routes), official 63.0 vs 48.8; ability scores still to do** (S-093, S-106, S-107, S-108, S-113)
+### A9. Full Bench2Drive evaluation (220 routes) - **Merged + 4 of 5 ability scores: E vs WoR +14.0 DS; Merging +22 pts, Overtaking -7.5; Traffic_Signs needs a CARLA box** (S-093, S-106, S-107, S-108, S-113, S-114)
+Abilities: `py scripts/analysis/a9_abilities.py <same roots> --arms E15,WOR` (official success rule, no CARLA). Traffic_Signs: on the
+next CARLA box, dump each route's completion fraction at its first junction waypoint (+8, as the official tool) to JSON and pass `--junctions`.
 Re-run any time: `py scripts/analysis/a9_merge.py E:/MThesis_EXP/live_2026092[89]_* E:/MThesis_EXP/live_202610*_* --reference WOR`
 (arm J seeds: labels J18/J20 + J{18,20}s{1,2,3}, `--pool J20pool=J20,J20s1,J20s2,J20s3`).
 Per-route differences vs WoR have an SD of 21 (E) to 34 (A SWA) DS, so a +/-3 DS CI needs ~190-500
