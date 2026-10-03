@@ -44,7 +44,7 @@ except ImportError:
 
 from atari_qwen.envs.atari_wrappers import make_vector_atari_envs
 from atari_qwen.models.ez_model import EZV2Model, DiscreteSupport
-from atari_qwen.mcts.gumbel_mcts import GumbelMCTS
+from atari_qwen.mcts.gumbel_mcts import GumbelMCTS, GraphedSearch
 from atari_qwen.eval.evaluate import compute_hns
 
 
@@ -175,7 +175,8 @@ def mirror_permutation(action_meanings) -> np.ndarray:
     return np.array([idx.get(swap(m), i) for i, m in enumerate(action_meanings)])
 
 
-def run_search(model, mcts: GumbelMCTS, obs: torch.Tensor, add_noise: bool, chunk: int = 2048, flip_perm=None):
+def run_search(model, mcts: GumbelMCTS, obs: torch.Tensor, add_noise: bool, chunk: int = 2048, flip_perm=None,
+               graphed: GraphedSearch = None):
     """flip_perm (TODO B26 step 0, eval only): also run the root inference on the horizontally flipped frames and
     average its value and policy logits (mapped back through flip_perm) into the root's before searching."""
     vals, pols, acts = [], [], []
@@ -187,18 +188,21 @@ def run_search(model, mcts: GumbelMCTS, obs: torch.Tensor, add_noise: bool, chun
             _, vf, pf = model.initial_inference(torch.flip(x, dims=[-1]))
             v = 0.5 * (v + model.support.vector_to_scalar(vf))
             p = 0.5 * (p + pf[:, torch.as_tensor(flip_perm, device=p.device)])
-        rv, rp, ra = mcts.search(model, s, v, p, add_noise=add_noise)
+        rv, rp, ra = (graphed(s, v, p, add_noise) if graphed is not None
+                      else mcts.search(model, s, v, p, add_noise=add_noise))
         vals.append(rv); pols.append(rp); acts.append(ra)
     return np.concatenate(vals), np.concatenate(pols), np.concatenate(acts)
 
 
 @torch.no_grad()
 def evaluate(model, mcts, env_id: str, device, episodes: int, frame_size: int, seed: int,
-             max_steps: int = 27_000, sticky: float = 0.0, flip_avg: bool = False) -> np.ndarray:
+             max_steps: int = 27_000, sticky: float = 0.0, flip_avg: bool = False, graph: bool = False) -> np.ndarray:
     """One full-game episode (no episodic life, raw reward) per parallel env, search without noise.
     sticky > 0: ALE sticky actions with that probability (B2's robustness protocol; off for Atari-100k).
-    flip_avg: average the root with its mirror image (run_search's flip_perm, TODO B26 step 0)."""
+    flip_avg: average the root with its mirror image (run_search's flip_perm, TODO B26 step 0).
+    graph: replay the search from a CUDA graph (GraphedSearch, TODO B23; same results, far fewer launches)."""
     model.eval()
+    graphed = GraphedSearch(mcts, model) if graph and device.type == "cuda" else None
     envs = make_vector_atari_envs(env_id, num_envs=episodes, seed=seed + 10_000, clip_reward=False,
                                   episodic_life=False, frame_size=frame_size, grayscale=False,
                                   fire_reset=False, max_episode_steps=max_steps, repeat_action_probability=sticky)
@@ -212,13 +216,15 @@ def evaluate(model, mcts, env_id: str, device, episodes: int, frame_size: int, s
     scores = np.zeros(episodes)
     finished = np.zeros(episodes, dtype=bool)
     for _ in range(max_steps):
-        _, _, a = run_search(model, mcts, to_input(obs, device), add_noise=False, flip_perm=perm)
+        _, _, a = run_search(model, mcts, to_input(obs, device), add_noise=False, flip_perm=perm, graphed=graphed)
         obs, r, term, trunc, _ = envs.step(a)
         scores += np.where(finished, 0.0, r)
         finished |= np.logical_or(term, trunc)
         if finished.all():
             break
     envs.close()
+    if graphed is not None and graphed.fallbacks:
+        print(f"  graphed search: {graphed.fallbacks} of {graphed.calls} searches exceeded the depth bound (eager fallback)", flush=True)
     return scores
 
 
@@ -269,7 +275,13 @@ def train(args):
     target = copy.deepcopy(model).eval()
     for p in target.parameters():
         p.requires_grad_(False)
-    opt = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
+    if args.mixer_weight_decay is None:
+        opt = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
+    else:  # TODO B36: the GTrXL mixer's own weight decay (0 = exempt); everything else keeps --weight-decay
+        mix = [q for n, q in model.named_parameters() if "mixer" in n]
+        rest = [q for n, q in model.named_parameters() if "mixer" not in n]
+        opt = torch.optim.SGD([{"params": rest, "weight_decay": args.weight_decay},
+                               {"params": mix, "weight_decay": args.mixer_weight_decay}], lr=args.lr, momentum=0.9)
     mcts = GumbelMCTS(A, support, num_simulations=args.num_simulations, discount=gamma, lstm_horizon=H)
     print(f"--> {run_name}: trunk={args.trunk} params={sum(p.numel() for p in model.parameters()) / 1e6:.2f}M "
           f"envs={E} sims={args.num_simulations} batch={args.batch_size} gamma/step={gamma:.4f}", flush=True)
@@ -448,16 +460,20 @@ def train(args):
             el = time.time() - t0
             tot = max(sum(tm.values()), 1e-9)
             ret = float(np.mean(recent_returns[-20:])) if recent_returns else 0.0
+            mixer_w = (sum(q.detach().norm() ** 2 for n, q in model.named_parameters()
+                           if "mixer" in n and n.endswith("weight")) ** 0.5).item() if args.trunk == "gtrxl" else None
             print(f"env {env_steps:6d}/{args.total_steps} upd {updates:6d}/{total_updates} | lr {lr:.3f} | "
                   f"loss v {value_loss.mean().item():.3f} p {policy_loss.mean().item():.3f} "
                   f"r {prefix_loss.mean().item():.3f} c {cons_loss.mean().item():.3f} | gn {float(gn):.2f} | "
                   f"train-life-ret(20) {ret:.2f} | V0 {v0.float().mean().item():.3f} tgt {val_t[:, 0].mean():.3f} | "
+                  + (f"|mixer W| {mixer_w:.2f} | " if mixer_w is not None else "") +
                   f"time c/t/u {100 * tm['collect'] / tot:.0f}/{100 * tm['targets'] / tot:.0f}/"
                   f"{100 * tm['update'] / tot:.0f}% | {el / 60:.1f} min", flush=True)
             log({"loss/value": value_loss.mean().item(), "loss/policy": policy_loss.mean().item(),
                  "loss/value_prefix": prefix_loss.mean().item(), "loss/consistency": cons_loss.mean().item(),
                  "train/grad_norm": float(gn), "train/lr": lr, "train/life_return_20": ret,
                  "train/updates": updates, "train/v0_mean": v0.float().mean().item(),
+                 **({"train/mixer_weight_norm": mixer_w} if mixer_w is not None else {}),
                  "train/value_target_mean": float(val_t[:, 0].mean()),
                  "train/policy_target_entropy": float(-(pol_t[:, 0] * np.log(pol_t[:, 0] + 1e-8)).sum(-1).mean())},
                 env_steps)
@@ -526,6 +542,10 @@ def parse_args(argv=None):
     ap.add_argument("--lr-warmup", type=float, default=0.01)
     ap.add_argument("--lr-decay-steps", type=int, default=100_000)
     ap.add_argument("--weight-decay", type=float, default=1e-4)
+    ap.add_argument("--mixer-weight-decay", type=float, default=None,
+                    help="weight decay of the GTrXL token mixer's parameters (default: --weight-decay). With SGD lr 0.2, "
+                         "wd 1e-4 and momentum 0.9 every mixer weight shrank by 0.13 per 10k updates and was ~0 by 40k "
+                         "(S-115): the mixer never trained")
     ap.add_argument("--max-grad-norm", type=float, default=5.0)
     ap.add_argument("--reward-coeff", type=float, default=1.0)
     ap.add_argument("--value-coeff", type=float, default=0.5)

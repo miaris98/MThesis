@@ -84,8 +84,15 @@ class GumbelMCTS:
     # --------------------------------------------------------------------------------------------
     @torch.no_grad()
     def search(self, model, root_states: torch.Tensor, root_values: torch.Tensor, root_logits: torch.Tensor,
-               add_noise: bool = True) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """-> (root search values (B,), improved policies (B, A), best actions (B,)) as numpy."""
+               add_noise: bool = True, g: torch.Tensor = None, depth_bound: int = None):
+        """-> (root search values (B,), improved policies (B, A), best actions (B,)) as numpy.
+
+        g: the Gumbel noise (B, A) to use instead of sampling it (add_noise is then ignored); zeros = no noise.
+        depth_bound: sync-free mode for CUDA-graph capture (`GraphedSearch`). Selection runs exactly `depth_bound` tree
+        levels and the backup `depth_bound + 1`, instead of looping until `active.any()` / `alive.any()` (a GPU-to-host
+        sync per level). Extra iterations change nothing (finished rows are masked), so the result is bit-identical to
+        the default mode unless a tree is deeper than the bound; the returned `overflow` (a device bool) is then True and
+        the caller must redo the search without the bound. Returns device tensors (values, policies, best, overflow)."""
         dev = root_states.device
         B, A, N = root_states.shape[0], self.A, self.S + 1
         self.ar = torch.arange(B, device=dev)
@@ -109,8 +116,11 @@ class GumbelMCTS:
         self.visit[:, 0] = 1.0
         self.vsum[:, 0] = root_values.float()
         self.logits[:, 0] = root_logits.float()
-        g = (torch.distributions.Gumbel(0.0, 1.0).sample((B, A)).to(dev) if add_noise
-             else torch.zeros(B, A, device=dev))
+        if g is None:
+            g = (torch.distributions.Gumbel(0.0, 1.0).sample((B, A)).to(dev) if add_noise
+                 else torch.zeros(B, A, device=dev))
+        fixed = depth_bound is not None
+        overflow = torch.zeros((), device=dev, dtype=torch.bool)
         sel = torch.argsort(g + self.logits[:, 0], dim=-1, descending=True)   # root candidates, best first
         m_cur = self.m
         b = self.ar
@@ -121,7 +131,7 @@ class GumbelMCTS:
             active = torch.ones(B, device=dev, dtype=torch.bool)
             leaf_parent = torch.zeros_like(cur)
             leaf_action = torch.zeros_like(cur)
-            for _ in range(self.S + 1):
+            for _ in range(depth_bound if fixed else self.S + 1):
                 # root rule: first of the top-m candidates with the fewest visits
                 cand = sel[:, :m_cur]
                 cand_ch = self.child[b.unsqueeze(1), 0, cand]
@@ -140,8 +150,10 @@ class GumbelMCTS:
                 leaf_action = torch.where(is_leaf, a, leaf_action)
                 active = active & ~is_leaf
                 cur = torch.where(active, nxt, cur)
-                if not bool(active.any()):
+                if not fixed and not bool(active.any()):
                     break
+            if fixed:
+                overflow = overflow | active.any()
 
             # ---- expansion ---------------------------------------------------------------------
             new = sim + 1
@@ -155,7 +167,7 @@ class GumbelMCTS:
             reset_here = (d_new % self.H) == 0
             hid_h[new] = torch.where(reset_here.unsqueeze(-1), torch.zeros_like(h_out[0][0]), h_out[0][0])
             hid_c[new] = torch.where(reset_here.unsqueeze(-1), torch.zeros_like(h_out[1][0]), h_out[1][0])
-            self.child[b, leaf_parent, leaf_action] = new
+            self.child[b, leaf_parent, leaf_action] = torch.full_like(leaf_action, new)  # a tensor: a Python int is a CPU copy
             self.parent[:, new] = leaf_parent
             self.depth[:, new] = d_new
             self.logits[:, new] = p_logits.float()
@@ -167,7 +179,9 @@ class GumbelMCTS:
             node = torch.full((B,), new, device=dev, dtype=torch.long)
             value = v
             alive = torch.ones(B, device=dev, dtype=torch.bool)
-            while bool(alive.any()):
+            levels = 0
+            while (levels <= depth_bound) if fixed else bool(alive.any()):  # fixed: bounded, no sync; default: until done
+                levels += 1
                 nd = node.clamp(min=0)
                 self.vsum[b, nd] += torch.where(alive, value, torch.zeros_like(value))
                 self.visit[b, nd] += alive.float()
@@ -176,6 +190,8 @@ class GumbelMCTS:
                 self.mx = torch.where(alive, torch.maximum(self.mx, value), self.mx)
                 node = torch.where(alive, self.parent[b, nd], node)
                 alive = alive & (node >= 0)
+            if fixed:
+                overflow = overflow | alive.any()
 
             # ---- sequential halving -----------------------------------------------------------
             if sim in self.schedule:
@@ -191,4 +207,52 @@ class GumbelMCTS:
         policy = torch.softmax(self.logits[:, 0] + tq_root, dim=-1)
         root_value = self.vsum[:, 0] / self.visit[:, 0]
         best = sel[:, 0]
+        if fixed:
+            return root_value, policy, best, overflow
         return root_value.cpu().numpy(), policy.cpu().numpy(), best.cpu().numpy()
+
+
+class GraphedSearch:
+    """`GumbelMCTS.search` replayed from a CUDA graph (TODO B23 step 1).
+
+    One 16-simulation search is ~7,400 tiny kernel launches and ~250 GPU-to-host syncs for ~17 ms of GPU work, so an
+    evaluation process is bound by one CPU core, not by the GPU. The search is captured once per batch size with a fixed
+    tree depth bound (see `search(depth_bound=...)`) and replayed with one launch. Results are bit-identical to the
+    eager search; a tree deeper than the bound (counted in `fallbacks`) is re-searched eagerly with the same noise."""
+
+    def __init__(self, mcts: "GumbelMCTS", model, depth_bound: int = 6):
+        self.mcts, self.model, self.depth = mcts, model, depth_bound
+        self.entries, self.fallbacks, self.calls = {}, 0, 0
+
+    def _capture(self, states, values, logits):
+        B, A = states.shape[0], self.mcts.A
+        e = {"s": states.clone(), "v": values.clone().float(), "l": logits.clone().float(),
+             "g": torch.zeros(B, A, device=states.device)}
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):  # warm-up: cuDNN / cuBLAS handles and allocator pools before capture
+            for _ in range(2):
+                self.mcts.search(self.model, e["s"], e["v"], e["l"], g=e["g"], depth_bound=self.depth)
+        torch.cuda.current_stream().wait_stream(stream)
+        e["graph"] = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(e["graph"]):
+            e["out"] = self.mcts.search(self.model, e["s"], e["v"], e["l"], g=e["g"], depth_bound=self.depth)
+        return e
+
+    @torch.no_grad()
+    def __call__(self, root_states, root_values, root_logits, add_noise: bool = True):
+        self.calls += 1
+        key = (tuple(root_states.shape), root_states.dtype, self.mcts.S)
+        if key not in self.entries:
+            self.entries[key] = self._capture(root_states, root_values, root_logits)
+        e = self.entries[key]
+        B, A = root_states.shape[0], self.mcts.A
+        g = (torch.distributions.Gumbel(0.0, 1.0).sample((B, A)).to(root_states.device) if add_noise
+             else torch.zeros(B, A, device=root_states.device))
+        e["s"].copy_(root_states); e["v"].copy_(root_values.float()); e["l"].copy_(root_logits.float()); e["g"].copy_(g)
+        e["graph"].replay()
+        value, policy, best, overflow = e["out"]
+        if bool(overflow):  # deeper than the bound: exact eager search with the same noise
+            self.fallbacks += 1
+            return self.mcts.search(self.model, root_states, root_values, root_logits, g=g)
+        return value.cpu().numpy(), policy.cpu().numpy(), best.cpu().numpy()

@@ -66,14 +66,14 @@ def total_updates(a) -> int:
     return online + (int(full_online * a.offline_frac) if a.total_steps >= a.schedule_steps else 0)
 
 
-def score(ck_path: Path, device, proto=None):
+def score(ck_path: Path, device, proto=None, graph=False):
     ck, a, model, mcts = load_model(ck_path, device, proto and proto["sims"])
     t0 = time.time()
     if proto is None:
-        sc = evaluate(model, mcts, a.env_id, device, a.eval_episodes, a.frame_size, a.seed)
+        sc = evaluate(model, mcts, a.env_id, device, a.eval_episodes, a.frame_size, a.seed, graph=graph)
     else:
         sc = evaluate(model, mcts, a.env_id, device, proto["episodes"] or a.eval_episodes, a.frame_size, a.seed,
-                      sticky=proto["sticky"], flip_avg=proto["flip"])
+                      sticky=proto["sticky"], flip_avg=proto["flip"], graph=graph)
     return ck, a, sc, time.time() - t0
 
 
@@ -103,7 +103,7 @@ def mlflow_run(label: str, a, proto=None, tag=None):
         return None, None
 
 
-def process_run(run_dir: Path, device, state: dict, proto=None, env_steps=None) -> bool:
+def process_run(run_dir: Path, device, state: dict, proto=None, env_steps=None, graph=False) -> bool:
     """Score every unscored checkpoint of one run. Returns True once the run's final checkpoint is scored.
     proto: protocol overrides (own result files, no checkpoint_best.pt); env_steps: only these checkpoints."""
     ckdir = run_dir / "checkpoints"
@@ -124,7 +124,7 @@ def process_run(run_dir: Path, device, state: dict, proto=None, env_steps=None) 
             res = json.loads(out.read_text())
             final_done |= res.get("tag") == "final"
             continue
-        ck, a, sc, secs = score(p, device, proto)
+        ck, a, sc, secs = score(p, device, proto, graph)
         mean, se = float(sc.mean()), float(sc.std() / np.sqrt(len(sc)))
         hns = compute_hns(mean, a.env_id)
         res = {"tag": ck.get("eval_tag") or ("final" if upd >= total_updates(a) else f"env{env}"),
@@ -178,8 +178,8 @@ def process_run(run_dir: Path, device, state: dict, proto=None, env_steps=None) 
     return final_done
 
 
-def verify(ck_path: Path, device) -> int:
-    ck, a, sc, secs = score(ck_path, device)
+def verify(ck_path: Path, device, graph=False) -> int:
+    ck, a, sc, secs = score(ck_path, device, graph=graph)
     ref = ck.get("eval_scores")
     print(f"re-scored {ck_path.name}: {sc.tolist()} ({secs / 60:.1f} min)")
     print(f"inline eval stored:        {ref}")
@@ -199,6 +199,8 @@ def main(argv=None):
     ap.add_argument("--episodes", type=int, default=None, help="protocol override: episodes (default: the run's)")
     ap.add_argument("--sims", type=int, default=None, help="protocol override: search simulations (default: the run's)")
     ap.add_argument("--sticky", type=float, default=0.0, help="protocol override: sticky-action probability")
+    ap.add_argument("--graph", action="store_true",
+                    help="replay the search from a CUDA graph (TODO B23; same scores, ~10x fewer CPU launches)")
     ap.add_argument("--flip-avg", action="store_true",
                     help="protocol override: average the search root with its mirror image (TODO B26 step 0)")
     ap.add_argument("--protocol", default=None, help="name for the override protocol's result files")
@@ -212,10 +214,10 @@ def main(argv=None):
         args.watch = False  # protocol runs score saved checkpoints; there is no final checkpoint to wait for
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if args.verify:
-        return verify(args.verify, device)
+        return verify(args.verify, device, args.graph)
     state, pending = {}, list(args.run_dirs)
     while pending:
-        pending = [r for r in pending if not process_run(r, device, state, proto, args.env_steps)]
+        pending = [r for r in pending if not process_run(r, device, state, proto, args.env_steps, args.graph)]
         if not args.watch:
             break
         if pending:
