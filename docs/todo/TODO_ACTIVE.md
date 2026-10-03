@@ -19,7 +19,7 @@ The status block below is the only snapshot in this file: replace it, don't appe
 | **A9 all 5 abilities** | Traffic_Signs computed offline from the .xodr maps (`b2d_junction_fractions.py`, 15 s, no server): **E e15 mean 37.3 vs original WoR 28.0** |
 | **B2 (Atari, 16 B35 checkpoints, 30 ep, no sticky, 16 sims)** | GTrXL 105.9 vs ResNet 98.6, +7.2 [-79, +98], p 0.89: no trunk difference. **30 episodes = ~4 independent games per checkpoint (n = seeds)**; sticky 0.25 gives 21-27 distinct scores at ~1/3 of the score (5 of 16 done) |
 | **GTrXL mixer is dead (B18 step 1)** | all mixer weights decay x0.13 per 10k updates under SGD wd 1e-4 (|Wq| 6.5 -> 0.026 at 30k, identical in 8 seeds; attention uniform; gates 0.5): **B1/B35/B4/B2 compared ResNet with ResNet**. With `--mixer-weight-decay 0` the weights stop decaying and the output projection grows, but q/k/v/FFN are still at init at 5k -> **B36** |
-| B23 graphed search | bit-identical to eager on real states (ResNet + GTrXL), 5.4-8.8x faster at 16/32/64 sims; evaluation only so far |
+| B23 graphed search | bit-identical to eager on real states (ResNet + GTrXL), 5.4-8.8x faster at 16/32/64 sims; **now in the trainer (`--graph-search`): 1,600-update GTrXL run identical to eager (all weights + replay), ~2x shorter wall time on a 3050; batch-256 check on a box still to do** |
 | B15 / B24 / B3 / B26 step 0 | B15: no rank collapse, dormancy plateaus by 50k. B24: 6 of 16 at 64 sims, deeper search lowered the score on 4 of 6 (10 slow zero-scorers unfinished). B3: prioritized replay 16.2 / 12.8 vs uniform 15.0 / 15.3, no gain. B26 step 0: mirror-averaging -12 mean (-22, -73, +73, -25) |
 
 Results: `E:\MThesis_EXP\live_20261003_box{O_2xTitanRTX_carla, P_4x2080Ti_carla, P_4x2080Ti_atari, Q_3090_atari}`; HF `mthesis-relay`:
@@ -28,9 +28,10 @@ Ops tools for the next box session: `scripts/ops/` (README there). Boxes O, N (e
 Older status: A14 at 4 seeds, one run each (+7 to +9, CIs touching 0, S-113/S-114); B35 no trunk difference at 30k (now explained).
 
 **Order of work for 2026-10-04** (times Athens; two box sessions in parallel, one CARLA, one Atari; you log off ~17:00)
-0. *Me, no box, first ~1.5 h:* B23 step 1b - wire `GraphedSearch` into the trainer's acting search and the reanalyze targets
-   (`--graph-search`, off by default; a trained run is a prefix of the same recipe, so numerics must match: unit-test on CPU, check
-   bit-equality on a box in item 2a). Write `scripts/atari/run_b36.sh`. Re-read B36 below.
+0. *Done 2026-10-03 evening (S-116 addendum):* B23 step 1b - `GraphedSearch` is in the trainer's acting search, the reanalyze targets
+   and the inline eval (`--graph-search`, off by default). Unit/CUDA tests pass; a 1,600-update GTrXL run is identical to eager (all 298
+   weight tensors and the replay buffer). `scripts/atari/run_b36.sh` written (graph on by default, `GRAPH=0` turns it off). Still to
+   check on the box (item 2a): batch 256 / 1,536 reanalyze roots (memory, speed, 0 fallbacks in the end-of-run line).
 1. *CARLA box session (the thesis claim), 2 boxes like O+P (Turing works for eval, ~$0.9/h for the pair; 3-4 lanes per 22-24 GB GPU,
    ~6.3 GB per lane; `scripts/ops/provision_eval.sh`, ckpts on HF `e15_20260930`, `armJ_20260929`, `armJ2K_20261001`,
    `armJ23_20261002`):* (a) **original WoR x2 repeats on the same 60 routes** (`WORL:<name>:<routes>` jobs, labels `a9_WOR_r*`):
@@ -835,7 +836,7 @@ imagined states (S-058: phantom reward at depth 1, value inflation), and GTrXL's
 
 The evidence is continuous control, not Atari.
 
-### B23. Vectorise: a sync-free, graph-captured search, then several seeds per process - **Step 1 done for evaluation (S-116: bit-identical, 5.4-8.8x at 16-64 sims); training/reanalyze and step 2 next**
+### B23. Vectorise: a sync-free, graph-captured search, then several seeds per process - **Step 1 done for evaluation and training (S-116: bit-identical, 5.4-8.8x at 16-64 sims; `--graph-search` in the trainer, 1,600-update run identical to eager); batch-256 box check and step 2 next**
 Seeds are the binding constraint for every Atari claim (B1: ~57 per trunk at GTrXL's spread).
 - **Step 1, the search.** `gumbel_mcts.py` runs `bool(active.any())`, a GPU-to-host sync, inside the selection loop,
   itself inside the 16-simulation loop. It also issues many small kernels, on the reanalyze path that is 71% of

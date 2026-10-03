@@ -517,6 +517,9 @@ def train(args):
     envs.close()
     if writer:
         writer.close()
+    if act_graph is not None:  # searches deeper than the captured bound are re-run eagerly (same result, just slower)
+        print(f"graphed search fallbacks: acting {act_graph.fallbacks}/{act_graph.calls}, "
+              f"reanalyze {re_graph.fallbacks}/{re_graph.calls}", flush=True)
     if mlrun:
         try:
             if np.isfinite(best):  # deferred mode: eval_ez_checkpoints.py logs best_eval on the <label>_eval run
