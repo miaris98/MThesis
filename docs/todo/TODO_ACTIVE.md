@@ -19,7 +19,8 @@ The status block below is the only snapshot in this file: replace it, don't appe
 | **Where the score goes (S-117)** | J: 20.1 of 36.9 lost points per run are vehicle collisions (47% of runs, WoR 22%). J - E: lead-vehicle routes **-15.2 [-21.5, -9.0]**, obstacle routes **+7.2 [+0.7, +13.6]**, other -1.0. Against WoR the advantage is entirely on the 102 routes that are neither (+22.8 [+16.6, +28.9]); lead-vehicle -6.7 and obstacle +2.5 are ties. Abilities (success %, J / E / WoR): overtaking 16-18 / 5.7 / 11.7, merging 26-39 / 44.9 / 21.8, emergency brake 25-38 / 32 / 30 |
 | **What has worked (ledger, S-117)** | `docs/design/what_has_worked_2026-10-04.md`: confirmed wins = route conditioning, transformer head over WoR's conv head (+15), obstacle data + `route_original`; recovery camera, colour aug, 288x768 not established; vision lightly used (no-vision MLP 0.7558 vs 0.5793; random-backbone evals 50-60 DS); 73.5% of the waypoint objective is speed x dt; the field's best recipe (LEAD) published its state-aligned dataset |
 | **Headroom analysis (S-120)** | from the existing records: **J's vehicle collisions are 80% systematic** (>= 3 of 4 seeds collide; 20% lottery) -> A43 demoted; E and J **drive straight into stopped vehicles** on obstacle routes (0.70 / 0.86 events per run, on the route line; WoR 0.22) and J clips cones while passing; **32% of J's colliding runs hit again (3.5 points per run)** -> A50; obstacle families are the **universal failure** (21 of the 29 routes where E, J and WoR all score < 50); E is flat in night / rain / fog while WoR loses 13 in fog (our advantage +22 in fog vs +8, change +13.7 [+1.0, +26.8]); **220 routes resolve ~5 DS at one run per arm (7 on the 102 lead + obstacle routes)** -> A52 |
-| **New items** | **A36-A52 (CARLA) and B37-B44 (Atari)** with tiers and a first-session order (block below); A15 and A21 promoted to Next; A43 demoted (S-120) |
+| **Research deep dive (S-122, S-123)** | `docs/design/policy_options_datasets_timeseries_2026-10-04.md`: **SimLingo-Data** has our camera (1024x512, FOV 110) and ships per-frame **counterfactual crash labels** (Dreamer: accelerating crashes in 60.5% of frames of one archive) and a hazard-bucket index (A56); Bench2Drive's and TaCarla's cameras differ from the frozen TF++ camera; Fail2Drive adds 200 paired Town13 routes (A58); BevAD / AlignDrive: path -> speed cascade, space-to-depth tokens + masking, diffusion scales with data (A15, A54, A55); time-series lens: scale-free loss (A53), newsvendor decode (A57), direct multi-step heads and events for Atari (B45, B46); lookback, foundation models and SSM trunks are not supported |
+| **New items** | **A36-A58 (CARLA) and B37-B46 (Atari)** with tiers and a first-session order (block below); A15 and A21 promoted to Next; A43 demoted (S-120); A48 demoted (S-122) |
 | **B23 step 1b (graphed search in the trainer, S-118)** | **identical to eager** at batch 32 (1,600 updates) and at batch 256 on a 3090 (800 updates): all 298 model tensors, all target tensors, the whole replay buffer (acting policies and root values included); 0 fallbacks (0/200 acting, 0/800 reanalyze). |
 | **B36 pilot (S-118): GTrXL 30k, mixer wd 0, seeds 0-3, plus two non-zero-output-init runs** | s2 finished: 30k **129.8** (25k 120.0, 20k 64.4); s0 25k 24.8 (20k 51.6); s1 25k 35.1 (20k 53.7); s3 20k 98.4; out-init s0 10k 23.0, s1 10k 9.7. **The mixer blocks still do not train** (|Wq| 6.510 at 15k, non-zero out init 6.507 at 10k, gate bias 2.000, attention uniform) -> **B37**. Others not finished |
 | **B37 step 0 / B43 step 0 (S-118)** | weight-trajectory audit of the 100k runs: only the two mixers are dead (their change equals the weight-decay rate). Model drift vs imagined depth (9 checkpoints, S-121): GTrXL's per-step latent error grows 1.7-3.3x after depth 5 (the training horizon), ResNet's is linear but ~3x higher from the start, policy KL +2-4x in all nine; the 64-sim tree reaches depth 17 |
@@ -32,7 +33,7 @@ need ~1 h, s3 ~2.5 h, the out-init runs 3-4 h. **Not saved:** seed 1's env20000 
 env15000 checkpoint. Ops lessons are in S-119 and `scripts/ops/README.md`.
 Older status: A14 at 4 seeds, one run each (+7 to +9, CIs touching 0, S-113/S-114); B35 no trunk difference at 30k (explained by the dead mixer).
 
-## New algorithm ideas, 2026-10-04 (S-117, S-118, S-120): A36-A52 (CARLA, one front camera) and B37-B44 (Atari)
+## New algorithm ideas, 2026-10-04 (S-117, S-118, S-120, S-122, S-123): A36-A58 (CARLA, one front camera) and B37-B46 (Atari)
 
 Evidence ledger (what moved the score, with grades) and the external cross-check: `docs/design/what_has_worked_2026-10-04.md`.
 
@@ -83,28 +84,36 @@ and WoR all drove):
 | 0 | A44 | Collision-clip recorder in every eval | 1 day code, free after | 47% of runs collide and we cannot see why (A11 open) | clips on the next eval |
 | 0 | B37 | Mixer probe: AdamW param group, open gates, module-update audit | 10-min probe (step 0 done) | B36: blocks at init at 10-15k | |dWq|/|Wq| > 5% by 2k |
 | 0 | A52 | Evaluation protocol: mechanism readouts, matched-speed control, >= 3 runs for headline claims | none / one eval config | J seeds differ by up to 3.3 DS; 220 routes resolve ~5 DS, 7 on the 102 lead + obstacle routes (S-120) | every arm table |
+| 0 | A58 | More routes: Fail2Drive (200 paired Town13 routes, MIT) next to the 220 | wire the route files; ~2 h per arm | 420 routes resolve ~3.4 DS instead of ~4.9 (S-122) | paired shift gap per arm |
 | 1 | A36 | Weight-space merge E <-> J, J-seed soup | eval-only, ~45 min per alpha on 12 lanes | J lost 15 DS on lead-vehicle routes, gained 7 on obstacles | both groups within 3 DS of the better parent |
 | 1 | A50 | Contact reflex (stop after the first vehicle collision) + creep clamp | eval-only, small agent change | 32% of J's colliding runs hit again: 3.5 points per run; no expert frame contains a contact (S-120) | events per colliding run, 2nd-event points |
+| 1 | A57 | Newsvendor decode: a low speed quantile that relaxes with standing time (+ matched-speed control) | eval-only, ~45 min per config | median decode deadlocked (A28); WoR pays 24 + 6 + 2 points for slowness; asymmetric costs (S-122) | collision events per run at matched speed |
 | 1 | B38 | Pessimistic / optimistic search: online-vs-target disagreement, or model-value inconsistency (one network) | eval-only first, 1 box-hour | B24: deeper search hurts; EMCTS / MVI prior art | score non-decreasing in sims |
-| 1 | B43 | Depth-capped search (<= training unroll 5) and model error vs imagined depth | eval-only, 1 box-hour | 64-sim trees reach depth 17 > unroll 5 | score vs cap, error curve |
-| 2 | A15 | **Path (space-indexed) + speed head, re-budgeted loss** | one arm, head-only | CarLLaVA/SimLingo ablations; 73.5% of our objective is speed x dt | layout collisions, DS |
+| 1 | B43 | Depth-capped search (<= training unroll 5) and model error vs imagined depth | eval-only, 1 box-hour | 64-sim trees reach depth 17 > unroll 5; policy KL x2-4 past depth 5 in 9 of 9 checkpoints (S-121) | score vs cap, error curve |
+| 2 | B45 | Root-anchored direct multi-step heads as the deep-leaf evaluator | flag + 4 runs, after B43 step 1 | direct multi-step beats iterated forecasting (DLinear study); B43 drift (S-123) | value error and score vs sims |
+| 2 | A15 | **Path (space-indexed) + speed head conditioned on the path (aligned cascade), re-budgeted loss, 2.5 s horizon** | one arm, head-only | BevAD 51.7 -> 57.4% SR, static infractions -70%; AlignDrive 89.07 DS; E / J hit stopped vehicles on the line (S-120, S-122) | collision events on obstacle routes, layout collisions, DS |
 | 2 | A21+A38 | **Student-aligned labels:** drop/relabel braking caused by actors out of view, anticipatory targets, hazard buckets | 2-3 head-only arms | LEAD +1.37 / +11; CarLLaVA vehicle-hazard buckets; PDM-Lite logs `speed_reduced_by_obj_*` | lead-vehicle DS, completion guard |
 | 2 | A37 | Counterfactual speed-safety critic, safety-masked decoding (variant c: candidate paths for the on-line obstacle hits) | one arm, label pass on CPU | 20.1 of 36.9 lost points are vehicle collisions, 80% systematic; E and J hit stopped vehicles on the line (S-120) | AUROC, then lead-vehicle DS |
 | 2 | A49 | **Cover the lead-vehicle families in J's fine-tune mix** (arm M) | existing pipeline, ~40 GB download | E never saw them, J's obstacle data overwrote car-following (-15.2) | lead >= E - 3 and obstacle >= J - 3 |
 | 2 | A46 | **Train on the LEAD dataset** (state-aligned expert, 12 towns, recovery views), front camera only | adapter + one arm | the field's best recipe published its data | 220-route DS vs E, J |
+| 2 | A56 | **SimLingo-Data pilot:** Dreamer counterfactual labels, bucket index, augmented views (same camera as ours) | ~25 GB chunk + labels, one GPU | accelerating crashes in 60.5% of frames of one archive; ready-made A37 / A38 labels (S-122) | critic AUROC by stratum, lead group |
+| 2 | A54 | Space-to-depth tokens + 20% token masking | one head-only arm; cache ~4x | BevAD: 36.4 -> 57.4% SR; our 16 tokens are an average pool of a stride-32 map (S-122) | probe AUROC, lead group |
+| 2 | A55 | Generative / multi-modal planning head (flow matching or anchor MDN), together with scaled data | head-only; after A56 / A46 data | BevAD: diffusion keeps scaling, point estimators saturate at ~8k scenes (S-122) | overtaking, two-ways families |
 | 3 | A39 | Asymmetric ordinal speed loss; speed-head weight 0.2 -> 1 -> 3 | head-only arms | collision x0.6 vs free slowness; weight never swept | collision share |
 | 3 | A40 | Clearance (keep-out) loss from logged actor futures | one arm | vehicle + layout collisions = 23 of 36.9 | collision counts |
 | 3 | A41 | Two-mode path head (stay / pass), filtered intent gate | one arm | two-ways families 19-23 DS | overtaking success |
 | 3 | A42 | Hazard queries on the full-resolution pyramid, box labels | one arm | lead car 0.4-0.8 of a stride-32 cell at brake onset | probes, pedestrian/lead families |
-| 3 | A48 | History tokens: previous-frame feature difference (closing speed), keyframe weighting | one arm | CarLLaVA: fewer rear-end collisions; our lead families | HardBreakRoute, lead group |
+| 3 | A48 | History tokens: previous-frame feature difference (closing speed), keyframe weighting (demoted, S-122) | one arm | CarLLaVA: fewer rear-end collisions but no DS gain; SimLingo uses one image | HardBreakRoute, lead group |
+| 3 | A53 | Scale-free waypoint loss, residual to a constant-speed forecast, 2.5 s horizon | one head-only arm | forecasting practice (MASE / RevIN); hazard behaviour at low speed is small in metres (S-122) | skill vs naive at low speed |
 | 3 | A43 | Uncertainty-gated caution over the 5 heads (demoted, S-120) | eval-only, ~45 min per config | only 20% of J's collision points are lottery; the heads share one base | lead-vehicle DS, collision share |
 | 2 | B37 | Winning mixer setting on the 30k screen, 4 seeds | 4 x 4.5 h | unlocks the thesis test | |Wq|, entropy before scores |
 | 3 | B39 | Deeper reanalyze, shallow acting; fresh network for targets | flag + 4 runs | reanalyze sets target quality | 10k score, value error |
 | 3 | B40 | Train under sticky actions, report both protocols | 2-4 runs | B2: n = seeds on deterministic evals | 30 distinct games |
 | 3 | B41 / B42 / B44 | RAM-supervised auxiliary probe; multi-horizon value heads; stuck-loop / stagnation analysis | diagnostics, flags | see entries | 10k score; episode lengths |
+| 3 | B46 | Event / ball-forecast auxiliary (EAWM-style) | one flag | EAWM +10-45% on MBRL baselines; Breakout events are few and exact (S-123) | 10k / 30k score, B43 curves |
 
-**Next sessions.** *CARLA eval-only session (2 cheap boxes, ~4 h):* A44 recorder first; A36 (alpha 0.5 and the J soup on the 103 lead+obstacle routes), A50 (contact reflex + creep clamp) and the A52 speed-scale control (J at 0.8 / 0.9 x target speed) on the same
-routes; the same session runs A45 and A47 on one box with the PDM-Lite data (500 frames, cached features). *CARLA training session (data box):* A46 feasibility (one route per scenario family, camera
+**Next sessions.** *CARLA eval-only session (2 cheap boxes, ~4 h):* A44 recorder first; A36 (alpha 0.5 and the J soup on the 103 lead+obstacle routes), A50 (contact reflex + creep clamp) the A52 speed-scale control (J at 0.8 / 0.9 x target speed) and A57 (newsvendor decode) on the same
+routes; the same session runs A45 and A47 on one box with the PDM-Lite data (500 frames, cached features). *CARLA training session (data box):* A56 pilot (one SimLingo-Data chunk + its Dreamer labels: critic AUROC; same camera, no adapter) first, then A46 feasibility (one route per scenario family, camera
 metadata, route fields) in parallel with A15 and the A21+A38 label arms (one change per arm, head-only on cached features), A37 step 0 (label audit on ~100 archives). *Atari box:* B37 probe (10 min) ->
 B36 rerun with the winning setting; B38 step 0 and B43 on B24's 16 checkpoints (eval-only, graph search); resume the saved B36 runs from `E:\MThesis_EXP\live_20261004_box3_4x3090_atari\` only if the
 probe says the optimiser is not the fix.
@@ -209,6 +218,7 @@ SimLingo reports the same effect. J loses 3.2 points per run to layout collision
 head = lateral offset at 10 fixed distances (1-20 m, TF++'s path checkpoints; target = PDM-Lite's shifted `route`, as above) with L1 plus a smoothness term; waypoints stay for the time side;
 steer from the path at a speed-adaptive lookahead (d = 0.098 v + 0.192, A4); loss budget: path weight 1 and target-speed weight 1 instead of 0.2 (A39). One arm on arm J's data, compared with J
 on the 103 discriminating routes first, then on all 220.
+**Design update (S-122): aligned cascade, horizon, and a correction.** (1) AlignDrive (arXiv 2601.01762) conditions the longitudinal output on the lateral path (speed as a 1-D displacement along the *predicted* path, anchor-based): 89.07 DS / 73.18% SR on Bench2Drive; BevAD (2603.15185) path + speed 57.4% vs waypoints 51.7% SR, static infractions 0.185 -> 0.055. Ours: after the path head, a second decoder stage (cross-attention over the path embeddings and the policy token) predicts the speed bins, so the speed the car chooses is conditioned on the path it will follow; E / J hit stopped vehicles *on the route line* (S-120) because today's speed head has no tie to the path. (2) Horizon: 5 waypoints at 4 Hz is 1.25 s; SimLingo's labels carry 10 (A53). (3) Correction: the "73.5% of the loss" argument above is a share of the L1 *value*, not of the gradient (L1 gradients are sign x weight per element); the case rests on the field's ablations and on S-120's anatomy.
 
 ### A16. Oversample obstacle/swerve frames and drop redundant ones - **Done: arm K (`--swerve_frac 0.25`) no gain over arm J** (S-111, S-112)
 2026-10-01 (S-112): the natural swerve share in arm J's data is 15.3% (65,522 / 427,310 train frames), so 0.1 was a no-op;
@@ -631,6 +641,7 @@ plausible source of its low collision rate (22% of runs, 7.4 lost points); A37 i
   snapped to a mode and deadlocked, A28); if S is empty, the lowest bin. Sweep theta in {0.3, 0.5, 0.7}.
 - **Variant (b), reflex:** a small binary head "the expert brakes >= 3 m/s^2 within 1 s" (focal loss), used only as a brake floor when p > theta.
 - **Variant (c), candidate paths (S-120):** on obstacle routes E and J drive straight into stopped vehicles (vehicle collisions 100% / 83% on the route line, median lateral offset 0.06 / 0.46 m, 0.70 / 0.86 events per run; WoR 0.22) and J clips cones while passing (layout collisions 0.49 per run, 50% off the line to the left). A speed critic rolled along the *expert's* path calls the straight path at speed safe (the expert swerves), so it has to judge the policy's own path: candidates = {predicted path, +-1.5 m and +-3 m shifts, stop} x speed bins, labels from rolling each against the logged actor footprints (and the static obstacles, if the logged boxes list them: check in step 0), decode = the safest candidate inside the imitation posterior. It is Hydra-MDP's trajectory-vocabulary scoring on one camera and covers the no-reaction and the clipping failures in one mechanism.
+- **Ready-made labels (S-122, A56):** SimLingo-Data's `dreamer/` files give, for every frame, counterfactual alternatives (`faster`, `stop`, random `target_speed`, `slower`, `lane_change`, `crash`) with kinematic roll-out verdicts (`dynamic_crash`, `allowed`, `safe_to_execute`); `faster` crashes in 60.5% of the 23,091 frames of one archive, `stop` 46.6%, `target_speed` 43.2%, `slower` 4.3%. Use them instead of (or to calibrate) our own label pass; the images come from the same-camera data chunks (A56).
 - **Readouts:** offline AUROC of p_safe per bin, especially in the 2 s before expert hard-brakes; closed loop: lead-vehicle group DS, vehicle-collision share (J 20.1 lost points per
   run; target <= 14), not-finishing share (guard: J 6.7, WoR 24.1; stop if > +3), abilities Emergency_Brake and Merging.
 - **Differs from** A28 (decodes the existing posterior), A29 (needs lead-state heads and analytic IDM) and A26 (a looming target): none learns the counterfactual. **Risks:** the
@@ -649,6 +660,7 @@ plausible source of its low collision rate (22% of runs, 7.4 lost points); A37 i
 - **Step 1, anticipation:** label v*(t) = min over tau in [0, Delta] of the expert's target speed at t + tau, Delta in {0.5, 1.0, 2.0} s (2 / 4 / 8 frames at 4 Hz). Waypoints unchanged.
 - **Step 2, sampler:** oversample frames in the 2 s before the expert's target speed drops by >= 4 m/s (`--brake_frac`, same machinery as arm K's `--swerve_frac`; K gave no gain on
   swerves, this is the braking side).
+- **Ready-made buckets (S-122, A56):** SimLingo's `buckets_paths.pkl` is the published index of such buckets over 2.92M frames: `brake` 1.49M, `leading_object_vehicle` 1.92M, `vehicle_side` 382k, `vehicle_front` 41k, `walker_hazard` 26k, `leading_object_static.prop.trafficwarning` 36k, `changed_route` 177k, `start_from_stop` 97k, `acceleration_-5` 127k.
 - **Step 3, caution token (optional):** a scalar c in {0, 1, 2} selects Delta_c in {0, 1, 2} s (or IDM relabelling with the headway T and gap s0 scaled by 1 + c on frames with a lead
   actor); one policy then offers a deployable caution knob that is trained, not decoded, so it does not average modes.
 - **Readouts:** lead-vehicle group DS, vehicle-collision share, not-finishing share (stop if > J + 3 points), Emergency_Brake ability; guard: "all other" group >= J - 3.
@@ -721,6 +733,7 @@ J has a vehicle collision in 47% of its runs, and we still cannot say who hit wh
 - **Use 2, training signal without an expert label:** unlikelihood on the speed bins >= the executed speed for frames in [-2 s, -0.5 s] before a rear-end or pedestrian collision
   (avoidable by slowing). Needs balanced positives from similar situations we passed, or it teaches blanket caution; do use 1 first.
 - **Use 3:** relabel those states with PDM-Lite replay (A6's shadow-mode recipe) once the clips say where it matters.
+- **Use 4 (precedent, S-122):** VLAAD (arXiv 2603.25946) learns a collision-risk score from 1,521 collision clips of TF++ failures (Town12 / 13, 4 Hz RGB + control; no release found) and appends it to TF++'s global state: Town13 DS +14.1% relative, Bench2Drive 86.97 DS / 71.97% SR. Our clips are on-policy, so the same recipe on J's failures is use 2 / 3.
 - **Single camera:** yes; actor poses are logged for analysis only. **Cost:** about a day of code, free per eval afterwards.
 
 ### A45. Vision reliance at hazards: does the head use the image where it matters? - **Next** (Tier 0 audit; offline on cached features, ~1 box-hour; extends A0) (S-117)
@@ -752,6 +765,7 @@ recovery camera), camera-only checkpoints (`ln2697/transfuser-carla-123d`). Our 
 - **Step 3 (optional, A7):** the public camera-only TFv6 checkpoint as a teacher for soft speed / path labels (its calibrated uncertainty is exactly what the aligned expert encodes).
 - **Risks:** adapter effort and convention mismatches (camera intrinsics, speed bins, 4 Hz vs 20 Hz); the 220 evaluation routes may overlap LEAD's training scenarios (report as a caveat); it
   makes the gap to WoR larger partly through data, so report it as a data-upgrade row, not as a method row.
+- **Camera compatibility first (S-122):** our frozen TF++ encoder was trained on 1024x512, FOV 110, camera at x = -1.5 m, z = 2.0 m. The paper ablates a 110 degree front camera, but the README does not state the released rig's per-camera calibration: check it in step 0. Bench2Drive's data camera (1600x900, FOV 70, x = 0.8, z = 1.6) and TaCarla's (nuScenes-style) differ and cannot feed the frozen backbone without re-rendering; **SimLingo-Data uses our camera (A56) and can start first**.
 - **Single camera:** yes (one of the six cameras; the others are never read). **Why Tier 2 first:** data alignment was the largest lever in the field's best recipe, and our own J/E trade-off shows
   the data mix sets the skills.
 
@@ -768,6 +782,7 @@ trained on clean images. S-072 also shows the route survives a *random* backbone
 One frame cannot give relative speed, and the lead-vehicle families (HardBreakRoute, MergerIntoSlowTraffic, HighwayExit: 87-98% collisions) are exactly where closing speed decides. CarLLaVA reports
 fewer rear-end collisions with temporal input (qualitative; its leaderboard score did not rise) and names rear-end collisions and high-speed merging as its failure modes, the same as ours.
 - **S-120 evidence:** J's extra lead-vehicle collisions are on the route line (HardBreakRoute 2.25 vs E 1.25 events per run, 8% off the line; ParkingCutIn 1.10 vs 0.40, 0%) and J drives 20% faster there: a closing-speed / braking failure, which is what history tokens, A38, A39 and A42 address; HighwayExit (30% off the line) and ParkingExit (80%) are lateral.
+- **Demoted (S-122):** the strongest single-camera system on the leaderboard (SimLingo, 86.55 DS) processes one image (two 448x448 tiles) without frame stacking, and CarLLaVA saw no DS gain from temporal input; run this only if the lead group still regresses after A56 / A54 / A15.
 - **Design:** extra tokens = pooled 4x4 features of frame t minus frame t-k (k = 1 or 2 saved frames = 0.25 / 0.5 s; the agent buffers 5 / 10 ticks), **no past actions** (no copycat shortcut),
   keyframe up-weighting at expert action changes (Wen et al., ICML 2021, shown in CARLA). Cached features make the second frame nearly free in training.
 - **Readouts:** lead-vehicle group DS and vehicle-collision share, HardBreakRoute; guard: the non-lead groups >= J - 3. **Kill:** no gain on the lead group.
@@ -807,8 +822,59 @@ which is why the one-seed arms of the last weeks ended with CIs touching 0.
 - **Matched-speed control for every caution method (A37, A38, A39, A43, A50):** a method that lowers collisions by driving slower has learned nothing. Compare with the plain head at a global speed scale (0.8 / 0.9 / 1.0 x target speed) at the same mean speed. WoR is safe by driving
   1.8 m/s on average (3.5 on finished routes) and loses 24 + 6 + 2 points to the time cap (S-120); an open-loop vs closed-loop study (arXiv 2605.00066, NAVSIM vs Bench2Drive) finds the same pattern: methods that buy safety with progress rank high open-loop and fall in closed loop
   through timeouts, and ego progress is the strongest single predictor of closed-loop success.
-- **If a 2-3 point effect must be resolved** (a thesis ablation), add routes, not runs; candidates are further scenario instances from the Bench2Drive route generator or Town12/13 validation routes held out of training (check the generator first).
+- **If a 2-3 point effect must be resolved** (a thesis ablation), add routes, not runs; first candidate: **Fail2Drive's 200 paired Town13 routes (A58; MIT; 420 routes resolve ~3.4 DS at one run per arm)**, then further scenario instances from the Bench2Drive route generator.
 - **Single camera:** n/a. **Cost:** none for the policy; one extra eval config for the speed-scale control (~45 min on 12 lanes).
+
+### A53. Scale-free waypoint loss, residual to a constant-speed forecast, and a 2.5 s horizon - **Next** (one head-only arm; time-series practice; Tier 3) (S-122)
+Today: 5 waypoints at 4 Hz (a 1.25 s horizon), L1 in metres, lateral weight 3.0. Forecasters are trained and scored on scale-free errors (MASE: error divided by a naive forecast's error; RevIN: instance normalisation) so that large-scale series do not dominate,
+and a model is judged by its skill over the naive forecast (constant velocity is the standard strong baseline for vehicles). A metre-scale L1 weights fast frames more (the error scale is speed x dt) while hazard behaviour (stopping, starting, creeping) lives at low
+speed. Note: L1 gradients are sign x weight per element, so the 73.5% "longitudinal share" of ch. 13.26 is a share of the loss value, not of the gradient (S-122); the argument here is scale across frames.
+- **Design:** (i) target = real waypoint minus the constant-speed, route-following forecast (v dt k along the route points); the network predicts the residual (zero-initialised head); (ii) divide each waypoint's error by max(naive displacement, 1 m) or by the
+  per-horizon MAE of the naive forecast on the training set; (iii) horizon 5 -> 10 waypoints (2.5 s, as SimLingo's labels), the PID keeps reading the first 2-3; (iv) readouts: skill score against the naive forecast per stratum (speed < 3 m/s, lead vehicle within 15 m,
+  brake onset), speed-bin cross-entropy on hazard frames; closed loop only if the low-speed / hazard skill improves by >= 20%. Expect a small effect: judge it by mechanism metrics (A52).
+- **Single camera:** yes. **Cost:** head-only on cached features; combine with A15 (the same arm can carry the longer horizon).
+
+### A54. Space-to-depth tokens with token masking (BevAD) - **Next** (one head-only arm; Tier 2) (S-122)
+**Evidence:** BevAD (arXiv 2603.15185; six cameras, Bench2Drive), Table 1: baseline 36.4% SR / 66.9 DS; masking 20% of the lateral cells 42.0 / 72.4; pixel-unshuffle (space-to-depth) with patch 4 **57.4 / 82.6**; patch 5 collapses (40.9 / 66.4); the unmasked model attends to distant,
+occluded or irrelevant cells (causal confusion), and the gains are invisible in open-loop L1. **Ours:** the stride-32 map (9x24 at 288x768) is average-pooled to 4x4 = 16 tokens; a lead car at brake onset is 0.4-0.55 of one stride-32 cell (S-100) and is averaged with its
+surroundings; `vision_grid 8` pooled the same map (ch. 13.24); vision is lightly used (A45).
+- **Design:** stride-16 map (18x48) -> pixel-unshuffle p = 3 -> 6x16 = 96 tokens of 9x channels -> linear to d (nothing averaged away); random masking of 20% of the lateral columns in training only; arms: unshuffle + masking, unshuffle only, the 16-token baseline; the cache holds the
+  stride-16 features (~4x the current cache: check disk).
+- **Readouts:** A45's probe AUROC on the new tokens; lead-vehicle group DS and collision events per run; guard: other groups >= J - 3. **Single camera:** yes. **Cost:** one arm; relates to A42 (queries over the pyramid) and A31.
+
+### A55. Generative / multi-modal planning head, together with scaled data - **Later** (head-only; Tier 2, conditional on A56 / A46 data) (S-122)
+**Evidence:** BevAD (Table 2 and the data-scaling figure): point estimator + waypoints 51.7% SR, diffusion 56.2%; point + path / speed 57.4%, diffusion + path / speed 59.4%; dynamic infractions 0.423 (diffusion) vs 0.505; with cumulative data splits to ~16k scenes diffusion
+improves **linearly** while point estimators show diminishing returns after ~8k (BevAD-M 72.7% SR vs 55.3% on SimLingo data only). DiffusionDrive and Hydra-NeXt (A22) are further precedents. **Why for us:** two-way obstacles need a committed stay-or-pass choice (A41 gates two heads; a
+generative head samples one mode instead of averaging), and our data will grow 5-8x (A56, A46) into the range where point estimators saturate.
+- **Design:** flow matching (or a 3-mode MDN with winner-takes-all as the cheap version) over the path offsets and speed bins, conditioned on the policy token; 4-8 steps; decode with anchors (DiffusionDrive-style) or the median of 5 samples so that run-to-run noise does not rise; compare at equal data first
+  (expect +2-4 SR points, below A52's MDE: judge by overtaking success and the two-ways families), then at 3x data.
+- **Readouts:** overtaking success, the three two-ways families, per-route run-to-run SD of DS (must not rise). **Single camera:** yes. **Cost:** head-only; the head's inference grows with the number of steps.
+
+### A56. SimLingo-Data pilot: Dreamer counterfactual labels, bucket index and augmented views on our camera - **Next** (Tier 2; supersedes the A37 step 0 label pass) (S-122)
+**Facts** (`scripts/analysis/simlingo_dreamer_probe.py`; `E:\MThesis_EXP\analysis_20261004\simlingo_dreamer_probe_0410.txt`): `RenzKa/simlingo`, 1.17 TB, 3,308,315 frames, 38 scenarios, PDM-Lite; **the same camera as `PDM_Lite_Carla_LB2`** (1024x512, FOV 110, x = -1.5, z = 2.0; confirmed in the repo's
+`team_code/config.py`) plus an **augmented-offset RGB per frame** (random shift and yaw: recovery views); measurements / boxes JSON in the PDM-Lite layout we already load; driving data ~580 GB for training (1-scenario routes 274 GB in 12 chunks, 3-scenario routes 202 GB in 16, LB1-split
+72 GB, parking-lane Town12 31 GB; the ~580 GB validation split has the same format). **Dreamer labels (~9 GB in total):** per frame, counterfactual alternatives with 10 waypoints, 20 route points and a kinematic roll-out verdict: `faster` (throttle ramp to ~14.8 m/s) crashes into a
+dynamic actor in **60.5%** of the 23,091 frames of one archive, `stop` 46.6%, random `target_speed` 43.2%, `faster_factor` 10.7%, `slower` 4.3%, `slower_factor` 0.2%, `crash` (steer at a named vehicle: id, distance, type) 96.2%, `lane_change` left / right with `allowed` (sidewalk, oncoming lane:
+41% not allowed). **`buckets_paths.pkl` (620 MB, no import opcodes):** the CarLLaVA / SimLingo sampling buckets, 42 over 2.92M frames (see A38).
+- **Use:** (1) A37's labels without our own label pass: a per-frame "speed v crashes" critic from the `target_speed` / `faster` / `stop` entries, AUROC first; (2) A38's hazard sampler = the buckets; (3) more same-camera data for A49 (lead-vehicle families) and a small A46; (4) the augmented views for the recovery question (S-079).
+- **Pilot:** one data chunk (~23 GB; stream-extract only rgb + measurements + boxes, skip LiDAR) and its Dreamer chunk; ~100k frames of features on one GPU (~6 min at 300 fps); train the critic head; AUROC by stratum (vehicle / walker / none, distance); then the closed-loop decode of A37.
+- **Licence (Wayve, non-commercial):** academic research is allowed; attribution is required in derivative work; models trained on it may be published only on an academic basis and free of charge; **no use in the operation of a vehicle or robot**; revocable; indemnity clause. Simulation research is the intended use (SimLingo's own),
+  but check the clauses with the supervisor before the thesis relies on it; the HF relay stays private.
+- **Caveats:** a separate collection from `PDM_Lite_Carla_LB2` (random weather; the README says the frames are not from unique routes); chunk files mix scenario types, so a hazard subset still costs whole ~23 GB chunks; Dreamer's crash test is open-loop against recorded actor futures (the A37 assumption).
+- **Single camera:** yes. **Cost:** ~25 GB of downloads + ~9 GB labels for the pilot; a box with 150 GB disk and one GPU.
+
+### A57. Newsvendor decode: a low speed quantile that relaxes with standing time - **Next** (eval-only; Tier 1; with the matched-speed control) (S-122)
+For an asymmetric cost (c_o per m/s above the right speed, c_u per m/s below) the optimal point forecast is the quantile q = c_u / (c_o + c_u) of the predictive distribution, not its mean. Our speed posterior (two-hot over 8 bins) is decoded by its mean; a static median deadlocked (A28, -22.9 DS: a
+stop / go posterior is bimodal and the median snaps to the stop mode) and so did the hard brake (S-059). A collision multiplies the score by 0.6 while waiting costs little until the 200 s cap, so the right speed is a *low* quantile that **rises as the car has waited**: the cost of waiting accumulates.
+- **Design:** v = Q_q(posterior) with q(t) = q_0 + (1 - q_0) min(1, t_standing / T); start conservative (q_0 in {0.2, 0.3, 0.4}), relax to the mean-like decode with T in {4, 8} s; reset when the speed is above 3 m/s. It shares the stall breaker with A50 (the creep clamp is the q_0 -> 0 limit).
+- **Control (A52):** the plain head at a global speed scale with the same mean speed. **Success:** fewer collision events per run than the control at the same time-cap share (guard +3 points); abilities Emergency_Brake and Merging.
+- **Single camera:** yes. **Cost:** eval-only, ~45 min per config on 12 lanes.
+
+### A58. More routes: Fail2Drive (and Town13 validation routes, Longest6 v2) next to the 220 - **Next** (Tier 0; evaluation infrastructure) (S-122)
+Fail2Drive (`autonomousvision/fail2drive`, MIT; arXiv 2604.08535): 100 *pairs* of routes = 200 routes in Town13; each shifted route (17 unseen long-tail scenario classes: appearance, layout, behaviour and robustness shifts) is paired with an in-distribution route on the same road, spawn points and traffic, so the paired difference
+measures the sensitivity to the shift; the repository ships the PDM-Lite expert and TransFuser++ as baseline agents; SOTA models lose 22.8% success on average.
+- **Why:** 220 + 200 routes lower the smallest resolvable difference from ~4.9 to ~3.4 DS at one run per arm (null SD 25 per route); the pairing removes route difficulty; and the shifted classes (layout, behaviour) are what our obstacle and lead families probe.
+- **Do:** wire the route files into the harness (same XML family), run E, J and WoR once (WoR keeps its 4 cameras), report in-distribution vs shifted per arm and the gap. **Cost:** about one 220-route-equivalent evaluation per arm (~2 h on 12 lanes).
 
 ### A6. DAgger with the PDM-Lite expert - **Later** (large)
 Roll out our policy, let PDM-Lite label the visited states, add them to training. The general
@@ -820,6 +886,7 @@ the expert running on the training box. Was C90 (and C72, C73).
 - About 6-8.6k samples per round. Each round: DAgger for 1 epoch, then SimPO/DPO for 10 epochs (preferred =
   expert action, rejected = the policy's top-1, beta 0.1, gamma 0.1).
 - VAD base 61.82 -> 71.39 DS, saturating after round 4.
+- **RoG-DAgger (arXiv 2608.24525, August 2026, base SimLingo; S-122):** short-horizon kinematic rollouts build expert demonstrations in safety-critical states, takeover is timed near estimated points of no return, and expert decisions are aligned with the student's field of view: Bench2Drive +5.3 DS / +6.2 SR points, Longest6 v2 22 -> 44 DS, Fail2Drive SR 55 -> 66%.
 
 For us the preference step fits the two-hot target-speed head directly (expert speed bin preferred over our
 top-1). The takeover frames also feed A11 (collisions) and A1 (obstacles) with states the offline data never
@@ -1096,7 +1163,21 @@ the model well outside the horizon it was trained on. B24 found deeper search lo
 - **Step 1, cap (eval-only):** `GumbelMCTS(max_depth=D)`: a node at depth D is not expanded further and is scored by its value head; D in {3, 5, 8, unlimited}; B24's 16 checkpoints at 64 sims, 30
   episodes, graph search (a `max_depth` knob next to `depth_bound`). **Success:** the score stops falling with sims at D = 5.
 - **Step 2 (training, if step 0 shows the error grows after K):** K = 8 with a lower weight on steps > 5, so deeper search has something to stand on.
+- **Forecasting lens (S-123):** direct multi-step heads instead of iterating the dynamics beyond the trained depth: B45.
 - **Companion:** B38 (pessimism), which attacks the same compounding error from the value side. **Cost:** step 0 and 1 are eval-only, ~1 box-hour on 4 GPUs.
+
+### B45. Root-anchored direct multi-step heads as the deep-leaf evaluator - **Next** (after B43 step 1; Tier 2; one flag + 4 runs) (S-123)
+**Evidence:** the DLinear study (Zeng et al., arXiv 2205.13504) found that the long-horizon accuracy of Transformer forecasters comes from *direct* multi-step output, not from attention; iterated forecasters accumulate error with the horizon. Our dynamics iterate (unroll K = 5 in
+training) and B43 / S-121 shows the policy KL and the value error x2-4 at depths 6-12 in nine of nine checkpoints and a supra-linear latent drift for GTrXL.
+- **Design:** for a tree node at depth d (action prefix a_0 .. a_{d-1}) evaluate with a *direct* head V_d(s_0, a_{0:d-1}) (the root latent and an embedding of the action sequence -> value / value prefix at that depth), trained on the same replay segments (the real return under the real actions plus the
+  bootstrapped value, like multi-step value targets), instead of the recursively imagined latent beyond depth 5. Step 1: auxiliary loss only (B42's multi-horizon heads are the same family). Step 2: in search at depth > 5 combine with the recursive value (the minimum, or a learned gate).
+- **Readouts:** B43's curves (value error and policy agreement vs depth) and B24's score vs simulations (should stop falling). **Cost:** B43 step 1 first (a depth cap says whether depth is the problem); then a flag and four runs.
+
+### B46. Event and ball-forecast auxiliary (Event-Aware World Model style) - **Later** (Tier 3; one flag) (S-123)
+**Evidence:** the Event-Aware World Model (arXiv 2601.19336) predicts automatically extracted events (segment boundaries of the observation stream) as an auxiliary task: 10-45% over existing MBRL baselines on Atari 100K, Craftax and DMC. Forecasting practice: change-point and time-to-event targets.
+Breakout events are few and exact (wall bounce, paddle hit, brick hit, ball lost) and the ball path is piecewise linear with reflections.
+- **Design:** auxiliary heads on the latent state: (a) the type of the next event and the number of steps to it (classification + regression), (b) the landing column of the ball at the paddle row; labels from the replay (reward, lives, ball motion; the RAM probe of B41 for the landing column), no extra interaction.
+- **Readouts:** 10k / 30k scores against the same seeds without it, probe accuracy, B43's drift curves (do the heads reduce the latent error at depth 6+?). **Cost:** one flag, 2-4 runs.
 
 ### B44. How many zero scores are stuck loops? Stagnation-aware evaluation and acting - **Later** (diagnostic first) (S-118)
 B2/B24 note that games where the agent never launches the ball (no FIRE after a life loss) run to the 27k-step cap and hold up every evaluation; at 64 sims one GTrXL checkpoint finished in 52 min
