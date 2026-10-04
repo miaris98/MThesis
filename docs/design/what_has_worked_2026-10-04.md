@@ -1,4 +1,4 @@
-# What has worked so far, and what the research says (2026-10-04, S-117 / S-118)
+# What has worked so far, and what the research says (2026-10-04, S-117 / S-118 / S-120)
 
 Why: before building new algorithms, list what actually moved the score in this project, how strong each piece of evidence is, and
 what the published work says about the same problems. Sources are the project's own logs (`challenges/`, `E:\MThesis_EXP`) and a
@@ -113,3 +113,20 @@ Sources: [SimLingo](https://arxiv.org/abs/2503.09594), [CarLLaVA](https://arxiv.
 [LEAD dataset](https://huggingface.co/datasets/ln2697/lead), [LEAD data layout](https://github.com/autonomousvision/lead), [Safe2Drive](https://arxiv.org/abs/2606.00191),
 [PlanT 2.0](https://arxiv.org/abs/2511.07292), [Judge, Then Drive](https://arxiv.org/abs/2604.27366), [Epistemic MCTS](https://arxiv.org/abs/2210.13455),
 [Model-Value Inconsistency](https://arxiv.org/abs/2112.04153), [EfficientZero V2](https://arxiv.org/abs/2403.00564), [Model soups](https://proceedings.mlr.press/v162/wortsman22a/wortsman22a.pdf).
+
+## 6. Addendum, 2026-10-04 evening (S-120): what the 220-route records add
+
+Same records, three new scripts (`a3b_headroom.py`, `a3c_collision_anatomy.py`, the J-seed null pairs); numbers and caveats in `challenges/log_03` S-120.
+
+| # | Finding | Evidence | Grade |
+|---|---|---|---|
+| 15 | **The frozen CARLA-pretrained backbone is robust to night, rain and fog; WoR is not** | E flat (night +0.4 vs day, rain -0.5 vs dry, fog +0.5 vs none); WoR fog -13.2 [-23.8, -2.9]; advantage over WoR in fog +22 vs +8 elsewhere (change +13.7 [+1.0, +26.8]; J +13.3 [+2.4, +24.9]); night and rain not significant | B (CI barely excludes 0, unpaired across conditions) |
+| 16 | **J's vehicle collisions are systematic**: 80% of the points on routes where >= 3 of 4 seeds collide | 201 routes, 4 seeds; lead 89%, obstacle 83%, other 67% | A (descriptive; the seeds share one base) |
+| 17 | **E and J drive straight into stopped vehicles** on obstacle routes; J also clips cones while passing | collision position projected on the route: E 0% off the line (0.06 m median), J vehicle 83% on the line, J layout 50% off the line to the left | A (descriptive) |
+| 18 | **Repeated collisions cost J 3.5 points per route-run** (E 1.6, WoR 0.6) | 32% of J's colliding runs have >= 2 vehicle events | A (descriptive; the DS gain of a stop-after-contact behaviour is an upper bound) |
+| 19 | **Obstacle routes are the universal failure** (E, J and WoR all < 50 on 29 of 196 routes, 21 obstacle) | per-route best-of-three | A (descriptive) |
+| 20 | **E's lead-vehicle skill is generic, J's regression is a braking / speed regression** | E 82.2 on families it never trained on; J +20% speed, extra collisions on the line | B (mechanism inferred from speed and position; A36 step 0 and A45 test it) |
+| 21 | **Closed-loop DS over 220 routes resolves ~5 DS (one run per arm)** | seed-pair null: SD 25.0 per route, spread +-1.9 of the mean | A (statistical) |
+
+Camera-only reference (arXiv v1 table 8, one front camera): SimLingo DS 85.07, Emergency Brake 88.3 (ours 25-38), Overtaking 57.0 (16-18), Traffic Sign 82.5 (53-57), Give Way 53.3 (E 56), Merging 54.0 (E 44.9, J 26-39). The biggest gaps sit where our collisions are.
+An open-loop vs closed-loop study (arXiv 2605.00066) reports that ego progress is the strongest single predictor of closed-loop success and that methods buying safety with slowness fall in closed loop (the WoR pattern here).

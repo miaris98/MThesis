@@ -11,14 +11,15 @@ The status block below is the only snapshot in this file: replace it, don't appe
 
 ---
 
-## Status: 2026-10-04 evening Athens (S-117, S-118, S-119) - **box 3 (Atari) and box 2 (CARLA) destroyed after a verified save; box 1 (CARLA) is idle and verified on E: (destroy it if it is still up); nothing was pushed to HF today**
+## Status: 2026-10-04 evening Athens (S-117 to S-120) - **all three boxes are gone (box 3 and box 2 destroyed after verified saves; box 1 idle, its last verified sync 16:36 with 391 files identical); no box is running; nothing was pushed to HF today**
 
 | Item | Result |
 |---|---|
 | **CARLA, 220 routes (A9 final, S-117)** | official DS: E e15 63.4, arm J seeds 0-3 58.8-61.9 (pooled 59.4), original WoR 49.4. Paired vs WoR: E +13.7 [+8.6, +18.8], J +10.4 [+5.7, +15.1], every J seed +9.8 to +11.9 (CIs exclude 0). **J - E = -2.6 [-5.9, +0.7]: J is not an overall improvement over E.** |
 | **Where the score goes (S-117)** | J: 20.1 of 36.9 lost points per run are vehicle collisions (47% of runs, WoR 22%). J - E: lead-vehicle routes **-15.2 [-21.5, -9.0]**, obstacle routes **+7.2 [+0.7, +13.6]**, other -1.0. Against WoR the advantage is entirely on the 102 routes that are neither (+22.8 [+16.6, +28.9]); lead-vehicle -6.7 and obstacle +2.5 are ties. Abilities (success %, J / E / WoR): overtaking 16-18 / 5.7 / 11.7, merging 26-39 / 44.9 / 21.8, emergency brake 25-38 / 32 / 30 |
 | **What has worked (ledger, S-117)** | `docs/design/what_has_worked_2026-10-04.md`: confirmed wins = route conditioning, transformer head over WoR's conv head (+15), obstacle data + `route_original`; recovery camera, colour aug, 288x768 not established; vision lightly used (no-vision MLP 0.7558 vs 0.5793; random-backbone evals 50-60 DS); 73.5% of the waypoint objective is speed x dt; the field's best recipe (LEAD) published its state-aligned dataset |
-| **New items** | **A36-A48 (CARLA) and B37-B44 (Atari)** with tiers and a first-session order (block below); A15 and A21 promoted to Next |
+| **Headroom analysis (S-120)** | from the existing records: **J's vehicle collisions are 80% systematic** (>= 3 of 4 seeds collide; 20% lottery) -> A43 demoted; E and J **drive straight into stopped vehicles** on obstacle routes (0.70 / 0.86 events per run, on the route line; WoR 0.22) and J clips cones while passing; **32% of J's colliding runs hit again (3.5 points per run)** -> A50; obstacle families are the **universal failure** (21 of the 29 routes where E, J and WoR all score < 50); E is flat in night / rain / fog while WoR loses 13 in fog (our advantage +22 in fog vs +8, change +13.7 [+1.0, +26.8]); **220 routes resolve ~5 DS at one run per arm (7 on the 102 lead + obstacle routes)** -> A52 |
+| **New items** | **A36-A52 (CARLA) and B37-B44 (Atari)** with tiers and a first-session order (block below); A15 and A21 promoted to Next; A43 demoted (S-120) |
 | **B23 step 1b (graphed search in the trainer, S-118)** | **identical to eager** at batch 32 (1,600 updates) and at batch 256 on a 3090 (800 updates): all 298 model tensors, all target tensors, the whole replay buffer (acting policies and root values included); 0 fallbacks (0/200 acting, 0/800 reanalyze). |
 | **B36 pilot (S-118): GTrXL 30k, mixer wd 0, seeds 0-3, plus two non-zero-output-init runs** | s2 finished: 30k **129.8** (25k 120.0, 20k 64.4); s0 25k 24.8 (20k 51.6); s1 25k 35.1 (20k 53.7); s3 20k 98.4; out-init s0 10k 23.0, s1 10k 9.7. **The mixer blocks still do not train** (|Wq| 6.510 at 15k, non-zero out init 6.507 at 10k, gate bias 2.000, attention uniform) -> **B37**. Others not finished |
 | **B37 step 0 / B43 step 0 (S-118)** | weight-trajectory audit of the 100k runs: only the two mixers are dead (their change equals the weight-decay rate). Model drift vs imagined depth: the per-step latent error doubles after depth 5 (the training horizon); the 64-sim tree reaches depth 17 |
@@ -31,7 +32,7 @@ need ~1 h, s3 ~2.5 h, the out-init runs 3-4 h. **Not saved:** seed 1's env20000 
 env15000 checkpoint. Ops lessons are in S-119 and `scripts/ops/README.md`.
 Older status: A14 at 4 seeds, one run each (+7 to +9, CIs touching 0, S-113/S-114); B35 no trunk difference at 30k (explained by the dead mixer).
 
-## New algorithm ideas, 2026-10-04 (S-117, S-118): A36-A48 (CARLA, one front camera) and B37-B44 (Atari)
+## New algorithm ideas, 2026-10-04 (S-117, S-118, S-120): A36-A52 (CARLA, one front camera) and B37-B44 (Atari)
 
 Evidence ledger (what moved the score, with grades) and the external cross-check: `docs/design/what_has_worked_2026-10-04.md`.
 
@@ -47,6 +48,13 @@ and WoR all drove):
   finishing, 6.5 blocked, 7.4 vehicle collisions. **47% of J runs have a vehicle collision (WoR 22%).** Collisions are 94-98% of the loss on HardBreakRoute and HighwayExit, 89% on
   BlockedIntersection, 87% on MergerIntoSlowTrafficV, 95% pedestrian on DynamicObjectCrossing; ConstructionObstacleTwoWays and AccidentTwoWays lose 46% and 52% to not finishing.
 - **Abilities (success %, J seeds / E / WoR):** Overtaking 16-18 / 5.7 / 11.7; Merging 26-39 / 44.9 / 21.8; Emergency brake 25-38 / 32 / 30; Give way 39-50 / 56 / 37; Traffic signs 53-57 / 49 / 44.
+- **Headroom and anatomy (S-120; `a3b_headroom.py`, `a3c_collision_anatomy.py`, same records):** (1) J's vehicle-collision points are **80% systematic** (>= 3 of 4 seeds collide on the route; lead 89%, obstacle 83%, other 67%) and 20% lottery.
+  (2) **Universal failure = obstacles:** E, J and WoR all score < 50 on 29 of 196 routes (48% of what the best-of-three still loses), 21 of them obstacle families; group means E / J / WoR: lead 82.2 / 66.2 / 71.3, obstacle 44.1 / 51.4 / 48.7,
+  other 70.7 / 70.1 / 48.3. (3) **Anatomy:** on obstacle routes E's vehicle collisions are all on the route line (0.70 per run, median lateral offset 0.06 m: it drives straight into the obstacle), J's 83% (0.86); J's layout collisions (0.49 per run,
+  cones and warning signs) are half off the line to the left (clipping while passing); J's extra lead-vehicle collisions are on the line too (HardBreakRoute 2.25 vs E 1.25 events per run). (4) **Repeats:** 32% of J's colliding runs have >= 2 vehicle
+  events, costing 3.5 points per run (E 1.6, WoR 0.6). (5) **Speed:** J 6.3, E 5.5, WoR 3.5 m/s on finished routes; WoR's safety is bought with the 200 s time cap (24 + 6 + 2 points lost); J's colliding runs are not faster than its clean runs
+  on the same route, so the slowdown has to be at the hazard. (6) **Weather:** E is flat across night / rain / fog, WoR loses 13 in fog. (7) **Power:** the smallest difference 220 routes resolve at one run per arm is ~5 DS (7 on the 102
+  lead + obstacle routes); J seeds differ by up to 3.3 DS (A52). (8) Camera-only frontier (SimLingo, arXiv v1): Emergency Brake 88 vs our 25-38, Overtaking 57 vs 16-18, Traffic Sign 82 vs 53-57; E's Give Way (56) is at par.
 - **What has moved the score (grades in the ledger):** confirmed = route conditioning, the transformer head over WoR's conv head (+15), obstacle data with `route_original`
   (+7.2 on obstacle routes, -15.2 on lead-vehicle routes). **Not established** (CIs include 0, S-079): recovery views, colour augmentation, 288x768. No effect: head size, finer grid,
   loss re-weighting, geometry loss, longer training (`tried_and_ruled_out.md`). The new items are ranked by how much *new information* they inject.
@@ -74,13 +82,14 @@ and WoR all drove):
 | 0 | A47 | Does the painted route overlay hurt the frozen backbone's view of vehicles? (decides A17c) | offline, 500 frames | overlay sits on the lane where hazards appear | vehicle IoU painted vs clean |
 | 0 | A44 | Collision-clip recorder in every eval | 1 day code, free after | 47% of runs collide and we cannot see why (A11 open) | clips on the next eval |
 | 0 | B37 | Mixer probe: AdamW param group, open gates, module-update audit | 10-min probe (step 0 done) | B36: blocks at init at 10-15k | |dWq|/|Wq| > 5% by 2k |
+| 0 | A52 | Evaluation protocol: mechanism readouts, matched-speed control, >= 3 runs for headline claims | none / one eval config | J seeds differ by up to 3.3 DS; 220 routes resolve ~5 DS, 7 on the 102 lead + obstacle routes (S-120) | every arm table |
 | 1 | A36 | Weight-space merge E <-> J, J-seed soup | eval-only, ~45 min per alpha on 12 lanes | J lost 15 DS on lead-vehicle routes, gained 7 on obstacles | both groups within 3 DS of the better parent |
-| 1 | A43 | Uncertainty-gated caution + stall breaker over the 5 heads we have | eval-only, ~45 min per config | collision lottery; S-059 shows the guard is needed | lead-vehicle DS, collision share |
+| 1 | A50 | Contact reflex (stop after the first vehicle collision) + creep clamp | eval-only, small agent change | 32% of J's colliding runs hit again: 3.5 points per run; no expert frame contains a contact (S-120) | events per colliding run, 2nd-event points |
 | 1 | B38 | Pessimistic / optimistic search: online-vs-target disagreement, or model-value inconsistency (one network) | eval-only first, 1 box-hour | B24: deeper search hurts; EMCTS / MVI prior art | score non-decreasing in sims |
 | 1 | B43 | Depth-capped search (<= training unroll 5) and model error vs imagined depth | eval-only, 1 box-hour | 64-sim trees reach depth 17 > unroll 5 | score vs cap, error curve |
 | 2 | A15 | **Path (space-indexed) + speed head, re-budgeted loss** | one arm, head-only | CarLLaVA/SimLingo ablations; 73.5% of our objective is speed x dt | layout collisions, DS |
 | 2 | A21+A38 | **Student-aligned labels:** drop/relabel braking caused by actors out of view, anticipatory targets, hazard buckets | 2-3 head-only arms | LEAD +1.37 / +11; CarLLaVA vehicle-hazard buckets; PDM-Lite logs `speed_reduced_by_obj_*` | lead-vehicle DS, completion guard |
-| 2 | A37 | Counterfactual speed-safety critic, safety-masked decoding | one arm, label pass on CPU | 20.1 of 36.9 lost points are vehicle collisions | AUROC, then lead-vehicle DS |
+| 2 | A37 | Counterfactual speed-safety critic, safety-masked decoding (variant c: candidate paths for the on-line obstacle hits) | one arm, label pass on CPU | 20.1 of 36.9 lost points are vehicle collisions, 80% systematic; E and J hit stopped vehicles on the line (S-120) | AUROC, then lead-vehicle DS |
 | 2 | A49 | **Cover the lead-vehicle families in J's fine-tune mix** (arm M) | existing pipeline, ~40 GB download | E never saw them, J's obstacle data overwrote car-following (-15.2) | lead >= E - 3 and obstacle >= J - 3 |
 | 2 | A46 | **Train on the LEAD dataset** (state-aligned expert, 12 towns, recovery views), front camera only | adapter + one arm | the field's best recipe published its data | 220-route DS vs E, J |
 | 3 | A39 | Asymmetric ordinal speed loss; speed-head weight 0.2 -> 1 -> 3 | head-only arms | collision x0.6 vs free slowness; weight never swept | collision share |
@@ -88,12 +97,13 @@ and WoR all drove):
 | 3 | A41 | Two-mode path head (stay / pass), filtered intent gate | one arm | two-ways families 19-23 DS | overtaking success |
 | 3 | A42 | Hazard queries on the full-resolution pyramid, box labels | one arm | lead car 0.4-0.8 of a stride-32 cell at brake onset | probes, pedestrian/lead families |
 | 3 | A48 | History tokens: previous-frame feature difference (closing speed), keyframe weighting | one arm | CarLLaVA: fewer rear-end collisions; our lead families | HardBreakRoute, lead group |
+| 3 | A43 | Uncertainty-gated caution over the 5 heads (demoted, S-120) | eval-only, ~45 min per config | only 20% of J's collision points are lottery; the heads share one base | lead-vehicle DS, collision share |
 | 2 | B37 | Winning mixer setting on the 30k screen, 4 seeds | 4 x 4.5 h | unlocks the thesis test | |Wq|, entropy before scores |
 | 3 | B39 | Deeper reanalyze, shallow acting; fresh network for targets | flag + 4 runs | reanalyze sets target quality | 10k score, value error |
 | 3 | B40 | Train under sticky actions, report both protocols | 2-4 runs | B2: n = seeds on deterministic evals | 30 distinct games |
 | 3 | B41 / B42 / B44 | RAM-supervised auxiliary probe; multi-horizon value heads; stuck-loop / stagnation analysis | diagnostics, flags | see entries | 10k score; episode lengths |
 
-**Next sessions.** *CARLA eval-only session (2 cheap boxes, ~4 h):* A44 recorder first; A36 (alpha 0.5 and the J soup on the 103 lead+obstacle routes) and A43 (5 heads, gated vs plain mean) on the same
+**Next sessions.** *CARLA eval-only session (2 cheap boxes, ~4 h):* A44 recorder first; A36 (alpha 0.5 and the J soup on the 103 lead+obstacle routes), A50 (contact reflex + creep clamp) and the A52 speed-scale control (J at 0.8 / 0.9 x target speed) on the same
 routes; the same session runs A45 and A47 on one box with the PDM-Lite data (500 frames, cached features). *CARLA training session (data box):* A46 feasibility (one route per scenario family, camera
 metadata, route fields) in parallel with A15 and the A21+A38 label arms (one change per arm, head-only on cached features), A37 step 0 (label audit on ~100 archives). *Atari box:* B37 probe (10 min) ->
 B36 rerun with the winning setting; B38 step 0 and B43 on B24's 16 checkpoints (eval-only, graph search); resume the saved B36 runs from `E:\MThesis_EXP\live_20261004_box3_4x3090_atari\` only if the
@@ -101,9 +111,9 @@ probe says the optimiser is not the fix.
 
 **Order of work for 2026-10-05** (draft; times Athens; ask the destroy time first; end-of-day save must start >= 90 min before it and is sized with a measured uplink)
 0. *No box, morning:* push the E: results of 2026-10-04 to HF from the laptop (boxes 1-3 folders, `analysis_20261004`); code: the A44 recorder (agent flag), B37 flags (`--mixer-optimizer adamw --mixer-lr
-   --mixer-wd`, GRU gate bias init), `GumbelMCTS(max_depth)` for B43 with a test, the A15 path head; A30 write-up (J vs E vs WoR by scenario group, S-117) and the thesis table.
+   --mixer-wd`, GRU gate bias init), `GumbelMCTS(max_depth)` for B43 with a test, the A15 path head; A30 write-up (J vs E vs WoR by scenario group, S-117) and the thesis table. *Box-free work first (S-120; CPU / laptop, E: has 373 GB free; every checkpoint needed is on E:: E e15, J seeds 0-3 e20):* build the A36 merged checkpoints (alpha 0.25 / 0.5 / 0.75, the J soup) and load-test them; A46 step 0 on a LEAD sample; A37 step 0 label calibration (range requests); B43 on the saved B36 checkpoints; A47 / A45 on CPU if the decoders run (500 frames). Rent the CARLA eval and Atari boxes once the A44 recorder, A50 and the B37 flags are coded and unit-tested (a box rented now would only run repeats).
 1. *CARLA eval-only session, 2 cheap boxes (`provision_eval.sh` now installs the original WoR; `gen_lanes_0410.py` balances lanes):* A44 recorder on J seed 0 first, then A36 (alpha 0.5 and the J soup on the
-   103 lead-vehicle + obstacle routes) and A43 (5 heads, gated vs plain mean). *One box with the PDM-Lite data (150-500 GB disk):* A45 and A47 audits (500 frames each, ~1 box-hour), A46 feasibility (one LEAD
+   103 lead-vehicle + obstacle routes) and A50 (contact reflex + creep clamp) with the A52 speed-scale control (J at 0.8 / 0.9 x target speed). *One box with the PDM-Lite data (150-500 GB disk):* A45 and A47 audits (500 frames each, ~1 box-hour), A46 feasibility (one LEAD
    route per scenario family, camera metadata, route fields), A37 step 0 label audit on ~100 archives; then the head-only arms A15 and the A21 + A38 label arms (one change per arm).
 2. *Atari box, 1 box with 4x 24 GB Ampere/Ada GPUs, >= 64 threads, 150 GB disk; probe HF first and time a 200 MB upload:* B37 probe (10 min per setting) -> the winning setting on the 30k screen (4 seeds) instead of
    resuming the dead-mixer runs unless the probe says the optimiser is not the fix; B38 step 0/0b and B43 steps 0-1 on B24's 16 checkpoints (`restore_b35_checkpoints.py`, graph search); B24 / sticky
@@ -591,6 +601,7 @@ J is E e15 fine-tuned for 5 epochs on the mixed data (A14), so the two heads sit
   E, +4 over J. The value is a free fix of J's regression and a base for the arms below, not a new capability. If no alpha works, the regression is a data-mix problem: arm M =
   fine-tune from E with an L2-SP penalty toward E's weights and scenario-family-balanced sampling.
 - **Single camera:** yes (no input changes).
+- **S-120 update:** on the 196 routes all three arms drove, E scores 82.2 on the lead-vehicle families (WoR 71.3, J 66.2) although it never trained on them; J drives 20% faster there (6.96 vs 5.81 m/s) and its extra collisions are on the route line (HardBreakRoute 2.25 vs 1.25 events per run, 8% off the line; ParkingCutIn 1.10 vs 0.40, 0%): J's loss is a braking / speed regression from the obstacle data, not missing coverage. Step 0 should also compare E's and J's speed posteriors on the same lead-vehicle frames (A45's data) and report the oracle as group-level (69.3 on these routes), not per route.
 
 ### A37. Counterfactual speed-safety critic (rule distillation) with safety-masked decoding - **Next** (one arm; the main new idea) (S-117)
 Imitation sees only the speeds the expert chose, never the unsafe ones, so it cannot learn "this speed would have hit that car". PDM-Lite's logs contain what is needed to compute
@@ -615,6 +626,7 @@ plausible source of its low collision rate (22% of runs, 7.4 lost points); A37 i
 - **Decode (an eval-time knob, no retraining):** S = {j : p_safe(j) >= theta}; take the imitation posterior renormalised on S and decode its mean (not the argmax or median, which
   snapped to a mode and deadlocked, A28); if S is empty, the lowest bin. Sweep theta in {0.3, 0.5, 0.7}.
 - **Variant (b), reflex:** a small binary head "the expert brakes >= 3 m/s^2 within 1 s" (focal loss), used only as a brake floor when p > theta.
+- **Variant (c), candidate paths (S-120):** on obstacle routes E and J drive straight into stopped vehicles (vehicle collisions 100% / 83% on the route line, median lateral offset 0.06 / 0.46 m, 0.70 / 0.86 events per run; WoR 0.22) and J clips cones while passing (layout collisions 0.49 per run, 50% off the line to the left). A speed critic rolled along the *expert's* path calls the straight path at speed safe (the expert swerves), so it has to judge the policy's own path: candidates = {predicted path, +-1.5 m and +-3 m shifts, stop} x speed bins, labels from rolling each against the logged actor footprints (and the static obstacles, if the logged boxes list them: check in step 0), decode = the safest candidate inside the imitation posterior. It is Hydra-MDP's trajectory-vocabulary scoring on one camera and covers the no-reaction and the clipping failures in one mechanism.
 - **Readouts:** offline AUROC of p_safe per bin, especially in the 2 s before expert hard-brakes; closed loop: lead-vehicle group DS, vehicle-collision share (J 20.1 lost points per
   run; target <= 14), not-finishing share (guard: J 6.7, WoR 24.1; stop if > +3), abilities Emergency_Brake and Merging.
 - **Differs from** A28 (decodes the existing posterior), A29 (needs lead-state heads and analytic IDM) and A26 (a looming target): none learns the counterfactual. **Risks:** the
@@ -654,7 +666,7 @@ Waypoints are trained with L1 against the expert path only. Add a hinge on the p
 nearest logged actor footprint at t + t_k (transformed into the ego frame of t, actor tracks stop-gradient), r = ego half-width + 0.5 m. The expert path itself is collision-free in
 the logs, so the loss is zero on expert-like predictions and only pushes back when the network drifts toward another road user (an inequality constraint, not a second target).
 A longitudinal version penalises the waypoint spacing (implied speed) that overruns the gap to the nearest in-corridor actor.
-- **Why:** vehicle plus layout collisions are 23.3 of J's 36.9 lost points; layout collisions alone are 42-54% of the loss on the construction-obstacle families.
+- **Why:** vehicle plus layout collisions are 23.3 of J's 36.9 lost points; layout collisions alone are 42-54% of the loss on the construction-obstacle families. S-120: J's layout collisions on obstacle routes (0.49 per run; cones 95, warning signs 64) are half off the route line, to the left: it starts the pass and clips the cones.
 - **Design notes:** use only vehicles and pedestrians ahead of or beside the ego (corridor 3 m wide); start with weight 0.1 of the waypoint loss; log the share of frames where the
   hinge is active. Risk: actors that reacted to the expert's own motion make the recorded future a counterfactual for the learner (passing manoeuvres), hence the corridor limit.
 - **Readouts:** `collisions_vehicle` and `collisions_layout` events per route, ADE/lateral error unchanged (guard +0.01 m), lead-vehicle and obstacle groups.
@@ -684,7 +696,8 @@ not help (ch. 13.24) but it is a finer grid of the same stride-32 map, so it doe
 - **Readouts:** offline probes (distance error at 20-30 m, brake-light AUROC); closed loop: lead-vehicle, pedestrian families (VehicleTurningRoutePedestrian 22.1, DynamicObjectCrossing 59.0).
 - **Single camera:** yes; boxes are labels. **Cost:** one arm; the cache must hold the stride-16 features (about 4x the current cache): check disk first.
 
-### A43. Uncertainty-gated caution with a stall breaker, over the heads we already have - **Next** (eval-only; extends A33) (S-117)
+### A43. Uncertainty-gated caution with a stall breaker, over the heads we already have - **Later** (demoted from Next, S-120; eval-only; extends A33) (S-117)
+**Demoted to Tier 3 (S-120).** Of J's vehicle-collision points 80% sit on routes where >= 3 of the 4 J seeds collide (lead 89%, obstacle 83%, other 67%) and only 20% where 1-2 do. The five heads share one base and agree on the systematic cases, so the disagreement signal can reach the 20% (4 of 19.7 points) plus part of the 3/4 class (an upper bound of ~9 points), below what 220 routes resolve (A52); the plain 5-head mean (A33) is the cheaper first step. Its stall breaker and the creep clamp moved to A50.
 We hold five heads on the same frozen backbone (E and J seeds 0-3), so one backbone pass plus five head passes gives an epistemic signal today. Run-to-run noise on our arms is a
 collision lottery (S-101), and 47% of runs collide.
 - **Rule:** u_t = standard deviation across heads of the expected speed (or mean pairwise Jensen-Shannon distance of the speed posteriors); target speed = mean - kappa * u_t (kappa ~1.5),
@@ -750,6 +763,7 @@ trained on clean images. S-072 also shows the route survives a *random* backbone
 ### A48. History tokens: previous-frame feature difference as a closing-speed cue, with keyframe weighting - **Next** (one arm; promotes A26 step 3) (S-117)
 One frame cannot give relative speed, and the lead-vehicle families (HardBreakRoute, MergerIntoSlowTraffic, HighwayExit: 87-98% collisions) are exactly where closing speed decides. CarLLaVA reports
 fewer rear-end collisions with temporal input (qualitative; its leaderboard score did not rise) and names rear-end collisions and high-speed merging as its failure modes, the same as ours.
+- **S-120 evidence:** J's extra lead-vehicle collisions are on the route line (HardBreakRoute 2.25 vs E 1.25 events per run, 8% off the line; ParkingCutIn 1.10 vs 0.40, 0%) and J drives 20% faster there: a closing-speed / braking failure, which is what history tokens, A38, A39 and A42 address; HighwayExit (30% off the line) and ParkingExit (80%) are lateral.
 - **Design:** extra tokens = pooled 4x4 features of frame t minus frame t-k (k = 1 or 2 saved frames = 0.25 / 0.5 s; the agent buffers 5 / 10 ticks), **no past actions** (no copycat shortcut),
   keyframe up-weighting at expert action changes (Wen et al., ICML 2021, shown in CARLA). Cached features make the second frame nearly free in training.
 - **Readouts:** lead-vehicle group DS and vehicle-collision share, HardBreakRoute; guard: the non-lead groups >= J - 3. **Kill:** no gain on the lead group.
@@ -767,6 +781,30 @@ OppositeVehicleRunningRedLight, SignalizedJunctionLeft/RightTurn, VehicleTurning
 - **Relation to the others:** the cheap data-side twin of A36 (no new code) and the small version of A46 (LEAD's data cover every family with an aligned expert but need an adapter); run A36 first (eval-only), A49 if the merge has no
   good alpha.
 - **Single camera:** yes. **Cost:** ~40-80 GB download (Town12 +/- Town13), 5 epochs of fine-tuning, J's evaluation protocol.
+
+### A50. Contact reflex (stop after the first vehicle collision) and creep clamp - **Next** (eval-only; small agent change; Tier 1) (S-120)
+J's runs with a vehicle collision have >= 2 vehicle events in 32% (E 17%, WoR 17%), and the 2nd and later events cost J 3.5 points per route-run (lead-vehicle routes 5.7, obstacle 4.3; E 1.6, WoR 0.6; S-120). Each registered collision multiplies the score by 0.6; the
+leaderboard ignores a contact at ego speed < 0.1 m/s and a repeat with the same actor within 5 s or 5 m, so a stopped car cannot be penalised again. No expert frame contains a contact, so the policy has no learned reaction to one and drives on (median 9.4 m between
+consecutive events; S-101: ~5 m = creeping into a parked car, which is what the mean decode of a stop / go posterior produces: P(stop) = 0.5 -> a 4 m/s creep, A28).
+- **Reflex (speedometer only, an input we already use):** a contact signature = speed drop >= 2.5 m/s within 5 ticks (0.25 s) while the commanded brake was < 0.5 -> hold the brake for 3 s, then release through the stall breaker of A43 (move again only if the
+  posterior's stop mass is < 0.5). Tune the thresholds on A44's clips.
+- **Creep clamp:** when the ego speed is < 3 m/s and the speed posterior has stop mass >= 0.3, command 0 instead of the mean until the stall breaker (standing > 4 s, stop mass < 0.9) releases it, so a bimodal "stop or go" posterior cannot average into a creep toward the obstacle.
+- **Readouts (mechanism metrics, A52):** events per colliding run (J 1.5 -> <= 1.15), points lost to the 2nd+ event (3.5 -> <= 1), vehicle collisions on the obstacle and lead groups, time-cap share (guard: <= +3 points, J 5.0). J seed 0 against itself on the 103
+  discriminating routes. The DS upper bound is 3.5 points, inside the noise of a DS comparison: judge it by the mechanism metrics.
+- **Honest limit:** a safety layer, not a driving skill; report it as its own row. **Single camera:** yes (speedometer and the policy's own heads). **Cost:** a day at most, eval-only.
+
+### A52. Evaluation protocol: what 220 routes resolve, mechanism readouts, and a matched-speed control - **Next** (Tier 0; analysis plus one eval config) (S-120)
+**Why:** two J seeds (same recipe) differ by up to 3.3 DS in the mean over 201 routes (the six pair differences spread +-1.9); the smallest paired difference with 80% power is 4.9 DS at one run per arm (5.7 with the route x arm interaction of J - E) and 6.9 on the 102 lead +
+obstacle routes (8.3), 3.9 / 5.7 with four runs per arm; the floor is ~3.1 / 4.6 however many runs, because routes carry the interaction. 3 DS needs ~540 routes at one run per arm, 2 DS ~1,200. Closed-loop DS cannot resolve 2-3 point effects at any run count on 220 routes,
+which is why the one-seed arms of the last weeks ended with CIs touching 0.
+- **Predict, then run:** only arms whose target-group effect is expected to be >= 8 DS (lead 52-57 routes, obstacle 45-46) get a DS verdict; the others are judged by **mechanism metrics** that have far more power: vehicle-collision events per run by group, share of runs with a
+  collision, events per colliding run (A50), off-line share, time-cap share, mean speed, overtaking success. Report DS next to them, not instead of them.
+- **Headline claims** (thesis table): >= 3 runs per arm on all 220 routes (SE of the difference ~2).
+- **Matched-speed control for every caution method (A37, A38, A39, A43, A50):** a method that lowers collisions by driving slower has learned nothing. Compare with the plain head at a global speed scale (0.8 / 0.9 / 1.0 x target speed) at the same mean speed. WoR is safe by driving
+  1.8 m/s on average (3.5 on finished routes) and loses 24 + 6 + 2 points to the time cap (S-120); an open-loop vs closed-loop study (arXiv 2605.00066, NAVSIM vs Bench2Drive) finds the same pattern: methods that buy safety with progress rank high open-loop and fall in closed loop
+  through timeouts, and ego progress is the strongest single predictor of closed-loop success.
+- **If a 2-3 point effect must be resolved** (a thesis ablation), add routes, not runs; candidates are further scenario instances from the Bench2Drive route generator or Town12/13 validation routes held out of training (check the generator first).
+- **Single camera:** n/a. **Cost:** none for the policy; one extra eval config for the speed-scale control (~45 min on 12 lanes).
 
 ### A6. DAgger with the PDM-Lite expert - **Later** (large)
 Roll out our policy, let PDM-Lite label the visited states, add them to training. The general
