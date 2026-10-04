@@ -2,11 +2,12 @@
 # sync_forever2.sh + modification time in the comparison (S-111): a file that is rewritten at the same size
 # (checkpoint_latest.pt) is copied again. mtime is compared in whole epoch seconds (tar -x keeps it).
 PORT=$1; HOST=$2; D=$3; PATHS=$4; INT=${5:-300}
+# EXTRA_FIND (env, local): more find tests for the remote listing, e.g. EXTRA_FIND="! -name checkpoint_latest.pt" (Atari: 117 MB rewritten every few minutes)
 mkdir -p "$D"
 while true; do
   R=$(mktemp); L=$(mktemp); M=$(mktemp)
   timeout 300 ssh -o BatchMode=yes -o ConnectTimeout=20 -p $PORT root@$HOST \
-    "cd /workspace && find $PATHS -type f ! -name replay_latest.npz ! -path '*/wandb/*' ! -name '*.tmp*' -printf '%p\t%s\t%T@\n' 2>/dev/null" \
+    "cd /workspace && find $PATHS -type f ! -name replay_latest.npz ! -path '*/wandb/*' ! -name '*.tmp*' $EXTRA_FIND -printf '%p\t%s\t%T@\n' 2>/dev/null" \
     2>>"$D/.sync_err.log" | grep -v -E "^Welcome|^Have fun|^AI agents" | awk -F'\t' '{split($3,t,"."); print $1"\t"$2"\t"t[1]}' | sort > "$R"
   NR=$(wc -l < "$R")
   if [ "$NR" -eq 0 ]; then
