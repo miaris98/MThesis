@@ -32,5 +32,12 @@ for sub, model in want.items():
 PY
 ) &
 wait
-grep -q CARLA_DONE logs_prov/status && grep -q CKPT_DONE logs_prov/status && cp logs_prov/setup_carla.log setup_carla.log && echo PROVISION_DONE >> setup_carla.log
+# original WoR (the thesis baseline, `WORL:` jobs): ship pcla_wor.tgz (built from Carla-utils/PCLA, 0.6 MB, E:/MThesis_EXP/live_20260929_ops_scripts/)
+# with the code tgz; the weights come from the public PCLA HF repo. Without the tgz this step is skipped.
+if [ -f /workspace/pcla_wor.tgz ]; then
+  ( tar -xzf /workspace/pcla_wor.tgz -C /workspace && cd /workspace/PCLA &&     /venv/main/bin/python pcla_functions/download_weights.py --agents wor > /workspace/logs_prov/pcla.log 2>&1 &&     test -s pcla_agents/wor_pretrained/leaderboard_weights/main_model_10.th && echo PCLA_DONE >> /workspace/logs_prov/status ) || echo PCLA_FAILED >> /workspace/logs_prov/status
+else echo PCLA_SKIPPED >> /workspace/logs_prov/status; fi
+if grep -q CARLA_DONE logs_prov/status && grep -q CKPT_DONE logs_prov/status && ! grep -q PCLA_FAILED logs_prov/status; then
+  cp logs_prov/setup_carla.log setup_carla.log && echo PROVISION_DONE >> setup_carla.log
+fi
 echo "PROVISION_END $(date -u)" >> /workspace/logs_prov/status
