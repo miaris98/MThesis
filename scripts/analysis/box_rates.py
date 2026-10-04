@@ -5,6 +5,7 @@ Everything is read from files already on E: (nothing is run):
 
 * **CARLA evaluation throughput** per box: the `save_name` of every Leaderboard record ends in the run's start time (`..._<weather>_MM_DD_HH_MM_SS`), so the number of
   route-runs per hour of a box (12 lanes) comes from the first and last start of its result files, plus the busiest 3 h window (steady state).
+* **CARLA lane time budget** (S-125): per lane, the route's own system time vs the per-route overhead, the job start-up and the hand-over gap between jobs.
 * **CARLA training minutes per epoch** from the mtimes of consecutive `model_epoch_*.pth` of every arm (tar -x keeps mtimes), with the arm's image size.
 * **Atari training minutes per 1k environment steps** from the mtimes of the `checkpoint_env<N>_upd<M>.pt` files (one run per GPU vs several per GPU matters: read the box).
 
@@ -12,6 +13,7 @@ Everything is read from files already on E: (nothing is run):
 """
 from __future__ import annotations
 
+import collections
 import datetime as dt
 import glob
 import json
@@ -98,7 +100,73 @@ def atari_train():
         print(f"{r[0]:30s} {r[1]:36s} env {r[2]:6d} -> {r[3]:6d}: {r[4]:5.1f} min per 1k steps")
 
 
+def lane_time():
+    """Where a lane's wall clock goes (S-125). A lane = one CARLA server + one evaluator working through its job list; a job = one lane file `<label>_<port>_x.json`.
+    The job's `.routes` file marks its launch; records give each route's start (`save_name`) and system time; the json mtime is the last write. Per lane:
+    launch -> first route start = job start-up (CARLA cold start, agent import); first start -> last write = route cycles (the routes' own system time plus the
+    per-route overhead of world load, scenario build, agent set-up, teardown); last write -> next launch = hand-over gap (guardian polling, sleeps, port clearing)."""
+    print("\n== CARLA lane time budget: route itself vs per-route overhead vs job start-up vs hand-over ==")
+    tot = collections.Counter()
+    big, small = [], []
+    startups, gaps = [], []
+    for box in sorted(norm(glob.glob(f"{ROOT}/live_2026100*_*carla*"))):
+        lanes = collections.defaultdict(list)
+        for f in norm(glob.glob(box + "/**/*_x.json", recursive=True)):
+            rt = f[:-len("_x.json")] + "_x.routes"
+            if not os.path.exists(rt):
+                continue
+            try:
+                recs = json.load(open(f))["_checkpoint"]["records"]
+            except Exception:
+                continue
+            runs = []
+            for r in recs:
+                m = START.search(r["save_name"])
+                if m and r["meta"].get("duration_system"):
+                    mo, d, h, mi, s = map(int, m.groups())
+                    runs.append((dt.datetime(2026, mo, d, h, mi, s), r["meta"]["duration_system"], r.get("town_name")))
+            if not runs:
+                continue
+            runs.sort()
+            port = re.search(r"_(\d{4})r?_x\.json$", f)
+            lanes[port.group(1) if port else f].append({"launch": dt.datetime.utcfromtimestamp(os.path.getmtime(rt)), "end": dt.datetime.utcfromtimestamp(os.path.getmtime(f)),
+                                                         "runs": runs})
+        for jobs in lanes.values():
+            jobs.sort(key=lambda j: j["launch"])
+            for i, j in enumerate(jobs):
+                su = (j["runs"][0][0] - j["launch"]).total_seconds()
+                if 0 <= su < 1200:
+                    tot["startup"] += su
+                    startups.append(su)
+                tot["cycles"] += max((j["end"] - j["runs"][0][0]).total_seconds(), 0)
+                tot["sys"] += sum(x[1] for x in j["runs"])
+                tot["routes"] += len(j["runs"])
+                tot["jobs"] += 1
+                if i + 1 < len(jobs):
+                    g = (jobs[i + 1]["launch"] - j["end"]).total_seconds()
+                    if 0 <= g < 3600:
+                        tot["gap"] += g
+                        gaps.append(g)
+                for a, b in zip(j["runs"], j["runs"][1:]):
+                    c = (b[0] - a[0]).total_seconds()
+                    if c < 1500:
+                        (big if a[2] in ("Town12", "Town13") else small).append((c, c - a[1], a[1]))
+    T = tot["startup"] + tot["cycles"] + tot["gap"]
+    if not T:
+        return
+    ovh = tot["cycles"] - tot["sys"]
+    print(f"{tot['jobs']} jobs, {tot['routes']} routes ({tot['routes'] / tot['jobs']:.1f} per job), {T / 3600:.0f} lane-hours:  route itself {100 * tot['sys'] / T:.0f}%,  "
+          f"per-route overhead {100 * ovh / T:.0f}%,  job start-up {100 * tot['startup'] / T:.0f}%,  hand-over gaps {100 * tot['gap'] / T:.0f}%")
+    print(f"lane seconds per route-run {T / tot['routes']:.0f} (12 lanes: {12 * 3600 * tot['routes'] / T:.0f} runs/h with every lane always busy); job start-up median {statistics.median(startups):.0f} s, "
+          f"hand-over gap median {statistics.median(gaps):.0f} s")
+    for name, rows in (("Town12/13", big), ("other towns", small)):
+        if rows:
+            print(f"{name:12s} n={len(rows):4d}  cycle median {statistics.median(x[0] for x in rows):4.0f} s (medians: route {statistics.median(x[2] for x in rows):4.0f} s, "
+                  f"overhead {statistics.median(x[1] for x in rows):4.0f} s)")
+
+
 if __name__ == "__main__":
     carla_eval()
+    lane_time()
     carla_train()
     atari_train()
