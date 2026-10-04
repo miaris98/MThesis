@@ -112,6 +112,19 @@ and WoR all drove):
 | 3 | B41 / B42 / B44 | RAM-supervised auxiliary probe; multi-horizon value heads; stuck-loop / stagnation analysis | diagnostics, flags | see entries | 10k score; episode lengths |
 | 3 | B46 | Event / ball-forecast auxiliary (EAWM-style) | one flag | EAWM +10-45% on MBRL baselines; Breakout events are few and exact (S-123) | 10k / 30k score, B43 curves |
 
+**Effort estimate (2026-10-04, S-124; rates from `scripts/analysis/box_rates.py`).** Measured: CARLA eval 65-128 route-runs/h per 12-lane box (plan 90): a 103-route screen 1.1 box-h, a 220-route run 2.2 box-h, +12% reruns; CARLA training 17.6-19.3 min/epoch on 427k frames (live encoder),
+a 5-epoch fine-tune ~1.5 h per GPU; Atari 30k steps 3.3-3.5 h per run at one run per GPU (6-8 h at two), 100k ~18-20 h; provisioning 1.0-1.4 h, downloads 11-12 MB/s (34 GB 50 min, 152 GB 3.7 h, 270 GB 6.5 h); a session-day ~5.5 productive box-hours; prices $0.42/h (4x2080 Ti), $0.70/h (4x3090), $0.94/h (2xA40).
+
+| Wave | Items | My implementation | Boxes | Calendar P50 / P90 | Cost |
+|---|---|---|---|---|---|
+| 1 decisive | B37 probe + 30k screen, A44, A50, A57, A36, A52 control, A58, B43 step 1 + B38 step 0, A56 pilot, A45, A47 | ~7.5 working days | 6 box-days: 3 two-box CARLA-eval days (~2,000 runs), 2 Atari, 1 data box | 6-8 / 10 days | ~$30 |
+| 2 top arms | A15 (+A53 horizon), A38, A39, A37 critic + decode, A54, A49 (11 arms) | ~7 days | ~13 box-days: eval ~10 (screens ~2,060 runs, three 3-run 220-route confirmations 1,800 runs), training 3 | 10-14 / 20 days after wave 1 | ~$70-90 |
+| 3 the rest | A46 (adapter 4 d, 270 GB, ~11 GPU-h), A55, A40, A41, A42, A48, A43; B45, B46, B39, B40, B41 / B42 / B44, 100k confirmation | ~22 days | ~19 box-days (CARLA 12, Atari 7) | 15-20 / 30 days | ~$100-150 |
+| **Total** | 30 items | **~35 working days** | **~38 box-days (~300 box-h)** | **5-6 / 8-9 weeks; waves 1-2 (17 of 30 items): 2.5 / 3.5 weeks** | **~$200-300** (+~$100 if boxes stay overnight) |
+
+Levers: a pooled 4x4-token feature cache (20 GB for J's data instead of 279 GB of full maps) would turn a 1.5 h head-only arm into ~10-25 min if the step is data-bound (the epoch time suggests so; verify in the first 30 minutes), after which evaluation dominates; keep the two CARLA boxes for a whole wave
+(re-provisioning costs 1.0-1.4 h per day); drop Tier 3 (A40, A41, A42, A48, A43, B39-B44) to shrink wave 3. Risks: B37 may not train the mixer (+2-4 days), LEAD's camera may not match (A46 -> A56), ~9% crash routes, one box in six lost half a day, 220 routes resolve ~5 DS (claims below ~4 DS need mechanism metrics or A58), Fail2Drive may need extra CARLA assets, the SimLingo licence needs sign-off.
+
 **Next sessions.** *CARLA eval-only session (2 cheap boxes, ~4 h):* A44 recorder first; A36 (alpha 0.5 and the J soup on the 103 lead+obstacle routes), A50 (contact reflex + creep clamp) the A52 speed-scale control (J at 0.8 / 0.9 x target speed) and A57 (newsvendor decode) on the same
 routes; the same session runs A45 and A47 on one box with the PDM-Lite data (500 frames, cached features). *CARLA training session (data box):* A56 pilot (one SimLingo-Data chunk + its Dreamer labels: critic AUROC; same camera, no adapter) first, then A46 feasibility (one route per scenario family, camera
 metadata, route fields) in parallel with A15 and the A21+A38 label arms (one change per arm, head-only on cached features), A37 step 0 (label audit on ~100 archives). *Atari box:* B37 probe (10 min) ->
