@@ -22,7 +22,7 @@ The status block below is the only snapshot in this file: replace it, don't appe
 | **New items** | **A36-A52 (CARLA) and B37-B44 (Atari)** with tiers and a first-session order (block below); A15 and A21 promoted to Next; A43 demoted (S-120) |
 | **B23 step 1b (graphed search in the trainer, S-118)** | **identical to eager** at batch 32 (1,600 updates) and at batch 256 on a 3090 (800 updates): all 298 model tensors, all target tensors, the whole replay buffer (acting policies and root values included); 0 fallbacks (0/200 acting, 0/800 reanalyze). |
 | **B36 pilot (S-118): GTrXL 30k, mixer wd 0, seeds 0-3, plus two non-zero-output-init runs** | s2 finished: 30k **129.8** (25k 120.0, 20k 64.4); s0 25k 24.8 (20k 51.6); s1 25k 35.1 (20k 53.7); s3 20k 98.4; out-init s0 10k 23.0, s1 10k 9.7. **The mixer blocks still do not train** (|Wq| 6.510 at 15k, non-zero out init 6.507 at 10k, gate bias 2.000, attention uniform) -> **B37**. Others not finished |
-| **B37 step 0 / B43 step 0 (S-118)** | weight-trajectory audit of the 100k runs: only the two mixers are dead (their change equals the weight-decay rate). Model drift vs imagined depth: the per-step latent error doubles after depth 5 (the training horizon); the 64-sim tree reaches depth 17 |
+| **B37 step 0 / B43 step 0 (S-118)** | weight-trajectory audit of the 100k runs: only the two mixers are dead (their change equals the weight-decay rate). Model drift vs imagined depth (9 checkpoints, S-121): GTrXL's per-step latent error grows 1.7-3.3x after depth 5 (the training horizon), ResNet's is linear but ~3x higher from the start, policy KL +2-4x in all nine; the 64-sim tree reaches depth 17 |
 | B24 / B2 sticky | the 8 evaluators on box 3 (10 B24 checkpoints at 64 sims, 16 sticky evals) had finished nothing when the box was destroyed: rerun (B43 / B38 first) |
 
 Results: `E:\MThesis_EXP\live_20261004_box{1_4x2080Ti_carla, 2_4x2080Ti_carla, 3_4x3090_atari}`, analysis in `E:\MThesis_EXP\analysis_20261004\`. **HF push is pending** (box 3's uplink to HF was 0.2 MB/s,
@@ -602,6 +602,10 @@ J is E e15 fine-tuned for 5 epochs on the mixed data (A14), so the two heads sit
   fine-tune from E with an L2-SP penalty toward E's weights and scenario-family-balanced sampling.
 - **Single camera:** yes (no input changes).
 - **S-120 update:** on the 196 routes all three arms drove, E scores 82.2 on the lead-vehicle families (WoR 71.3, J 66.2) although it never trained on them; J drives 20% faster there (6.96 vs 5.81 m/s) and its extra collisions are on the route line (HardBreakRoute 2.25 vs 1.25 events per run, 8% off the line; ParkingCutIn 1.10 vs 0.40, 0%): J's loss is a braking / speed regression from the obstacle data, not missing coverage. Step 0 should also compare E's and J's speed posteriors on the same lead-vehicle frames (A45's data) and report the oracle as group-level (69.3 on these routes), not per route.
+- **Prepared 2026-10-04 (no box):** `scripts/training/a36_merge_checkpoints.py` (refuses to merge unless the frozen backbones are tensor-identical; exact at alpha 0 / 1) built alpha 0.25 / 0.5 / 0.75 (E e15 <-> J seed 0 e20), the J soup (mean of seeds 0-3) and E + soup at 0.5 under
+  `E:\MThesis_EXP\prep_2026100536\` (885 MB; each directory = `model_epoch_020.pth` + `frozen_backbone.pth` + `run_config.json` + `MERGE.json`). E's and J's frozen backbones are identical (494 tensors); all five load through `load_wor_model` with 0 missing / 0 unexpected
+  keys and finite outputs (CPU forward). On the box: copy the directories to `/workspace/checkpoints/a36/` and use lane jobs `CKL:a36m50_<box>_<port>:a36/alpha0.50_J0/model_epoch_020.pth:<routes>` (labels `a36m25_`, `a36m50_`, `a36m75_`, `a36soup_`, `a36esoup_`; `a9_merge.py` maps them to arms
+  M25, M50, M75, MSOUP, MESOUP). Alpha order of work: 0.5 and the soup first on the 103 lead + obstacle routes.
 
 ### A37. Counterfactual speed-safety critic (rule distillation) with safety-masked decoding - **Next** (one arm; the main new idea) (S-117)
 Imitation sees only the speeds the expert chose, never the unsafe ones, so it cannot learn "this speed would have hit that car". PDM-Lite's logs contain what is needed to compute
@@ -1081,14 +1085,14 @@ the main-head value error or the score does not move.
 ### B43. Depth-capped search and the model's error against imagined depth - **Next** (eval-only; explains B24; Tier 1) (S-118)
 **Evidence:** training unrolls the dynamics for K = 5 steps, but at 64 simulations the tree reaches depth 17 (16 sims: 6, 32 sims: 12; S-116 tree-depth measurement on real states), so the search uses
 the model well outside the horizon it was trained on. B24 found deeper search lowering the score on 4 of 6 checkpoints, and S-058 found the value-prefix head miscalibrated at imagined depth 1.
-- **Step 0, error curve (offline; script and first result done 2026-10-04):** `scripts/analysis/b43_model_drift.py` rolls the model forward with the real actions on real replay
-  trajectories and compares each imagined step k with what the same model outputs on the real observation at t + k (latent cosine in the SimSiam space, value, policy KL, value prefix). First
-  result, 384 start states from the B36 seed-2 replay, depth 12: **GTrXL (B36 s2, 28k updates)** latent 1-cos 0.010 (depth 1) -> 0.032 (depth 5) -> 0.115 (depth 12), the per-step increase doubling
-  after depth 5 (0.0054 -> 0.0116); policy KL 0.019 -> 0.041 -> 0.145; argmax agreement with the real-state policy 0.96 -> 0.94 -> 0.84; |dV| 0.080 -> 0.142 -> 0.206 with mean bias ~0.
-  **ResNet (B35 s5, same states)** latent 0.020 -> 0.095 -> 0.254; KL 0.041 -> 0.116 -> 0.397; argmax 0.94 -> 0.89 -> 0.77; |dV| 0.081 -> 0.156 -> 0.292, value bias -0.10 at depth 12 (imagined
-  values drift *low*, so the damage is variance and the winner's curse, not a mean optimism: B38's pessimism targets exactly that). So the drift accelerates past the training horizon in both
-  trunks; two single checkpoints on one replay, not yet a result. Next: all 16 B35 checkpoints, correlate the growth after depth 5 with each checkpoint's B24 slope; EZ-V2's own checkpoints are
-  the reference (they predict the prefix accurately, S-058). Outputs: `E:\MThesis_EXP\analysis_20261004\b43_drift_*.json`.
+- **Step 0, error curve (offline; `scripts/analysis/b43_model_drift.py`; nine checkpoints done 2026-10-04, S-121):** the script rolls the model forward with the real actions on real replay trajectories and compares each
+  imagined step k with what the same model outputs on the real observation at t + k (latent cosine in the SimSiam space, value, policy KL, value prefix); 384 start states, depth 12, laptop CPU. **Result** (5 GTrXL: B35 s1, s2, s4, s5,
+  B36 s2; 4 ResNet: B35 s4-s7, states from the GTrXL s1 buffer because the ResNet buffers were not saved): GTrXL latent error 1-cos 0.010-0.019 (depth 1) -> 0.027-0.039 (depth 5) -> 0.10-0.21 (depth 12), **the per-step increase grows
+  1.7-3.3x after depth 5 (median 1.9)**; **ResNet's per-step error is ~3x higher from the start and then constant (0.9-1.3x): linear, no acceleration**. **In all nine the policy KL rises 2.0-4.0x (mean over depths 6-12 vs 1-5) and the
+  argmax agreement with the real-state policy falls to 0.62-0.84 at depth 12**; imagined values drift low (ResNet s5 -0.10 at depth 12), so the damage is variance and the winner's curse, not mean optimism (B38's target). The earlier
+  two-checkpoint reading ("doubles in both trunks") is corrected: the latent acceleration is GTrXL-only (and these GTrXL have dead mixers, S-116); the degradation of the policy and value that guide the tree is general. One replay per
+  trunk, no link to B24's scores yet. Next: correlate the growth after depth 5 with each checkpoint's B24 slope; EZ-V2's own checkpoints are the reference (they predict the prefix accurately, S-058). Outputs:
+  `E:\MThesis_EXP\analysis_20261004\b43_drift_*.json`, `b43_summary_0410.txt`.
 - **Step 1, cap (eval-only):** `GumbelMCTS(max_depth=D)`: a node at depth D is not expanded further and is scored by its value head; D in {3, 5, 8, unlimited}; B24's 16 checkpoints at 64 sims, 30
   episodes, graph search (a `max_depth` knob next to `depth_bound`). **Success:** the score stops falling with sims at D = 5.
 - **Step 2 (training, if step 0 shows the error grows after K):** K = 8 with a lower weight on steps > 5, so deeper search has something to stand on.
