@@ -11,99 +11,108 @@ The status block below is the only snapshot in this file: replace it, don't appe
 
 ---
 
-## Status: 2026-10-03 19:10 Athens (S-115, S-116) - **no boxes running; everything verified on E: and HF**
+## Status: 2026-10-04 evening Athens (S-117, S-118, S-119) - **box 3 (Atari) and box 2 (CARLA) destroyed after a verified save; box 1 (CARLA) is idle and verified on E: (destroy it if it is still up); nothing was pushed to HF today**
 
 | Item | Result |
 |---|---|
-| **A14 with repeat runs (CARLA)** | arm J e20 vs E e15 on the 46 obstacle-type routes, E 3 runs + J 2 runs per route: s0 +7.8 [+0.7, +14.9], s1 +7.0, s2 +6.2, s3 +7.6; **4-seed per-route mean +7.2 [+0.7, +13.7], CI excludes 0**. All 60 routes +4.5 [-1.0, +10.3]; non-obstacle (14) -4.1 [-14.0, +5.1] n.s. Overtaking success J 15.9-18.3% vs E 5.7% (+10 to +13 pts, CI excludes 0 for 3 of 4 seeds) |
-| **A9 all 5 abilities** | Traffic_Signs computed offline from the .xodr maps (`b2d_junction_fractions.py`, 15 s, no server): **E e15 mean 37.3 vs original WoR 28.0** |
-| **B2 (Atari, 16 B35 checkpoints, 30 ep, no sticky, 16 sims)** | GTrXL 105.9 vs ResNet 98.6, +7.2 [-79, +98], p 0.89: no trunk difference. **30 episodes = ~4 independent games per checkpoint (n = seeds)**; sticky 0.25 gives 21-27 distinct scores at ~1/3 of the score (5 of 16 done) |
-| **GTrXL mixer is dead (B18 step 1)** | all mixer weights decay x0.13 per 10k updates under SGD wd 1e-4 (|Wq| 6.5 -> 0.026 at 30k, identical in 8 seeds; attention uniform; gates 0.5): **B1/B35/B4/B2 compared ResNet with ResNet**. With `--mixer-weight-decay 0` the weights stop decaying and the output projection grows, but q/k/v/FFN are still at init at 5k -> **B36** |
-| B23 graphed search | bit-identical to eager on real states (ResNet + GTrXL), 5.4-8.8x faster at 16/32/64 sims; **now in the trainer (`--graph-search`): 1,600-update GTrXL run identical to eager (all weights + replay), ~2x shorter wall time on a 3050; batch-256 check on a box still to do** |
-| B15 / B24 / B3 / B26 step 0 | B15: no rank collapse, dormancy plateaus by 50k. B24: 6 of 16 at 64 sims, deeper search lowered the score on 4 of 6 (10 slow zero-scorers unfinished). B3: prioritized replay 16.2 / 12.8 vs uniform 15.0 / 15.3, no gain. B26 step 0: mirror-averaging -12 mean (-22, -73, +73, -25) |
+| **CARLA, 220 routes (A9 final, S-117)** | official DS: E e15 63.4, arm J seeds 0-3 58.8-61.9 (pooled 59.4), original WoR 49.4. Paired vs WoR: E +13.7 [+8.6, +18.8], J +10.4 [+5.7, +15.1], every J seed +9.8 to +11.9 (CIs exclude 0). **J - E = -2.6 [-5.9, +0.7]: J is not an overall improvement over E.** |
+| **Where the score goes (S-117)** | J: 20.1 of 36.9 lost points per run are vehicle collisions (47% of runs, WoR 22%). J - E: lead-vehicle routes **-15.2 [-21.5, -9.0]**, obstacle routes **+7.2 [+0.7, +13.6]**, other -1.0. Against WoR the advantage is entirely on the 102 routes that are neither (+22.8 [+16.6, +28.9]); lead-vehicle -6.7 and obstacle +2.5 are ties. Abilities (success %, J / E / WoR): overtaking 16-18 / 5.7 / 11.7, merging 26-39 / 44.9 / 21.8, emergency brake 25-38 / 32 / 30 |
+| **What has worked (ledger, S-117)** | `docs/design/what_has_worked_2026-10-04.md`: confirmed wins = route conditioning, transformer head over WoR's conv head (+15), obstacle data + `route_original`; recovery camera, colour aug, 288x768 not established; vision lightly used (no-vision MLP 0.7558 vs 0.5793; random-backbone evals 50-60 DS); 73.5% of the waypoint objective is speed x dt; the field's best recipe (LEAD) published its state-aligned dataset |
+| **New items** | **A36-A48 (CARLA) and B37-B44 (Atari)** with tiers and a first-session order (block below); A15 and A21 promoted to Next |
+| **B23 step 1b (graphed search in the trainer, S-118)** | **identical to eager** at batch 32 (1,600 updates) and at batch 256 on a 3090 (800 updates): all 298 model tensors, all target tensors, the whole replay buffer (acting policies and root values included); 0 fallbacks (0/200 acting, 0/800 reanalyze). |
+| **B36 pilot (S-118): GTrXL 30k, mixer wd 0, seeds 0-3, plus two non-zero-output-init runs** | s2 finished: 30k **129.8** (25k 120.0, 20k 64.4); s0 25k 24.8 (20k 51.6); s1 25k 35.1 (20k 53.7); s3 20k 98.4; out-init s0 10k 23.0, s1 10k 9.7. **The mixer blocks still do not train** (|Wq| 6.510 at 15k, non-zero out init 6.507 at 10k, gate bias 2.000, attention uniform) -> **B37**. Others not finished |
+| **B37 step 0 / B43 step 0 (S-118)** | weight-trajectory audit of the 100k runs: only the two mixers are dead (their change equals the weight-decay rate). Model drift vs imagined depth: the per-step latent error doubles after depth 5 (the training horizon); the 64-sim tree reaches depth 17 |
+| B24 / B2 sticky | the 8 evaluators on box 3 (10 B24 checkpoints at 64 sims, 16 sticky evals) had finished nothing when the box was destroyed: rerun (B43 / B38 first) |
 
-Results: `E:\MThesis_EXP\live_20261003_box{O_2xTitanRTX_carla, P_4x2080Ti_carla, P_4x2080Ti_atari, Q_3090_atari}`; HF `mthesis-relay`:
-`carla_rep_20261003/box{O,P}`, `b35_100k_env30000/`, `atari_20261003/box{P,Q}{,_eod,_eod2}`, `atari_20261003/b3_checkpoints`.
-Ops tools for the next box session: `scripts/ops/` (README there). Boxes O, N (earlier), P, Q destroyed.
-Older status: A14 at 4 seeds, one run each (+7 to +9, CIs touching 0, S-113/S-114); B35 no trunk difference at 30k (now explained).
+Results: `E:\MThesis_EXP\live_20261004_box{1_4x2080Ti_carla, 2_4x2080Ti_carla, 3_4x3090_atari}`, analysis in `E:\MThesis_EXP\analysis_20261004\`. **HF push is pending** (box 3's uplink to HF was 0.2 MB/s,
+so the end-of-day save went box -> E: only; push from the laptop). **B36 resume state** (all six runs: `checkpoint_latest.pt` + `replay_latest.npz.gz`, sha256-verified against the box) is under
+`live_20261004_box3_4x3090_atari\MThesis\results\100k_benchmark\S058_ezv2_match\S058k_*\checkpoints\`; restore with `gzip -dc replay_latest.npz.gz > replay_latest.npz` and `--resume-from`. s2 is finished; s0 and s1
+need ~1 h, s3 ~2.5 h, the out-init runs 3-4 h. **Not saved:** seed 1's env20000 checkpoint (truncated by an interrupted copy, renamed `.CORRUPT_truncated`; its eval and diagnostics JSONs are fine) and out-init seed 1's
+env15000 checkpoint. Ops lessons are in S-119 and `scripts/ops/README.md`.
+Older status: A14 at 4 seeds, one run each (+7 to +9, CIs touching 0, S-113/S-114); B35 no trunk difference at 30k (explained by the dead mixer).
 
-## New algorithm ideas, 2026-10-04 (S-117): A36-A44 (CARLA, one front camera) and B37-B42 (Atari)
+## New algorithm ideas, 2026-10-04 (S-117, S-118): A36-A48 (CARLA, one front camera) and B37-B44 (Atari)
 
-**What the data says** (`E:\MThesis_EXP\analysis_20261004\`, `scripts/analysis/a3_failure_classes.py`; arm J = 4 seeds pooled, 200 routes of the 220 that E, J
+Evidence ledger (what moved the score, with grades) and the external cross-check: `docs/design/what_has_worked_2026-10-04.md`.
+
+**What the data says** (`E:\MThesis_EXP\analysis_20261004\`, `scripts/analysis/a3_failure_classes.py`; arm J = 4 seeds pooled, ~200 routes of the 220 that E, J
 and WoR all drove):
-- **Official DS over 220 routes:** E e15 63.4, arm J 58.8-61.9 (seeds), original WoR 49.4. All four J seeds beat WoR paired: +9.8 to +11.9 [CIs exclude 0].
-- **Where J beats WoR:** only on the 102 routes that are neither lead-vehicle nor obstacle scenarios (junctions, signals, turns, pedestrians):
-  **+22.8 [+16.6, +28.9]**. On lead-vehicle scenarios (57 routes: merges, cut-ins, hard-brake, highway exit, actor flows) J is **-6.7 [-17.0, +3.5]**
-  against WoR, on obstacle scenarios +2.5 [-3.9, +9.5]: tied. E is +9.9 [-1.5, +21.6] on lead-vehicle and -4.6 on obstacle.
-- **J traded one skill for the other:** J - E is **-15.2 [-21.5, -9.0]** on lead-vehicle routes, **+7.2 [+0.7, +13.6]** on obstacle routes, -1.0 elsewhere.
-  Largest family drops J vs E: ParkingExit -51, HighwayExit -41, ParkingCutIn -33, MergerIntoSlowTrafficV -24, HardBreakRoute -18 (WoR 100 there).
-  An oracle merge (E on lead-vehicle, J on obstacle routes) would reach 69.1-69.6 vs E 68.0 and J 64.9 (mean DS on the 205 routes driven): a small ceiling.
-- **Where the points go (mean lost per run):** J 36.9 = **20.1 vehicle collisions**, 6.7 not finishing, 3.2 layout, 2.4 pedestrian, 2.3 red light, 1.3 stop. WoR 45.0 =
-  24.1 not finishing, 6.5 blocked, 7.4 vehicle collisions. **47% of J runs have a vehicle collision (WoR 22%).** The collision share is 94-98% of the loss on HardBreakRoute,
-  HighwayExit, 89% on BlockedIntersection, 87% on MergerIntoSlowTrafficV, 95% pedestrian on DynamicObjectCrossing. The two-ways obstacle families lose half their points
-  to not finishing (the car stops and never passes), the rest to layout/vehicle collisions.
-- **Abilities (success %, J seeds / E / WoR):** Overtaking 16-18 / 5.7 / 11.7; Merging 26-39 / 44.9 / 21.8; Emergency brake 25-38 / 32 / 30; Give way 39-50 / 56 / 37;
-  Traffic signs 53-57 / 49 / 44.
-- **What has moved the score so far on CARLA is what the model is told, not how it is optimised:** route_original as input, obstacle data, recovery views, colour
-  augmentation (about +4 to +7 DS each, 1-4 seeds); head size, loss weights, geometry loss, finer grid and longer training did nothing (`tried_and_ruled_out.md`). The new items are
-  therefore ranked by how much *new information* they inject (counterfactual labels, privileged actor tracks, anticipation, failure clips), with pure re-weighting last.
-- **Atari:** B36 shows the transformer mixer still does not train with weight decay off (|Wq| 6.510 at 15k, init 6.5; non-zero output init: 6.507 at 10k); deeper search at test
-  time lowered the score on 4 of 6 checkpoints (B24); deterministic evals give ~4 distinct games per checkpoint and sticky-action scores fall to ~1/3 (B2).
-- **Thread across both domains:** act on what the learned model is *unsure* about (A37/A43 on CARLA, B38 on Atari), and use privileged information as labels, never as inputs
-  (A37/A40/A42, B41).
+- **Official DS over 220 routes:** E e15 63.4, arm J 58.8-61.9 (seeds), original WoR 49.4. All four J seeds beat WoR paired: +9.8 to +11.9 [CIs exclude 0]. **J is not an overall
+  improvement over E: J - E = -2.6 [-5.9, +0.7].**
+- **Where we beat WoR:** only on the 102 routes that are neither lead-vehicle nor obstacle scenarios (junctions, signals, turns, pedestrians): J **+22.8 [+16.6, +28.9]**, E +23.8.
+  On lead-vehicle scenarios (57 routes: merges, cut-ins, hard-brake, highway exit, actor flows) J is -6.7 [-17.0, +3.5] against WoR, on obstacle scenarios +2.5 [-3.9, +9.5]: ties.
+- **J traded one skill for the other:** J - E is **-15.2 [-21.5, -9.0]** on lead-vehicle routes, **+7.2 [+0.7, +13.6]** on obstacle routes, -1.0 elsewhere. Largest family drops J vs E:
+  ParkingExit -51, HighwayExit -41, ParkingCutIn -33, MergerIntoSlowTrafficV -24, HardBreakRoute -18 (WoR 100 there). An oracle merge would reach 69.1-69.6 vs E 68.0 and J 64.9.
+- **Where the points go (mean lost per run):** J 36.9 = **20.1 vehicle collisions**, 6.7 not finishing, 3.2 layout, 2.4 pedestrian, 2.3 red light, 1.3 stop. WoR 45.0 = 24.1 not
+  finishing, 6.5 blocked, 7.4 vehicle collisions. **47% of J runs have a vehicle collision (WoR 22%).** Collisions are 94-98% of the loss on HardBreakRoute and HighwayExit, 89% on
+  BlockedIntersection, 87% on MergerIntoSlowTrafficV, 95% pedestrian on DynamicObjectCrossing; ConstructionObstacleTwoWays and AccidentTwoWays lose 46% and 52% to not finishing.
+- **Abilities (success %, J seeds / E / WoR):** Overtaking 16-18 / 5.7 / 11.7; Merging 26-39 / 44.9 / 21.8; Emergency brake 25-38 / 32 / 30; Give way 39-50 / 56 / 37; Traffic signs 53-57 / 49 / 44.
+- **What has moved the score (grades in the ledger):** confirmed = route conditioning, the transformer head over WoR's conv head (+15), obstacle data with `route_original`
+  (+7.2 on obstacle routes, -15.2 on lead-vehicle routes). **Not established** (CIs include 0, S-079): recovery views, colour augmentation, 288x768. No effect: head size, finer grid,
+  loss re-weighting, geometry loss, longer training (`tried_and_ruled_out.md`). The new items are ranked by how much *new information* they inject.
+- **Vision is lightly used.** A no-vision MLP on route + speed + command reaches held-out loss 0.7558 vs 0.5793 for the transformer with vision (ch. 13.30), and evals that ran on a
+  *random* backbone still scored 50-60 DS (S-072): the painted overlay and the speed token carry most of the score. A0 is open. Hazards are rare in the data, so a head can
+  minimise its loss without learning to see them (PlanT 2.0 names the same shortcut problem).
+- **The objective is mis-budgeted.** 73.5% of the waypoint loss is the longitudinal coordinate (~ speed x dt); the PID steers from the lateral coordinate and takes speed from the
+  target-speed head, whose loss weight is 0.2 and was never swept (ch. 13.26). CarLLaVA / SimLingo fix the same entanglement with a space-indexed path next to the time-indexed
+  waypoints: static-layout collisions 0.68 -> 0 and DS 3.21 -> 4.49 (+40%) in CarLLaVA's ablation.
+- **LEAD's lens (CVPR 2026, 95.0 DS):** the student is limited by *learner-expert asymmetry*: visibility (the expert reacts to actors the camera cannot see), uncertainty (the expert brakes
+  on exact velocities) and intent. Aligning the expert gave +1.37 DS on Bench2Drive and +11 on Longest6 v2, and **its dataset is public** (MIT, 269 GB, all 12 towns, front camera, recovery views,
+  per-box `affects_ego`): see A46. Mapping: visibility A21/A38/A42/A45/A46; uncertainty A37/A39/A43; intent A15/A41.
+- **Safe2Drive (2026):** SOTA models drop from 95 / 85 DS to ~40 on safety scenarios (late or absent braking for pedestrians, work zones): braking is the field's weak spot too.
+- **Atari:** B36 shows the transformer mixer still does not train with weight decay off (|Wq| 6.510 at 15k, init 6.5; non-zero output init: 6.507 at 10k); deeper search at test time lowered
+  the score on 4 of 6 checkpoints (B24) while a 64-sim tree reaches depth 17 against a training unroll of 5 (S-116); deterministic evals give ~4 distinct games per checkpoint and
+  sticky-action scores fall to ~1/3 (B2).
+- **Thread across both domains:** act on what the learned model is *unsure* about (A37/A43 on CARLA, B38 on Atari), use privileged information as labels, never as inputs (A37/A40/A42, B41),
+  and audit module-level behaviour before building (A45/A47, B37 step 0): gated residual blocks died from weight decay in both (ch. 13.6c, S-116).
 
-| ID | Idea | Type | Cost | Why now (evidence above) | First readout |
+**Tiers.** Tier 0 audits decide what to build and cost almost nothing; Tier 1 is eval-only on checkpoints we already have; Tier 2 are the arms with the strongest external evidence; Tier 3 the rest.
+
+| Tier | ID | Idea | Type / cost | Why (evidence above) | First readout |
 |---|---|---|---|---|---|
-| A44 | Collision-clip recorder in every eval | infrastructure | 1 day code, free after | 47% of runs collide and we cannot see why (A11 open) | clips on the next eval |
-| A36 | Weight-space merge E <-> J, J-seed soup | eval-only | ~45 min per alpha on 12 lanes | J lost 15 DS on lead-vehicle routes it gained 7 on obstacles | both groups within 3 DS of the better parent |
-| A43 | Uncertainty-gated caution + stall breaker over the 5 heads we have | eval-only | ~45 min per config | collision lottery, S-059 shows the guard is needed | lead-vehicle DS, vehicle-collision share |
-| A37 | Counterfactual speed-safety critic, safety-masked decoding | one arm | label pass (CPU) + head-only | 20.1 of 36.9 lost points are vehicle collisions; imitation never sees unsafe speeds | AUROC offline, then lead-vehicle DS |
-| A38 | Anticipatory speed targets, brake-onset sampler, caution token | 2-3 head-only arms | cheap | the expert brakes on privileged state before the camera can see the cue | lead-vehicle DS, completion guard |
-| A39 | Asymmetric ordinal speed loss | head-only arm family | cheap | collision costs x0.6, slowness is free until timeout (S-100) | collision share, completion guard |
-| A40 | Clearance (keep-out) loss from logged actor futures | one arm | shares A37's tracks | vehicle + layout collisions = 23 of 36.9 | collision counts per route |
-| A41 | Two-mode path head (stay / pass) with a filtered intent gate | one arm | needs `changed_route` | the two worst two-ways families score 19-23 DS, about half their loss is not finishing | overtaking success, two-ways DS |
-| A42 | Hazard queries on the full-resolution pyramid with box labels | one arm | pyramid features in the cache | lead car covers 0.4-0.8 of a stride-32 cell at brake onset (S-100) | probes, then pedestrian/lead families |
-| B37 | Make the mixer train: AdamW param group, open gates, module-update audit | 10-min probe, then 30k | cheap | B36: blocks at init at 10-15k | |Wq| change > 5% by 2k |
-| B38 | Pessimistic / optimistic search from online-vs-target disagreement | eval-only first | 1 box-hour | B24: deeper search hurts | score non-decreasing in sims |
-| B39 | Deeper reanalyze, shallow acting; fresh network for targets | flag + 4 runs | 2x reanalyze | reanalyze = 65% of time and sets target quality | 10k score, value error |
-| B40 | Train under sticky actions, report both protocols | 2-4 runs | 30k each | B2: n = seeds on deterministic evals | 30 distinct games per checkpoint |
-| B41 | RAM-supervised auxiliary (ball, paddle, bricks) as an upper bound | diagnostic | one flag | is representation the bottleneck? (B14) | 10k / 30k score |
-| B42 | Multi-horizon value heads as auxiliary loss | cheap | one flag | Fedus et al. 2019; BBF anneals gamma but nobody here tried the aux form | 10k score |
+| 0 | A45 | Vision reliance at hazards: per-frame gain of the head over a no-vision MLP, image ablations (extends A0) | offline, cached features, ~1 box-hour | vision lightly used; collisions dominate | gain on vehicle/walker-hazard frames |
+| 0 | A47 | Does the painted route overlay hurt the frozen backbone's view of vehicles? (decides A17c) | offline, 500 frames | overlay sits on the lane where hazards appear | vehicle IoU painted vs clean |
+| 0 | A44 | Collision-clip recorder in every eval | 1 day code, free after | 47% of runs collide and we cannot see why (A11 open) | clips on the next eval |
+| 0 | B37 | Mixer probe: AdamW param group, open gates, module-update audit | 10-min probe (step 0 done) | B36: blocks at init at 10-15k | |dWq|/|Wq| > 5% by 2k |
+| 1 | A36 | Weight-space merge E <-> J, J-seed soup | eval-only, ~45 min per alpha on 12 lanes | J lost 15 DS on lead-vehicle routes, gained 7 on obstacles | both groups within 3 DS of the better parent |
+| 1 | A43 | Uncertainty-gated caution + stall breaker over the 5 heads we have | eval-only, ~45 min per config | collision lottery; S-059 shows the guard is needed | lead-vehicle DS, collision share |
+| 1 | B38 | Pessimistic / optimistic search: online-vs-target disagreement, or model-value inconsistency (one network) | eval-only first, 1 box-hour | B24: deeper search hurts; EMCTS / MVI prior art | score non-decreasing in sims |
+| 1 | B43 | Depth-capped search (<= training unroll 5) and model error vs imagined depth | eval-only, 1 box-hour | 64-sim trees reach depth 17 > unroll 5 | score vs cap, error curve |
+| 2 | A15 | **Path (space-indexed) + speed head, re-budgeted loss** | one arm, head-only | CarLLaVA/SimLingo ablations; 73.5% of our objective is speed x dt | layout collisions, DS |
+| 2 | A21+A38 | **Student-aligned labels:** drop/relabel braking caused by actors out of view, anticipatory targets, hazard buckets | 2-3 head-only arms | LEAD +1.37 / +11; CarLLaVA vehicle-hazard buckets; PDM-Lite logs `speed_reduced_by_obj_*` | lead-vehicle DS, completion guard |
+| 2 | A37 | Counterfactual speed-safety critic, safety-masked decoding | one arm, label pass on CPU | 20.1 of 36.9 lost points are vehicle collisions | AUROC, then lead-vehicle DS |
+| 2 | A46 | **Train on the LEAD dataset** (state-aligned expert, 12 towns, recovery views), front camera only | adapter + one arm | the field's best recipe published its data | 220-route DS vs E, J |
+| 3 | A39 | Asymmetric ordinal speed loss; speed-head weight 0.2 -> 1 -> 3 | head-only arms | collision x0.6 vs free slowness; weight never swept | collision share |
+| 3 | A40 | Clearance (keep-out) loss from logged actor futures | one arm | vehicle + layout collisions = 23 of 36.9 | collision counts |
+| 3 | A41 | Two-mode path head (stay / pass), filtered intent gate | one arm | two-ways families 19-23 DS | overtaking success |
+| 3 | A42 | Hazard queries on the full-resolution pyramid, box labels | one arm | lead car 0.4-0.8 of a stride-32 cell at brake onset | probes, pedestrian/lead families |
+| 3 | A48 | History tokens: previous-frame feature difference (closing speed), keyframe weighting | one arm | CarLLaVA: fewer rear-end collisions; our lead families | HardBreakRoute, lead group |
+| 2 | B37 | Winning mixer setting on the 30k screen, 4 seeds | 4 x 4.5 h | unlocks the thesis test | |Wq|, entropy before scores |
+| 3 | B39 | Deeper reanalyze, shallow acting; fresh network for targets | flag + 4 runs | reanalyze sets target quality | 10k score, value error |
+| 3 | B40 | Train under sticky actions, report both protocols | 2-4 runs | B2: n = seeds on deterministic evals | 30 distinct games |
+| 3 | B41 / B42 / B44 | RAM-supervised auxiliary probe; multi-horizon value heads; stuck-loop / stagnation analysis | diagnostics, flags | see entries | 10k score; episode lengths |
 
-**Next sessions.** CARLA eval-only session (2 cheap boxes, ~4 h): A44 recorder first, then A36 (alpha 0.5 and the J soup on the 103 lead+obstacle routes) and A43 (5 heads, gated
-and plain mean) on the same routes; the clips they produce feed A37's label audit. CARLA training session (data box): A37 step 0 audit on 100 archives, then A38 label-only arms
-and A39 in parallel as separate arms (one change each). Atari box: B37 probe (10 min) -> B36 rerun with the winning optimiser setting; B38 step 0 on B24's 16 checkpoints.
+**Next sessions.** *CARLA eval-only session (2 cheap boxes, ~4 h):* A44 recorder first; A36 (alpha 0.5 and the J soup on the 103 lead+obstacle routes) and A43 (5 heads, gated vs plain mean) on the same
+routes; the same session runs A45 and A47 on one box with the PDM-Lite data (500 frames, cached features). *CARLA training session (data box):* A46 feasibility (one route per scenario family, camera
+metadata, route fields) in parallel with A15 and the A21+A38 label arms (one change per arm, head-only on cached features), A37 step 0 (label audit on ~100 archives). *Atari box:* B37 probe (10 min) ->
+B36 rerun with the winning setting; B38 step 0 and B43 on B24's 16 checkpoints (eval-only, graph search); resume the saved B36 runs from `E:\MThesis_EXP\live_20261004_box3_4x3090_atari\` only if the
+probe says the optimiser is not the fix.
 
-**Order of work for 2026-10-04** (times Athens; two box sessions in parallel, one CARLA, one Atari; you log off ~17:00)
-0. *Done 2026-10-03 evening (S-116 addendum):* B23 step 1b - `GraphedSearch` is in the trainer's acting search, the reanalyze targets
-   and the inline eval (`--graph-search`, off by default). Unit/CUDA tests pass; a 1,600-update GTrXL run is identical to eager (all 298
-   weight tensors and the replay buffer). `scripts/atari/run_b36.sh` written (graph on by default, `GRAPH=0` turns it off). Still to
-   check on the box (item 2a): batch 256 / 1,536 reanalyze roots (memory, speed, 0 fallbacks in the end-of-run line).
-1. *CARLA box session (the thesis claim), 2 boxes like O+P (Turing works for eval, ~$0.9/h for the pair; 3-4 lanes per 22-24 GB GPU,
-   ~6.3 GB per lane; `scripts/ops/provision_eval.sh`, ckpts on HF `e15_20260930`, `armJ_20260929`, `armJ2K_20261001`,
-   `armJ23_20261002`):* (a) **original WoR x2 repeats on the same 60 routes** (`WORL:<name>:<routes>` jobs, labels `a9_WOR_r*`):
-   E has 3 runs per route and arm J 2, WoR only 1, so J-vs-WoR on obstacle routes is the noisiest comparison of the thesis claim;
-   (b) **arm J e20 seeds 0-1 on the other 160 routes of the 220** (E and WoR already have them from A9) -> official 220-route DS of
-   J vs E 63.0 vs WoR 48.8 and all 5 abilities; (c) seeds 2-3 if time. ETA 3-6 h: the 4 min per run measured on the 60 short
-   routes is *not* the rate of the other 160 (longer routes) - quote the measured rate after the first hour. Then `a9_merge.py` /
-   `a9_abilities.py --junctions E:/MThesis_EXP/b2d_junctions.json`; A30's fixed-route-set test of "beats WoR" on the result.
-2. *Atari box session, 1 box with 4x 24 GB Ampere/Ada GPUs (3090/4090/A5000), >= 64 threads, 150 GB disk, **probe HF first**:*
-   (a) 30 min: bit-equality of the graphed trainer vs eager on 200 updates; (b) **B36 pilot: GTrXL 30k with `--mixer-weight-decay 0`,
-   seeds 0-3** (compare to ResNet s0-3 and the dead-mixer GTrXL s0-3 on E:); at 10k and 20k run `b15_b18_diagnostics.py` on the
-   checkpoints and read |Wq| / attention entropy / gate opening **before** trusting scores. Decision rule: blocks still at init at
-   10k (|Wq| ~6.5, entropy 1.0, gate bias ~2.0) -> stop, switch to a non-zero `out` init or AdamW for the mixer, restart; trained ->
-   run seeds 4-7 and the 8-seed comparison; (c) spare GPU headroom: B24's 10 remaining checkpoints at 64 sims with `--graph`
-   (`scripts/ops/run_b24_P.sh`), and B2's sticky-action column for all 16 (`--sticky 0.25 --graph`).
-3. *No box, in parallel:* A30 (fixed-route-set claim) and A3 (failure classification) on the new CARLA records; B28 probes (ResNet
-   now, GTrXL after B36); write-up of A9/A14/B2/B36 (the dead-mixer finding changes the Atari thesis chapter).
-4. *Decisions for you:* (i) ~4-6 h of two cheap CARLA boxes for item 1; (ii) B36 pilot with 4 seeds (decisive readout is the
-   diagnostics, not the scores: n = 4 cannot separate SD 100) vs 8 straight away; (iii) whether to also train the next CARLA arm
-   (A25 IDM overlay or A32 sinusoidal embeddings: one arm each, needs the 150-500 GB dataset box) - my advice: not tomorrow, first
-   lock arm J's claim with item 1.
-Hardware: CARLA is CPU-bound (~5 cores/lane): high CPU quota. Atari training needs native bf16 (Ampere or newer); Turing (2080 Ti,
-Titan RTX) ran CARLA evals fine on drivers 570/580 (S-115) but not Atari training. First command on a new box: HF reachability
-(`getent ahosts huggingface.co`, S-115 box N). HF token only in `/dev/shm`, never edit authorized_keys, never `pkill -f` and relaunch in
-one ssh command.
+**Order of work for 2026-10-05** (draft; times Athens; ask the destroy time first; end-of-day save must start >= 90 min before it and is sized with a measured uplink)
+0. *No box, morning:* push the E: results of 2026-10-04 to HF from the laptop (boxes 1-3 folders, `analysis_20261004`); code: the A44 recorder (agent flag), B37 flags (`--mixer-optimizer adamw --mixer-lr
+   --mixer-wd`, GRU gate bias init), `GumbelMCTS(max_depth)` for B43 with a test, the A15 path head; A30 write-up (J vs E vs WoR by scenario group, S-117) and the thesis table.
+1. *CARLA eval-only session, 2 cheap boxes (`provision_eval.sh` now installs the original WoR; `gen_lanes_0410.py` balances lanes):* A44 recorder on J seed 0 first, then A36 (alpha 0.5 and the J soup on the
+   103 lead-vehicle + obstacle routes) and A43 (5 heads, gated vs plain mean). *One box with the PDM-Lite data (150-500 GB disk):* A45 and A47 audits (500 frames each, ~1 box-hour), A46 feasibility (one LEAD
+   route per scenario family, camera metadata, route fields), A37 step 0 label audit on ~100 archives; then the head-only arms A15 and the A21 + A38 label arms (one change per arm).
+2. *Atari box, 1 box with 4x 24 GB Ampere/Ada GPUs, >= 64 threads, 150 GB disk; probe HF first and time a 200 MB upload:* B37 probe (10 min per setting) -> the winning setting on the 30k screen (4 seeds) instead of
+   resuming the dead-mixer runs unless the probe says the optimiser is not the fix; B38 step 0/0b and B43 steps 0-1 on B24's 16 checkpoints (`restore_b35_checkpoints.py`, graph search); B24 / sticky
+   evaluations only as filler (they need ~1.5 CPU cores each and slowed the trainers 1.7x when run 8-wide: keep <= 3 next to training).
+3. *Decisions for you:* (i) A46 (the LEAD data) as the main CARLA data upgrade: OK to spend the adapter effort (2-4 days) and ~270 GB of downloads (front camera only if selectable)? (ii) B36: resume the saved runs or
+   restart with the fixed optimiser (my advice: wait for the B37 probe); (iii) which CARLA box type (two eval boxes vs one data box) first.
+Hardware: CARLA is CPU-bound (~5 cores/lane): high CPU quota; 12 lanes on a 38-CPU quota ran at load 28-36 and slowed WoR routes ~1.8x (530 s vs 290 s in the A9 records; S-119). Atari training needs native bf16 (Ampere or newer); Turing (2080 Ti, Titan RTX) ran CARLA
+evals fine on drivers 570/595 but not Atari training. First command on a new box: HF reachability (`getent ahosts huggingface.co`, S-115 box N) and a download/upload speed test. HF token only in `/dev/shm`, never edit
+authorized_keys, never `pkill -f` and relaunch in one ssh command. **Saving over a slow link:** gzip the replay buffers on the box (uint8 frames compress ~28x: 817 MB -> 29 MB), hash on the box *after* copying (a trainer that saves
+in between makes an early hash stale), and never start a broad overwriting `tar` in the last minutes (an interrupted one truncated a checkpoint).
 Result table of 2026-09-27 (all boxes destroyed then, S-092):
 
 **Goal check (S-089, S-090):** original WoR **67.8 / 66.0** (2 runs, mean 66.9) on the 19 b2d20 routes.
@@ -176,12 +185,19 @@ scenario types, add a WoR-head arm on the same data for the matched comparison (
 routes (~+15 DS if solved, S-090) and little change elsewhere. Pair it with A15 so the swerve is still
 learned from a target rather than from the input.
 
-### A15. Path output next to the speed output - **Next** (with A14)
+### A15. Path output next to the speed output - **Next** (promoted 2026-10-04, S-117: the best-evidenced output change; Tier 2)
 TF++, CarLLaVA and SimLingo all predict a space-indexed **path** separately from speed. CarLLaVA: layout
 collisions 0.68 -> 0.0; SimLingo: fewer static-object collisions. Target = PDM-Lite's shifted `route` (TF++'s
 "path checkpoints", e.g. 10 points at 1 m spacing), lateral PID on the path, longitudinal control from the
 existing two-hot target speed. Absorbs the "TF++ path checkpoints" line in `tried_and_ruled_out.md` and
 part of A7.
+**Re-evidence (S-117).** (1) Our own loss audit (ch. 13.26): 73.5% of the waypoint objective is the longitudinal coordinate, ~ speed x dt, which the head can read from its own speed token;
+the PID reads only the lateral coordinate and takes speed from the target-speed head. A space-indexed path removes the coupling: the path loss is purely geometric and the speed head is the one
+place speed is decided. (2) CarLLaVA's ablation (Leaderboard 2.0 validation): waypoints only DS 3.21 with 0.68 static collisions; with the path DS 4.49 and 0.0 static collisions (+40%);
+SimLingo reports the same effect. J loses 3.2 points per run to layout collisions, and layout collisions are 42-54% of the loss on the construction-obstacle families. (3) **Design:** path
+head = lateral offset at 10 fixed distances (1-20 m, TF++'s path checkpoints; target = PDM-Lite's shifted `route`, as above) with L1 plus a smoothness term; waypoints stay for the time side;
+steer from the path at a speed-adaptive lookahead (d = 0.098 v + 0.192, A4); loss budget: path weight 1 and target-speed weight 1 instead of 0.2 (A39). One arm on arm J's data, compared with J
+on the 103 discriminating routes first, then on all 220.
 
 ### A16. Oversample obstacle/swerve frames and drop redundant ones - **Done: arm K (`--swerve_frac 0.25`) no gain over arm J** (S-111, S-112)
 2026-10-01 (S-112): the natural swerve share in arm J's data is 15.3% (65,522 / 427,310 train frames), so 0.1 was a no-op;
@@ -268,7 +284,7 @@ coordinates. The speed token is `s*w + b`, a straight line in embedding space. T
 
 The overlay already carries the route spatially, so the gain may be smaller than in point-cloud manipulation.
 
-### A26. Looming (1/time-to-contact) as the lead-vehicle target - **Later** (with A5/C28)
+### A26. Looming (1/time-to-contact) as the lead-vehicle target - **Later** (with A5/C28; step 3 promoted to A48, S-117)
 Lee's tau theory (1976): drivers brake so that tau-dot, the rate of change of time to contact from the lead car's
 optical expansion, stays near -0.5 (measured -0.51). Large driver datasets find the looming signal 1/TTC in
 both braking and lane changes (NOVA, 2026).
@@ -579,9 +595,12 @@ J is E e15 fine-tuned for 5 epochs on the mixed data (A14), so the two heads sit
 Imitation sees only the speeds the expert chose, never the unsafe ones, so it cannot learn "this speed would have hit that car". PDM-Lite's logs contain what is needed to compute
 it: per-frame 3D boxes with position, extent, yaw, speed and brake state (`aux_heads.py` docstring) and the ego's own future path. Hydra-MDP (NAVSIM 2024) distils rule-based
 sub-scores of candidate trajectories into the network the same way: privileged labels, camera-only inference.
+**Thesis link (S-117):** World on Rails (Chen et al., ICCV 2021) picks actions by a Q-value learned from rewards that its on-rails world model computes for *counterfactual* actions, which is the
+plausible source of its low collision rate (22% of runs, 7.4 lost points); A37 imports that ingredient into an imitation policy offline, for the speed axis, from the logged actor tracks.
 - **Labels (CPU, boxes JSON only, no images):** for each frame and each target-speed bin v_j in (0, 4, 8, 10, 13.9, 16, 17.8, 20) m/s, roll the ego along the expert's logged future path
   at constant v_j for 3 s (frames are stored at 4 Hz, `data_save_freq` 5 at 20 Hz), against every logged actor's recorded future footprint (open-loop: actors are assumed not to react
-  to the ego). Bin j is unsafe when the footprints come within 0.5 m or the time-to-contact drops below 1.5 s. Pedestrians and cyclists included.
+  to the ego). Bin j is unsafe when the footprints come within 0.5 m or the time-to-contact drops below 1.5 s. Pedestrians and cyclists included. The logged
+  `speed_reduced_by_obj_id` / `_distance` name the actor that set the expert's speed, so the label pass can start from it; LEAD's data add a per-box `affects_ego` flag (A46).
 - **Step 0 audit (before any training, ~100 archives):** the expert's own bin must be labelled safe in >= 98% of frames, otherwise the margins or the open-loop assumption are
   wrong; report the unsafe-label rate per scenario family (expect it high on HardBreakRoute, MergerIntoSlowTraffic, DynamicObjectCrossing).
 - **Head:** per-bin sigmoid on the speed tokens (BCE, positive weighting for the rare unsafe class), horizons 1 / 2 / 3 s.
@@ -598,7 +617,9 @@ sub-scores of candidate trajectories into the network the same way: privileged l
 ### A38. Anticipatory speed targets, brake-onset sampling and a caution token - **Next** (2-3 head-only arms, label changes only) (S-117)
 - **Why:** PDM-Lite brakes on privileged state, sometimes on actors the camera cannot see; LEAD found restricting the expert to camera-visible actors worth +1.37 DS (A21). The
   camera policy sees the same cue later, and the car needs ~0.2-0.3 s to respond. Training on the speed the expert will need soon teaches the policy to slow down for what is about to
-  be required. Vehicle collisions are 20.1 of J's 36.9 lost points, and 94-98% of the loss on HardBreakRoute and HighwayExit.
+  be required. Vehicle collisions are 20.1 of J's 36.9 lost points, and 94-98% of the loss on HardBreakRoute and HighwayExit. **Precedent:** CarLLaVA's training buckets include three
+  vehicle-hazard buckets next to acceleration/deceleration, steering, stop-sign, traffic-light, pedestrian and swerve buckets (650k samples per epoch); arm K tested only the swerve bucket.
+  The label pass is shared with A21 (visibility-aligned labels).
 - **Step 1, anticipation:** label v*(t) = min over tau in [0, Delta] of the expert's target speed at t + tau, Delta in {0.5, 1.0, 2.0} s (2 / 4 / 8 frames at 4 Hz). Waypoints unchanged.
 - **Step 2, sampler:** oversample frames in the 2 s before the expert's target speed drops by >= 4 m/s (`--brake_frac`, same machinery as arm K's `--swerve_frac`; K gave no gain on
   swerves, this is the braking side).
@@ -612,7 +633,9 @@ Two-hot cross-entropy treats a wrong bin the same whether it is too fast or too 
 0.6, slowness costs nothing until the 200 s route cap (S-100), and our arms sit at the fast end (47% of runs collide) while WoR sits at the slow end.
 - **Loss:** CE_twohot + lambda_o * sum_j p_j * relu(v_j - v*)^2 / v_max^2 + lambda_u * sum_j p_j * relu(v* - v_j)^2 / v_max^2, with lambda_o = 2-4 x lambda_u; optional HL-Gauss
   smoothed targets (B9's trick). Decode stays the mean, so there is no mode snapping and no deadlock like the median decode (-22.9 DS, A28) or the hard brake (S-059).
-- **Arms:** (lambda_o, lambda_u) in {(0.5, 0.25), (1, 0.25), (2, 0.5)}; one change per arm; compare with A38 in the same table.
+- **Arms:** (lambda_o, lambda_u) in {(0.5, 0.25), (1, 0.25), (2, 0.5)}; one change per arm; compare with A38 in the same table. **Also the plain weight sweep that was never run:**
+  `target_speed_loss_weight` in {0.2 (today), 1, 3} with the unchanged two-hot CE: the head decides longitudinal control and carries 0.2 of an objective dominated by the longitudinal waypoint
+  axis (ch. 13.26); no sweep of this weight is recorded in the logs.
 - **Readouts:** vehicle-collision share down without the not-finishing share rising by more than 5 points; lead-vehicle group DS. **Kill:** the posterior simply shifts slow everywhere.
 - **Single camera:** yes. **Cost:** head-only.
 
@@ -644,7 +667,8 @@ pooling of the stride-32 map: at the brake-onset gap a lead car covers 0.4-0.8 o
 not help (ch. 13.24) but it is a finer grid of the same stride-32 map, so it does not test this.
 - **Design:** K = 6 learned queries cross-attend (2D sin-cos positions) over the stride-16 + stride-32 maps (`CarlaPretrainedEncoder.forward_pyramid`, ~1,080 tokens at 288x768; the
   stride-8 map only in a corridor window as a second step). The K query outputs are appended to the policy's token set.
-- **Supervision (loss only, from the logged boxes):** query k is matched to the k-th nearest in-corridor actor by along-track distance: presence (focal BCE), class (vehicle /
+- **Supervision (loss only, from the logged boxes):** query 0 takes the actor named by `speed_reduced_by_obj_id` (the one that set the expert's speed); query k is matched to the k-th nearest
+  in-corridor actor by along-track distance: presence (focal BCE), class (vehicle /
   pedestrian / cyclist), log distance, closing speed, brake-light state (the box's `brake` flag), lateral offset. Weights 0.05-0.2 of the waypoint loss.
 - **Controls:** (i) the same queries with the auxiliary loss off (separates "more tokens" from "supervision"); (ii) loss on the 4x4 tokens only.
 - **Readouts:** offline probes (distance error at 20-30 m, brake-light AUROC); closed loop: lead-vehicle, pedestrian families (VehicleTurningRoutePedestrian 22.1, DynamicObjectCrossing 59.0).
@@ -671,6 +695,55 @@ J has a vehicle collision in 47% of its runs, and we still cannot say who hit wh
   (avoidable by slowing). Needs balanced positives from similar situations we passed, or it teaches blanket caution; do use 1 first.
 - **Use 3:** relabel those states with PDM-Lite replay (A6's shadow-mode recipe) once the clips say where it matters.
 - **Single camera:** yes; actor poses are logged for analysis only. **Cost:** about a day of code, free per eval afterwards.
+
+### A45. Vision reliance at hazards: does the head use the image where it matters? - **Next** (Tier 0 audit; offline on cached features, ~1 box-hour; extends A0) (S-117)
+**Evidence:** a no-vision MLP on route + speed + command reaches held-out loss 0.7558 against 0.5793 for the transformer with vision (ch. 13.30: lateral error 0.0713 -> 0.0503 m);
+evals that accidentally ran on a random backbone still scored 50-60 DS (S-072); 47% of J's runs have a vehicle collision. Hazards are rare in the data, so a head can drive the loss down
+without learning to see them (PlanT 2.0, 2025, names exploitable shortcuts and expert rigidity as structural flaws).
+- **Strata:** PDM-Lite logs per frame the reason for the expert's speed (`speed_reduced_by_obj_type`, `_id`, `_distance`; `vehicle_affecting_id`, `walker_affecting_id`; `brake`). Stratify
+  held-out frames by hazard type (vehicle / walker / none) and distance (< 15, 15-30, 30-50 m).
+- **Measure per stratum:** target-speed cross-entropy and expected-speed error for (a) the full model, (b) image tokens zeroed, (c) image tokens from another frame of the same route,
+  (d) a random backbone, (e) the no-vision MLP (`scripts/analysis/audit_route_leakage.py` already fits it). **Vision gain** = loss(e) - loss(a). Plus a linear probe on the frozen 4x4 tokens
+  for "vehicle within 25 m and closing" (does the *feature* carry the cue?).
+- **Reading:** gain ~ 0 on hazard frames but probe AUROC high -> the head ignores a cue it could read: forcing signals are the right class (A37, A38, A39, A42 loss, A21). Probe AUROC low
+  -> access problem: A42 / A31 / A34 / A47. Gain large but the closed loop still collides -> timing and decision (A38, A43). Closed-loop complement: A0 (blank image) on the 103
+  lead + obstacle routes.
+- **Single camera:** yes. **Cost:** ~1 box-hour on the cached features; no CARLA.
+
+### A46. Train on the LEAD dataset (state-aligned expert, all towns, recovery views), front camera only - **Next** (data upgrade; feasibility first) (S-117)
+LEAD (CVPR 2026, TransFuser v6) is the best open recipe (95.0 DS; camera-only 360 degrees 91.6). Its largest single ingredient is a *state-aligned expert*: it ignores actors outside the camera
+view, limits traffic-light reasoning to the frustum, caps speed by observable flow, brakes earlier near visible hazards, enlarges boxes at turns (+1.37 DS on Bench2Drive, +11 on Longest6 v2).
+**The data are public:** HF `ln2697/lead` (MIT, 269 GB, 45 scenario folders; 8,930 routes, 43 scenario types, all 12 CARLA towns), six RGB cameras at 4 Hz, ego state / boxes / route /
+traffic lights at 20 Hz in Arrow (`py123d` format), per-box `affects_ego` and occlusion counts, perturbed ("recovery") views (shift 0.1-1.0 m, yaw 5-12.5 degrees, the same idea as our
+recovery camera), camera-only checkpoints (`ln2697/transfuser-carla-123d`). Our PDM-Lite set has six towns and no aligned expert (69% of Bench2Drive is Town12/13).
+- **Step 0, feasibility (1 day, one box):** download one route per scenario family (their `scripts/download_one_route.sh`); identify the camera closest to our front camera and read its
+  intrinsics (`scene.get_camera_metadatas()`); mount an identical camera in our eval agent; read the route / target-point fields to build `route_original`; check how target speed and
+  waypoints are stored (our head predicts time-indexed waypoints plus a two-hot target speed over TF++'s 8 bins); estimate the front-camera-only size (the files are per camera).
+- **Step 1, adapter (2-4 days):** `py123d` Arrow -> our loader (frame, speed, route, waypoints from future ego poses, target-speed label, boxes).
+- **Step 2, arm L:** arm E's recipe (frozen TF++ regnety_032, route overlay, transformer head) on the LEAD front-camera data; compare with E and J on the 220 routes (all four ability
+  groups); a matched WoR-head arm on the same data keeps the fair-baseline rule (retrain allowed, no tuning).
+- **Step 3 (optional, A7):** the public camera-only TFv6 checkpoint as a teacher for soft speed / path labels (its calibrated uncertainty is exactly what the aligned expert encodes).
+- **Risks:** adapter effort and convention mismatches (camera intrinsics, speed bins, 4 Hz vs 20 Hz); the 220 evaluation routes may overlap LEAD's training scenarios (report as a caveat); it
+  makes the gap to WoR larger partly through data, so report it as a data-upgrade row, not as a method row.
+- **Single camera:** yes (one of the six cameras; the others are never read). **Why Tier 2 first:** data alignment was the largest lever in the field's best recipe, and our own J/E trade-off shows
+  the data mix sets the skills.
+
+### A47. Does the painted route overlay hurt the frozen backbone's view of vehicles? - **Next** (Tier 0 audit, offline, 500 frames; decides A17c) (S-117)
+The route polyline (alpha 0.55, 5 px) is painted into the RGB before the frozen TF++ backbone reads it, over exactly the lane where lead vehicles and crossing pedestrians appear; TF++ was
+trained on clean images. S-072 also shows the route survives a *random* backbone, i.e. the overlay carries its information through the image.
+- **Test:** run the TF++ decoders (A34 step 1, `scripts/analysis/tfpp_decoders_rgb_only.py`) on the same 500 frames with and without the overlay; report vehicle and pedestrian IoU, depth error in
+  the route corridor, and the corridor-only IoU of the frozen features' semantic head.
+- **Reading:** vehicle IoU in the corridor drops by > 2 points -> arm: the route enters as a separate token / channel and the image stays clean (A17c; keep both the route tokens and a *post-backbone*
+  route map). No drop -> close the question.
+- **Single camera:** yes. **Cost:** ~1 box-hour, no training.
+
+### A48. History tokens: previous-frame feature difference as a closing-speed cue, with keyframe weighting - **Next** (one arm; promotes A26 step 3) (S-117)
+One frame cannot give relative speed, and the lead-vehicle families (HardBreakRoute, MergerIntoSlowTraffic, HighwayExit: 87-98% collisions) are exactly where closing speed decides. CarLLaVA reports
+fewer rear-end collisions with temporal input (qualitative; its leaderboard score did not rise) and names rear-end collisions and high-speed merging as its failure modes, the same as ours.
+- **Design:** extra tokens = pooled 4x4 features of frame t minus frame t-k (k = 1 or 2 saved frames = 0.25 / 0.5 s; the agent buffers 5 / 10 ticks), **no past actions** (no copycat shortcut),
+  keyframe up-weighting at expert action changes (Wen et al., ICML 2021, shown in CARLA). Cached features make the second frame nearly free in training.
+- **Readouts:** lead-vehicle group DS and vehicle-collision share, HardBreakRoute; guard: the non-lead groups >= J - 3. **Kill:** no gain on the lead group.
+- **Single camera:** yes (same camera, two time steps). **Cost:** one arm; compare with A42 (spatial detail) since they attack the same collisions from two sides.
 
 ### A6. DAgger with the PDM-Lite expert - **Later** (large)
 Roll out our policy, let PDM-Lite label the visited states, add them to training. The general
@@ -722,12 +795,18 @@ the reward down multiplicatively) scales to 300M CARLA samples, where shaped rew
 waypoint prior. Raw2Drive (NeurIPS 2025) is the only RL method on Bench2Drive. Needs CARLA rollouts on the
 training box (shares infrastructure with A6 DAgger).
 
-### A21. Remove expert-learner asymmetry from the labels - **Later**
+### A21. Remove expert-learner asymmetry from the labels - **Next** (promoted 2026-10-04, S-117: LEAD's central ingredient; Tier 2, with A38)
 LEAD: PDM-Lite reacts to actors the cameras can't see and to exact velocities of other cars, which gives
 non-causal or "successful but dangerous" demonstrations. Restricting the expert to camera-visible actors:
 +1.37 DS. Without re-collecting data: down-weight frames where the expert's hazard/brake is caused by an
 actor outside our front camera's field of view (from the logged `vehicle_affecting_id` / `speed_reduced_by_obj_*`
 fields plus the camera frustum). Feeds A11.
+**Design (S-117).** PDM-Lite logs per frame which actor set the expert's speed (`speed_reduced_by_obj_type`, `_id`, `_distance`; `vehicle_affecting_id`, `walker_affecting_id`; checked in
+`carla_garage/team_code/autopilot.py`) and the boxes with their visibility counts (check the field names in the archives). Relabel offline, one change per arm: (a) frames whose reduction is
+caused by an actor outside the front camera's field of view or fully occluded -> weight 0, or relabel with the conservative IDM of the visible actors only; (b) traffic-light reasoning outside
+the frustum -> weight 0; (c) conservative braking near visible hazards: IDM headway T and gap s0 scaled by 1.5 for visible lead vehicles; (d) enlarged boxes at unprotected turns. The share of
+frames each rule touches is the step 0 number (A45 strata). LEAD gets +1.37 DS on Bench2Drive and +11 on Longest6 v2 by changing the expert at collection time; here we change the labels of
+the logs we have, and A46 is the same idea with LEAD's own data. The arms share the label pass with A38.
 
 ### A10. Learning-rate sweep for the transformer head - **Later**
 3e-4 was inherited from the conv head and never revisited. Arm G's grad-clip result is in (no gain,
@@ -861,7 +940,7 @@ does not train with wd 0 (zero-init `out` starves it of gradient), next: non-zer
 mixer stops decaying with wd 0 (73.34 -> 73.40) and the output projection grows (0 -> 1.35 / 2.20), but q/k/v/FFN are still at their
 init values at 5k (closed gate, zero-init output): the 30k screen has to show whether they train.
 
-### B37. Make the transformer mixer train: AdamW parameter group, open gates, and a module-update audit - **Next** (the B36 follow-up; highest-value Atari item) (S-117)
+### B37. Make the transformer mixer train: AdamW parameter group, open gates, and a module-update audit - **Next** (the B36 follow-up; highest-value Atari item) (S-118)
 **Evidence (2026-10-04, B36 on box 3):** with `--mixer-weight-decay 0` the mixer stops decaying (|W| 73.34 -> 73.40), but the blocks do not learn: seed 2 at 15k has |Wq| 6.510 (init
 6.5), FFN gate 13.069, GRU gate bias 2.000, attention entropy 0.99 of the maximum, while the output projection grows (|out| 0.96 -> 2.49). A non-zero output init (`--mixer-out-init-std
 0.02`) does not change it: |Wq| 6.507 at 10k, |out| 2.63. The gate starts closed (z ~0.13) and the block output is multiplied by the small output projection, so q/k/v/FFN receive a
@@ -877,9 +956,12 @@ and every transformer is trained with one.** Everything transformer-specific (B5
 - **Step 2:** the winning setting on the B36 30k screen, 4 seeds, against the ResNet and the wd-0 GTrXL runs already on E:; read |Wq|, entropy and gate opening at 5k / 10k / 20k before the
   scores (`b36_diag_watch.sh` does this).
 - **Kill:** no setting moves Wq in the probe -> the mixer design (not the optimiser) is the problem: try the plain pre-LN residual block without the GRU gate (B5's "GTrXL without gating").
+- **Consistency and prior art (S-118):** the CARLA head (AdamW, lr 3e-4) needed exactly this class of fix, a weight-decay exemption for its gates and norms (ch. 13.6c); EZ-V2 itself trains
+  Atari with SGD but proprioceptive control with Adam; training transformers with Adam beats SGD in general (heavy-tailed gradient noise). The PPO-era "gates frozen at init" note (S-035-S-037)
+  had another root cause (the Kaiming init of the Impala encoder, S-043) and is not evidence about the optimiser.
 - **Cost:** probe ~10 min per setting on one 3090 with the graphed search; step 2 ~4.5 h per 30k run with one run per GPU.
 
-### B38. Pessimistic (and optimistic) search from two-network disagreement - **Next** (eval-only step 0; novel for an EZ-V2 search) (S-117)
+### B38. Pessimistic (and optimistic) search from two-network disagreement - **Next** (eval-only step 0; novel for an EZ-V2 search) (S-118)
 **Evidence:** B24: 64 simulations instead of 16 lowered the score on 4 of the 6 checkpoints finished (307.5 -> 158.2, 157.3 -> 74.9, 159.7 -> 107.7; one rose 47.6 -> 94.4). The model's
 imagined values at depth are over-optimistic: the search picks the actions whose errors are most favourable (model exploitation / winner's curse). Model-based RL counters it with
 pessimism toward uncertain model predictions (MOPO, MOReL, ensembles in PETS/MBPO) and value-based RL with the min of two critics (clipped double-Q). We have a second network at no
@@ -893,8 +975,13 @@ training cost: every checkpoint stores `target` next to `model`.
   training targets stay pessimistic.
 - **Kill:** no change in the slope of score vs sims, or the 16-sim score drops by more than 10%.
 - **Differs from** B24 (measures the slope), B30/V-MCTS (when to search), B34 (target estimators): none uses model disagreement inside the search.
+- **Prior art (S-118):** Epistemic MCTS (ICLR 2025) propagates epistemic uncertainty through an AlphaZero/MuZero tree for deep exploration in sparse-reward tasks (no Atari); Model-Value
+  Inconsistency (Filos et al., ICML 2022) builds an "implicit value ensemble" from **one** model and one value function rolled to different depths and uses the disagreement as an uncertainty
+  signal for pessimism; a TU Delft thesis uses bootstrapped ensembles for MuZero exploration. We found no use of either signal inside a Gumbel / EZ-V2 search.
+- **Step 0b (no second network):** inside the existing tree, a node's inconsistency = |V_head(s) - (r + gamma * backed-up child value)|; penalise the backup by lambda * inconsistency; same
+  B24 protocol. Needs no extra model calls, so it can also be switched on in training.
 
-### B39. Decouple the search depth of reanalyze from acting, and use a fresh network for targets - **Next** (one flag; the graphed search makes it affordable) (S-117)
+### B39. Decouple the search depth of reanalyze from acting, and use a fresh network for targets - **Next** (one flag; the graphed search makes it affordable) (S-118)
 Reanalyze is ~62-71% of training time at 16 simulations (time split c/t/u ~6/71/23 eager, 2/62/36 with the graphed search on a 3090 at batch 256) and it generates every policy and value target, while acting needs only
 a good move. Today both use 16 simulations and the reanalyze network is the target copy up to 200 updates old.
 - **Flags:** `--reanalyze-sims N` (acting stays at `--num-simulations`) and `--reanalyze-net online|target`.
@@ -903,7 +990,7 @@ a good move. Today both use 16 simulations and the reanalyze network is the targ
 - **Readouts:** 10k score; value-target error against Monte-Carlo returns on a fixed held-out state set (the reanalyzed value should be closer); policy-target entropy.
 - **Caveat:** B24's deeper test-time search hurt, so deeper targets may too; run it next to B38's pessimism, which is the companion.
 
-### B40. Train under sticky actions and report both protocols - **Next** (robustness, and evaluations that mean something) (S-117)
+### B40. Train under sticky actions and report both protocols - **Next** (robustness, and evaluations that mean something) (S-118)
 **Evidence:** B2: with deterministic evals a checkpoint yields ~4 distinct games however many episodes are run, so n = seeds; with sticky actions (p = 0.25) 21-27 of 30 games are
 distinct, but the scores fall to ~1/3 (GTrXL s3 307 -> 103, ResNet s5 254 -> 88): the agents rely on deterministic dynamics. Train with `repeat_action_probability = 0.25` (the wrapper
 exists, `make_atari_env`; add `--sticky-train`) and evaluate under both protocols.
@@ -912,7 +999,7 @@ exists, `make_atari_env`; add `--sticky-train`) and evaluate under both protocol
   per checkpoint does a sticky eval give (tunnel rate and median become usable per seed).
 - **Caveat:** not comparable with EZ-V2's published numbers (no sticky actions in the Atari-100k protocol); report as a robustness row next to the standard one.
 
-### B41. Privileged-state auxiliary (ALE RAM) as an upper-bound probe of the representation - **Later** (diagnostic; not for the headline comparison) (S-117)
+### B41. Privileged-state auxiliary (ALE RAM) as an upper-bound probe of the representation - **Later** (diagnostic; not for the headline comparison) (S-118)
 Aux heads on the latent regress the ball position and velocity, the paddle position and the brick count, read from the emulator RAM (the AtariARI annotation table for Breakout, Anand
 et al. 2019); the labels exist only in training. Same recipe as the CARLA rule (privileged information as targets, never as inputs), but here it breaks comparability with EZ-V2.
 - **Question:** is representation learning the bottleneck at 10k and 30k? If the score jumps (10k: 15 -> 25+), object-centric inputs (B14) are the right investment; if not, search,
@@ -920,11 +1007,36 @@ et al. 2019); the labels exist only in training. Same recipe as the CARLA rule (
 - **Also:** probing accuracy of the *unaided* latent is B28's first measurement (does it already encode the ball?).
 - **Cost:** one flag, a RAM read in the env wrapper, 2 seeds x 2 budgets.
 
-### B42. Multi-horizon value heads as an auxiliary loss - **Later** (cheap, one flag) (S-117)
+### B42. Multi-horizon value heads as an auxiliary loss - **Later** (cheap, one flag) (S-118)
 Predict the return-to-go at several discounts (gamma in {0.9, 0.97, 0.997}) from the same latent, as auxiliary targets next to the main value head (Fedus et al. 2019,
 "Hyperbolic discounting and learning over multiple horizons", reports gains on Atari from the auxiliary horizons *(unverified: abstract only)*). BBF anneals gamma 0.97 -> 0.997 (B8) but nobody here tried the auxiliary
 form, which shapes the representation without changing the control problem. Targets from the same reanalyzed values (no extra search). Arms: 10k, ResNet, 4 seeds; kill if
 the main-head value error or the score does not move.
+
+### B43. Depth-capped search and the model's error against imagined depth - **Next** (eval-only; explains B24; Tier 1) (S-118)
+**Evidence:** training unrolls the dynamics for K = 5 steps, but at 64 simulations the tree reaches depth 17 (16 sims: 6, 32 sims: 12; S-116 tree-depth measurement on real states), so the search uses
+the model well outside the horizon it was trained on. B24 found deeper search lowering the score on 4 of 6 checkpoints, and S-058 found the value-prefix head miscalibrated at imagined depth 1.
+- **Step 0, error curve (offline; script and first result done 2026-10-04):** `scripts/analysis/b43_model_drift.py` rolls the model forward with the real actions on real replay
+  trajectories and compares each imagined step k with what the same model outputs on the real observation at t + k (latent cosine in the SimSiam space, value, policy KL, value prefix). First
+  result, 384 start states from the B36 seed-2 replay, depth 12: **GTrXL (B36 s2, 28k updates)** latent 1-cos 0.010 (depth 1) -> 0.032 (depth 5) -> 0.115 (depth 12), the per-step increase doubling
+  after depth 5 (0.0054 -> 0.0116); policy KL 0.019 -> 0.041 -> 0.145; argmax agreement with the real-state policy 0.96 -> 0.94 -> 0.84; |dV| 0.080 -> 0.142 -> 0.206 with mean bias ~0.
+  **ResNet (B35 s5, same states)** latent 0.020 -> 0.095 -> 0.254; KL 0.041 -> 0.116 -> 0.397; argmax 0.94 -> 0.89 -> 0.77; |dV| 0.081 -> 0.156 -> 0.292, value bias -0.10 at depth 12 (imagined
+  values drift *low*, so the damage is variance and the winner's curse, not a mean optimism: B38's pessimism targets exactly that). So the drift accelerates past the training horizon in both
+  trunks; two single checkpoints on one replay, not yet a result. Next: all 16 B35 checkpoints, correlate the growth after depth 5 with each checkpoint's B24 slope; EZ-V2's own checkpoints are
+  the reference (they predict the prefix accurately, S-058). Outputs: `E:\MThesis_EXP\analysis_20261004\b43_drift_*.json`.
+- **Step 1, cap (eval-only):** `GumbelMCTS(max_depth=D)`: a node at depth D is not expanded further and is scored by its value head; D in {3, 5, 8, unlimited}; B24's 16 checkpoints at 64 sims, 30
+  episodes, graph search (a `max_depth` knob next to `depth_bound`). **Success:** the score stops falling with sims at D = 5.
+- **Step 2 (training, if step 0 shows the error grows after K):** K = 8 with a lower weight on steps > 5, so deeper search has something to stand on.
+- **Companion:** B38 (pessimism), which attacks the same compounding error from the value side. **Cost:** step 0 and 1 are eval-only, ~1 box-hour on 4 GPUs.
+
+### B44. How many zero scores are stuck loops? Stagnation-aware evaluation and acting - **Later** (diagnostic first) (S-118)
+B2/B24 note that games where the agent never launches the ball (no FIRE after a life loss) run to the 27k-step cap and hold up every evaluation; at 64 sims one GTrXL checkpoint finished in 52 min
+against 3 h at 16 sims, so search breaks some of the loops. The eval JSON stores `eval_seconds` but no episode lengths, so the share of zero scores that are loops is unknown (the zero-scoring ResNet s4 took 7,032 s against
+265-785 s for ResNet s5-s7; GTrXL evaluations are slower in general, 4,225-7,297 s).
+- **Step 0:** log per-episode length, reward-free streak and action histogram in `eval_ez_checkpoints.py`; re-score the B35 / B2 checkpoints and report the share of zero scores that are loops.
+- **Step 1, if loops are common:** a generic stagnation rule (no reward, no life change and no screen change for N steps -> sample a random action) in evaluation, reported as a second protocol row
+  (it departs from EZ-V2's protocol), and the same rule in the acting search so the loops do not fill the replay with dead data.
+- **Why it matters:** the seed SD of 100 that blocks every trunk claim comes largely from 0.0 vs 300 outcomes; removing the loops would shrink it without changing the policy.
 
 ### B5. Why does GTrXL beat ResNet? - **Later** (after B4; after B36: the current GTrXL has a dead mixer)
 Parameter-count-matched ResNet control, and a GTrXL without gating, at the budget where B4 shows a
