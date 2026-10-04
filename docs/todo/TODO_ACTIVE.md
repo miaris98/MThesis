@@ -81,6 +81,7 @@ and WoR all drove):
 | 2 | A15 | **Path (space-indexed) + speed head, re-budgeted loss** | one arm, head-only | CarLLaVA/SimLingo ablations; 73.5% of our objective is speed x dt | layout collisions, DS |
 | 2 | A21+A38 | **Student-aligned labels:** drop/relabel braking caused by actors out of view, anticipatory targets, hazard buckets | 2-3 head-only arms | LEAD +1.37 / +11; CarLLaVA vehicle-hazard buckets; PDM-Lite logs `speed_reduced_by_obj_*` | lead-vehicle DS, completion guard |
 | 2 | A37 | Counterfactual speed-safety critic, safety-masked decoding | one arm, label pass on CPU | 20.1 of 36.9 lost points are vehicle collisions | AUROC, then lead-vehicle DS |
+| 2 | A49 | **Cover the lead-vehicle families in J's fine-tune mix** (arm M) | existing pipeline, ~40 GB download | E never saw them, J's obstacle data overwrote car-following (-15.2) | lead >= E - 3 and obstacle >= J - 3 |
 | 2 | A46 | **Train on the LEAD dataset** (state-aligned expert, 12 towns, recovery views), front camera only | adapter + one arm | the field's best recipe published its data | 220-route DS vs E, J |
 | 3 | A39 | Asymmetric ordinal speed loss; speed-head weight 0.2 -> 1 -> 3 | head-only arms | collision x0.6 vs free slowness; weight never swept | collision share |
 | 3 | A40 | Clearance (keep-out) loss from logged actor futures | one arm | vehicle + layout collisions = 23 of 36.9 | collision counts |
@@ -603,6 +604,13 @@ plausible source of its low collision rate (22% of runs, 7.4 lost points); A37 i
   `speed_reduced_by_obj_id` / `_distance` name the actor that set the expert's speed, so the label pass can start from it; LEAD's data add a per-box `affects_ego` flag (A46).
 - **Step 0 audit (before any training, ~100 archives):** the expert's own bin must be labelled safe in >= 98% of frames, otherwise the margins or the open-loop assumption are
   wrong; report the unsafe-label rate per scenario family (expect it high on HardBreakRoute, MergerIntoSlowTraffic, DynamicObjectCrossing).
+  **First run on real logs (2026-10-04, `scripts/analysis/pdm_lite_label_audit.py`, HTTP range requests, no download; Town12, 6 routes per archive, 705-913 frames each):** the data support the label
+  pass: box ids persist to the next 4 Hz frame in 97-99% of cases, the actor that sets the expert's speed is in the front camera's +-55 degree view in 96-99% of the frames, and the expert's own bin
+  (largest bin not above its commanded speed) passes the 1-D inevitable-collision check in 99.3-100% (HardBreakRoute 100%, HighwayExit 100%, MergerIntoSlowTrafficV2 99.4%, DynamicObjectCrossing
+  99.3%). **But the label is rarely positive with a lenient criterion** (apply the bin for 0.75 s at <= 2 m/s^2, then brake at 7 m/s^2): fast bins are unsafe in only 4% of in-lane lead frames on
+  HardBreakRoute and ~0% on HighwayExit / MergerIntoSlowTrafficV2, because the expert follows at 4-6 m and a 2 m/s^2 acceleration limit hardly changes the speed in 0.75 s. Calibrate the criterion
+  (controller-realistic acceleration >= 3.5 m/s^2, hold >= 1 s, or a time-headway rule) until the fastest bins are unsafe in ~20-40% of lead frames while the expert's own bin stays >= 98% safe; a first
+  version with a constant-speed (no braking) criterion flagged 44% of the 4 m/s bins unsafe and the expert's own bin 15%: wrong, because it never lets the car brake.
 - **Head:** per-bin sigmoid on the speed tokens (BCE, positive weighting for the rare unsafe class), horizons 1 / 2 / 3 s.
 - **Decode (an eval-time knob, no retraining):** S = {j : p_safe(j) >= theta}; take the imitation posterior renormalised on S and decode its mean (not the argmax or median, which
   snapped to a mode and deadlocked, A28); if S is empty, the lowest bin. Sweep theta in {0.3, 0.5, 0.7}.
@@ -619,7 +627,9 @@ plausible source of its low collision rate (22% of runs, 7.4 lost points); A37 i
   camera policy sees the same cue later, and the car needs ~0.2-0.3 s to respond. Training on the speed the expert will need soon teaches the policy to slow down for what is about to
   be required. Vehicle collisions are 20.1 of J's 36.9 lost points, and 94-98% of the loss on HardBreakRoute and HighwayExit. **Precedent:** CarLLaVA's training buckets include three
   vehicle-hazard buckets next to acceleration/deceleration, steering, stop-sign, traffic-light, pedestrian and swerve buckets (650k samples per epoch); arm K tested only the swerve bucket.
-  The label pass is shared with A21 (visibility-aligned labels).
+  The label pass is shared with A21 (visibility-aligned labels). **Real-log facts (2026-10-04):** the expert follows lead vehicles at a bumper gap of 4-6 m (IDM s0 = 4 m, T = 0.25 s); its speed is set by another road user in
+  94% (HardBreakRoute) / 81% (HighwayExit) / 41% (MergerIntoSlowTrafficV2) of the frames, in 89-99% of those at a distance under 15 m, while braking (`brake` true) is rare outside HardBreakRoute (34% of frames; 4% HighwayExit, 7% Merger): the speed
+  head sees mostly steady following and few brake onsets, which is what the sampler (step 2) rebalances; the caution token (step 3) scales exactly this headway (T and s0).
 - **Step 1, anticipation:** label v*(t) = min over tau in [0, Delta] of the expert's target speed at t + tau, Delta in {0.5, 1.0, 2.0} s (2 / 4 / 8 frames at 4 Hz). Waypoints unchanged.
 - **Step 2, sampler:** oversample frames in the 2 s before the expert's target speed drops by >= 4 m/s (`--brake_frac`, same machinery as arm K's `--swerve_frac`; K gave no gain on
   swerves, this is the braking side).
@@ -700,7 +710,7 @@ J has a vehicle collision in 47% of its runs, and we still cannot say who hit wh
 **Evidence:** a no-vision MLP on route + speed + command reaches held-out loss 0.7558 against 0.5793 for the transformer with vision (ch. 13.30: lateral error 0.0713 -> 0.0503 m);
 evals that accidentally ran on a random backbone still scored 50-60 DS (S-072); 47% of J's runs have a vehicle collision. Hazards are rare in the data, so a head can drive the loss down
 without learning to see them (PlanT 2.0, 2025, names exploitable shortcuts and expert rigidity as structural flaws).
-- **Strata:** PDM-Lite logs per frame the reason for the expert's speed (`speed_reduced_by_obj_type`, `_id`, `_distance`; `vehicle_affecting_id`, `walker_affecting_id`; `brake`). Stratify
+- **Strata (verified on real logs 2026-10-04):** of the 856 speed-reduction frames of DynamicObjectCrossing the cause is a vehicle in 74%, a traffic light or sign in 19% and a pedestrian in 7%; PDM-Lite logs per frame the reason for the expert's speed (`speed_reduced_by_obj_type`, `_id`, `_distance`; `vehicle_affecting_id`, `walker_affecting_id`; `brake`). Stratify
   held-out frames by hazard type (vehicle / walker / none) and distance (< 15, 15-30, 30-50 m).
 - **Measure per stratum:** target-speed cross-entropy and expected-speed error for (a) the full model, (b) image tokens zeroed, (c) image tokens from another frame of the same route,
   (d) a random backbone, (e) the no-vision MLP (`scripts/analysis/audit_route_leakage.py` already fits it). **Vision gain** = loss(e) - loss(a). Plus a linear probe on the frozen 4x4 tokens
@@ -744,6 +754,19 @@ fewer rear-end collisions with temporal input (qualitative; its leaderboard scor
   keyframe up-weighting at expert action changes (Wen et al., ICML 2021, shown in CARLA). Cached features make the second frame nearly free in training.
 - **Readouts:** lead-vehicle group DS and vehicle-collision share, HardBreakRoute; guard: the non-lead groups >= J - 3. **Kill:** no gain on the lead group.
 - **Single camera:** yes (same camera, two time steps). **Cost:** one arm; compare with A42 (spatial detail) since they attack the same collisions from two sides.
+
+### A49. Cover the lead-vehicle scenario families in the fine-tune mix (arm M) - **Next** (data-mix repair of J with the existing pipeline; ~40 GB per town; Tier 2) (S-117)
+J's fine-tune added only the 10 obstacle archives per town (Town12/13) and lost 15.2 DS on lead-vehicle routes against E (S-117). **E never saw those families either**: the 6-town set holds only ControlLoss, DynamicObjectCrossing,
+OppositeVehicleRunningRedLight, SignalizedJunctionLeft/RightTurn, VehicleTurningRoute and NoScenario (S-062); its skill there is generic car-following, which J's obstacle data partly overwrote (a car-following policy that has learned
+"swerve around what is ahead" collides where the lead vehicle is slow, not blocking; S-097 warned of false overtakes). The matching archives exist and are small: Town12 `HardBreakRoute` 3.2 GB, `HighwayCutIn` 3.3, `HighwayExit` 3.8,
+`MergerIntoSlowTraffic` 2.5 + `V2` 4.2, `InterurbanActorFlow` 2.4 + `AdvancedActorFlow` 1.9, `StaticCutIn` 2.2, `ParkingCutIn` 4.5, `ParkingExit` 4.0, `CrossingBicycleFlow` 2.4, `EnterActorFlow` 1.7 + `V2` 2.0,
+`BlockedIntersection` 2.5: ~41 GB (HF file listing; check Town13). S-063's "coverage alone did not fix the obstacles" was a route-input mismatch (S-096), which does not exist for families without route shifts.
+- **Arm M:** J's recipe (E e15 fine-tuned 5 epochs on E's schedule, `--route_key route_original`) on the J mix plus these archives, mixed by frames (base : obstacle : lead-vehicle about 2 : 1 : 1); one change versus J.
+- **Readouts:** the 103 discriminating routes first, then all 220; **success:** lead-vehicle group >= E - 3 and obstacle group >= J - 3 at the same time (what A36 tries in weight space); also the share of J's vehicle collisions that
+  remain on the lead families.
+- **Relation to the others:** the cheap data-side twin of A36 (no new code) and the small version of A46 (LEAD's data cover every family with an aligned expert but need an adapter); run A36 first (eval-only), A49 if the merge has no
+  good alpha.
+- **Single camera:** yes. **Cost:** ~40-80 GB download (Town12 +/- Town13), 5 epochs of fine-tuning, J's evaluation protocol.
 
 ### A6. DAgger with the PDM-Lite expert - **Later** (large)
 Roll out our policy, let PDM-Lite label the visited states, add them to training. The general
@@ -802,10 +825,14 @@ non-causal or "successful but dangerous" demonstrations. Restricting the expert 
 actor outside our front camera's field of view (from the logged `vehicle_affecting_id` / `speed_reduced_by_obj_*`
 fields plus the camera frustum). Feeds A11.
 **Design (S-117).** PDM-Lite logs per frame which actor set the expert's speed (`speed_reduced_by_obj_type`, `_id`, `_distance`; `vehicle_affecting_id`, `walker_affecting_id`; checked in
-`carla_garage/team_code/autopilot.py`) and the boxes with their visibility counts (check the field names in the archives). Relabel offline, one change per arm: (a) frames whose reduction is
+`carla_garage/team_code/autopilot.py`) and the boxes (`id`, `class`, `position`, `extent`, `yaw`, `speed`, `brake`, `distance`, `num_points`; verified on real archives with `scripts/analysis/pdm_lite_range_probe.py`). The logs have no camera visible-pixel count: visibility = a field-of-view
+test on the box position (front camera +-55 degrees) plus `num_points` (LiDAR points in the box) as an occlusion proxy. Relabel offline, one change per arm: (a) frames whose reduction is
 caused by an actor outside the front camera's field of view or fully occluded -> weight 0, or relabel with the conservative IDM of the visible actors only; (b) traffic-light reasoning outside
 the frustum -> weight 0; (c) conservative braking near visible hazards: IDM headway T and gap s0 scaled by 1.5 for visible lead vehicles; (d) enlarged boxes at unprotected turns. The share of
-frames each rule touches is the step 0 number (A45 strata). LEAD gets +1.37 DS on Bench2Drive and +11 on Longest6 v2 by changing the expert at collection time; here we change the labels of
+frames each rule touches is the step 0 number (A45 strata). **First real-log numbers (2026-10-04, Town12, 6 routes per archive):** in the lead-vehicle families the actor that sets the expert's speed is almost always
+in the front view (96-99%; outside +-55 degrees 0-4%) and well covered by LiDAR (`num_points` < 10 in 0-5% of the causing actors; 26% in DynamicObjectCrossing), so rule (a) (out-of-view actors) touches few frames
+there; what the camera cannot do is *measure* the expert's tight following gap (median 4.0 m on HardBreakRoute, 6.0 m on HighwayExit, 6.6 m on MergerIntoSlowTrafficV2: PDM-Lite's s0 = 4 m + T = 0.25 s) and the
+lead's closing speed: LEAD's *uncertainty* asymmetry, i.e. rule (c) (a larger headway for visible lead vehicles) and A38, is the lever for these families; rule (a) matters more at junctions and side hazards. LEAD gets +1.37 DS on Bench2Drive and +11 on Longest6 v2 by changing the expert at collection time; here we change the labels of
 the logs we have, and A46 is the same idea with LEAD's own data. The arms share the label pass with A38.
 
 ### A10. Learning-rate sweep for the transformer head - **Later**
