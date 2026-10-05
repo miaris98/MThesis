@@ -701,6 +701,7 @@ plausible source of its low collision rate (22% of runs, 7.4 lost points); A37 i
 - **Single camera:** yes. **Cost:** head-only retrain per arm on the feature cache; one change per arm.
 
 ### A39. Asymmetric ordinal speed loss (soft caution inside training) - **Next** (cheap, head-only; training-time counterpart of A28) (S-117)
+**Status 2026-10-05 (S-126): code done** (`train_wor.py --speed_lambda_over L --speed_lambda_under L`, plain two-hot CE bit-identical at 0; the weight sweep is the existing `--target_speed_loss_weight`); runs on the pooled cache.
 Two-hot cross-entropy treats a wrong bin the same whether it is too fast or too slow and how far it is. The metric is asymmetric: a vehicle collision multiplies the route score by
 0.6, slowness costs nothing until the 200 s route cap (S-100), and our arms sit at the fast end (47% of runs collide) while WoR sits at the slow end.
 - **Loss:** CE_twohot + lambda_o * sum_j p_j * relu(v_j - v*)^2 / v_max^2 + lambda_u * sum_j p_j * relu(v* - v_j)^2 / v_max^2, with lambda_o = 2-4 x lambda_u; optional HL-Gauss
@@ -759,6 +760,7 @@ collision lottery (S-101), and 47% of runs collide.
 - **Single camera:** yes (test-time views are of the same frame). **Cost:** eval-only.
 
 ### A44. Collision-clip recorder in every eval, then failure-conditioned fine-tuning - **Next** (infrastructure first; enables A37, A38, A40) (S-117)
+**Status 2026-10-05 (S-126): code done** (`src/eval/clip_recorder.py` + agent glue behind `B2D_CLIPS_DIR`, wrapped so a recorder error cannot cost a route; unit-tested without CARLA, **not yet run in CARLA**: first closed-loop use = the smoke box). Use it through `CKE` lane jobs.
 J has a vehicle collision in 47% of its runs, and we still cannot say who hit whom at what speed or what the speed head predicted (A11 is open, the evals store only JSON).
 - **Recorder (`bench2drive_agent.py`, flag `B2D_CLIPS_DIR`):** a ring buffer of the last 6 s at 4 Hz: the downsized frame (JPEG), waypoints, speed posterior, target speed, ego speed and
   control, and for analysis only the other actors' poses from CARLA (never given to the policy). Written when a vehicle / pedestrian / layout collision fires, and on
@@ -836,6 +838,7 @@ OppositeVehicleRunningRedLight, SignalizedJunctionLeft/RightTurn, VehicleTurning
 - **Single camera:** yes. **Cost:** ~40-80 GB download (Town12 +/- Town13), 5 epochs of fine-tuning, J's evaluation protocol.
 
 ### A50. Contact reflex (stop after the first vehicle collision) and creep clamp - **Next** (eval-only; small agent change; Tier 1) (S-120)
+**Status 2026-10-05 (S-126): code done** (`src/agents/safety_layer.py`: `WOR_CONTACT_REFLEX=1`, `WOR_CREEP_CLAMP=1`, 9 unit tests incl. end-to-end through `QwenWorldOnRailsPolicy.act`); not yet run in CARLA. Lane job: `CKE:<label>:<ckpt>:<routes>:WOR_CONTACT_REFLEX=1,WOR_CREEP_CLAMP=1`; the log shows `[A50/A57] safety layer: ...` (grep it to verify a lane really ran it).
 J's runs with a vehicle collision have >= 2 vehicle events in 32% (E 17%, WoR 17%), and the 2nd and later events cost J 3.5 points per route-run (lead-vehicle routes 5.7, obstacle 4.3; E 1.6, WoR 0.6; S-120). Each registered collision multiplies the score by 0.6; the
 leaderboard ignores a contact at ego speed < 0.1 m/s and a repeat with the same actor within 5 s or 5 m, so a stopped car cannot be penalised again. No expert frame contains a contact, so the policy has no learned reaction to one and drives on (median 9.4 m between
 consecutive events; S-101: ~5 m = creeping into a parked car, which is what the mean decode of a stop / go posterior produces: P(stop) = 0.5 -> a 4 m/s creep, A28).
@@ -900,6 +903,7 @@ dynamic actor in **60.5%** of the 23,091 frames of one archive, `stop` 46.6%, ra
 - **Single camera:** yes. **Cost:** ~25 GB of downloads + ~9 GB labels for the pilot; a box with 150 GB disk and one GPU.
 
 ### A57. Newsvendor decode: a low speed quantile that relaxes with standing time - **Next** (eval-only; Tier 1; with the matched-speed control) (S-122)
+**Status 2026-10-05 (S-126): code done** (`WOR_NEWSVENDOR="q0=0.3;T=8;qmax=0.7"`: the quantile rises q0 -> qmax over T s of standing, then the plain mean; the literal q -> 1 would read the fastest bin with mass); matched-speed control `WOR_SPEED_SCALE=0.9` (A52). Job: `CKE:<label>:<ckpt>:<routes>:WOR_NEWSVENDOR=q0=0.3;T=8;qmax=0.7`.
 For an asymmetric cost (c_o per m/s above the right speed, c_u per m/s below) the optimal point forecast is the quantile q = c_u / (c_o + c_u) of the predictive distribution, not its mean. Our speed posterior (two-hot over 8 bins) is decoded by its mean; a static median deadlocked (A28, -22.9 DS: a
 stop / go posterior is bimodal and the median snaps to the stop mode) and so did the hard brake (S-059). A collision multiplies the score by 0.6 while waiting costs little until the 200 s cap, so the right speed is a *low* quantile that **rises as the car has waited**: the cost of waiting accumulates.
 - **Design:** v = Q_q(posterior) with q(t) = q_0 + (1 - q_0) min(1, t_standing / T); start conservative (q_0 in {0.2, 0.3, 0.4}), relax to the mean-like decode with T in {4, 8} s; reset when the speed is above 3 m/s. It shares the stall breaker with A50 (the creep clamp is the q_0 -> 0 limit).
@@ -913,6 +917,7 @@ measures the sensitivity to the shift; the repository ships the PDM-Lite expert 
 - **Do:** wire the route files into the harness (same XML family), run E, J and WoR once (WoR keeps its 4 cameras), report in-distribution vs shifted per arm and the gap. **Cost:** about one 220-route-equivalent evaluation per arm (~2 h on 12 lanes).
 
 ### A59. Pooled-token feature cache for head-only training - **Next** (Tier 0; a day of code; verify in the first 30 minutes of a box) (S-125)
+**Status 2026-10-05 (S-126): DONE and verified on real data.** Parity on 128 real frames: fp32-built cache vs fp32 live max |dwaypoint| 0.0082 m (noise floor 0.0063); step time 0.087 s vs 2.08 s (A40 shared with CARLA lanes); build 101-145 frames/s per shared GPU. Builder default fp32 (`--amp` for bf16: 0.125 m max, bf16's own noise); `--frozen_backbone` takes the run's own backbone. Train with `train_wor.py --pooled_cache <prefix> --vision_grid 4` (frozen backbone, no colour aug, qwen head). Next: an end-to-end training smoke on box 4 and the full-data build.
 **Why:** a head-only epoch on 427k frames costs 17.6-19.3 min (3090 / A40, 288x768) because every step decodes 256 JPEGs, paints the route overlay on 24 workers and runs the frozen encoder (50.5% of a Qwen step by the cache script's own measurement, probably a larger share at 288x768 because the head does not grow with the image). `build_feature_cache.py` stores the full 1512x9x24 map per frame (653 KB, 279 GB for J's data), which is why no arm used it.
 **Exact for the J family:** `QwenWorldOnRailsPolicy` applies `AdaptiveAvgPool2d((4, 4))` to the encoder map first (`vision_pool`), then appends the constant ray-geometry channels and projects (`vision_proj`): nothing learnable sits before the pooling. Arm J's `run_config.json`: `color_aug_prob 0.0`, `freeze_backbone 1`, `use_augmented_camera 1` (stored recovery frames, not a random transform),
 `route_overlay 1`, `route_key route_original`, `vision_grid 4`: nothing random upstream of the encoder. As `build_feature_cache.py` argues, this is memoisation (the fp16 storage roundtrip is finer than the bf16 autocast it replaces).
@@ -922,6 +927,7 @@ measures the sensitivity to the shift; the repository ships the PDM-Lite expert 
 - **Expected gain (a projection, measure first):** epoch 17.6 -> ~2-4 min; a 5-epoch fine-tune ~15 min instead of 1.5 h; 3 trained seeds per finalist ~45 min (A52: 26% of a run's variance is the training seed). **Kill criterion:** < 3x faster. **Single camera:** yes.
 
 ### A60. Persistent lane queue for the CARLA evaluation harness - **Next** (Tier 0; 1-1.5 days of code + a 40-route parity check) (S-125)
+**Revised 2026-10-05 (S-126): not a persistent evaluator.** The Bench2Drive fork starts its own CARLA per launch and the vanilla evaluator would break comparability with every earlier number. The measured waste is start-up (78 s) + hand-over (43 s) per *job*; jobs of 8-9 routes (`scripts/ops/gen_lanes_a36.py`) cut it to ~13 s per route against ~45 s at 2.7 routes per job. Do: >= 8 routes per (arm, lane) job, trim `sleep 120` / the 60 s guardian poll (not while lanes run: bash re-reads a running script), balance by route wall time, **lanes <= VRAM / 5.5 GB** (S-126: 8 lanes on 24 GB = OOM). The gap between routes is 86 s median (teardown + world load + scenario + agent set-up); its split is still unknown (an OOM-free single lane with timestamps would give it).
 **Why (measured, `box_rates.py`):** over 601 lane jobs / 1,606 routes / 186 lane-hours on the six boxes of 10-01..10-04 a lane spends **47% on the route itself, 29% on per-route overhead, 9% on job start-up (median 78 s: CARLA cold start + agent import) and 14% on hand-over (median 43 s: `sleep 120`, guardian polling, port clearing in `queue_A9c.sh`)**; a job carries 2.7 routes
 (a chunk per arm per lane, plus retry jobs). A lane spends 417 s per route-run, 197 s of it the route: 12 always-busy lanes give 104 runs/h, which is what the boxes measured (65-128).
 - **Design:** one CARLA server + one evaluator per lane for the whole session, pulling (arm, route) jobs from a shared file queue (atomic claim); the arm's checkpoint and decode flags are read per route so there is no restart between arms; results append to the per-lane JSON as today (`--resume` semantics kept); infrastructure failures are re-queued, driving outcomes never (as `run_leaderboard_resilient.sh`).
@@ -1130,6 +1136,7 @@ mixer stops decaying with wd 0 (73.34 -> 73.40) and the output projection grows 
 init values at 5k (closed gate, zero-init output): the 30k screen has to show whether they train.
 
 ### B37. Make the transformer mixer train: AdamW parameter group, open gates, and a module-update audit - **Next** (the B36 follow-up; highest-value Atari item) (S-118)
+**Step 1 done 2026-10-05 (S-126):** probe on box 2, 2,000 updates per setting: AdamW on the mixer moves q/k/v by 7% / 21% / 65% of their init norm at 250 updates (lr 1e-4 / 3e-4 / 1e-3; pass > 5%) where SGD stayed at init; losses in the SGD baseline's range. **Step 2 running** (AdamW 3e-4, wd 0.05, 500 warm-up, mixer clip 1.0, 4 seeds x 30k steps, box 2, done ~13:05 Athens; `--audit-every 1000` prints `[B37 audit]` lines: relative weight change and gradient norm per category). A first launch ran plain SGD by mistake (20 min lost, S-126).
 **Evidence (2026-10-04, B36 on box 3):** with `--mixer-weight-decay 0` the mixer stops decaying (|W| 73.34 -> 73.40), but the blocks do not learn: seed 2 at 15k has |Wq| 6.510 (init
 6.5), FFN gate 13.069, GRU gate bias 2.000, attention entropy 0.99 of the maximum, while the output projection grows (|out| 0.96 -> 2.49). A non-zero output init (`--mixer-out-init-std
 0.02`) does not change it: |Wq| 6.507 at 10k, |out| 2.63. The gate starts closed (z ~0.13) and the block output is multiplied by the small output projection, so q/k/v/FFN receive a
@@ -1203,6 +1210,7 @@ form, which shapes the representation without changing the control problem. Targ
 the main-head value error or the score does not move.
 
 ### B43. Depth-capped search and the model's error against imagined depth - **Next** (eval-only; explains B24; Tier 1) (S-118)
+**Step 1 code done 2026-10-05 (S-126):** `GumbelMCTS(max_depth=D)` (a node at the cap is not expanded, it is backed up again with its own value-head output; exact when the cap is loose, identical in the sync-free graph mode, tests), `eval_ez_checkpoints.py --max-depth`, `scripts/ops/run_b43_depth.sh "3 5 8 0" NPAR` for the 16 restored B35 checkpoints. Not run yet (no free GPU today).
 **Evidence:** training unrolls the dynamics for K = 5 steps, but at 64 simulations the tree reaches depth 17 (16 sims: 6, 32 sims: 12; S-116 tree-depth measurement on real states), so the search uses
 the model well outside the horizon it was trained on. B24 found deeper search lowering the score on 4 of 6 checkpoints, and S-058 found the value-prefix head miscalibrated at imagined depth 1.
 - **Step 0, error curve (offline; `scripts/analysis/b43_model_drift.py`; nine checkpoints done 2026-10-04, S-121):** the script rolls the model forward with the real actions on real replay trajectories and compares each
