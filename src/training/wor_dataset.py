@@ -174,6 +174,12 @@ class WorldOnRailsDataset(Dataset):
         # Per-frame probability of color_augment(). Train-only for the same reason as above.
         # Applied after the decoded-frame cache, so cached .npy files stay un-augmented.
         self.color_aug_prob = float(color_aug_prob) if is_train else 0.0
+        # TODO A59: pooled-token cache (src/training/pooled_feature_cache.py), switched on by train_wor.py --pooled_cache through the environment
+        self._pooled = None
+        if os.environ.get("WOR_POOLED_CACHE") and synthetic_samples <= 0 and os.path.exists(data_dir):
+            from src.training.pooled_feature_cache import PooledFeatureCache, prefixes_from_env
+            self._pooled = PooledFeatureCache(prefixes_from_env(os.environ["WOR_POOLED_CACHE"]), self.pixel_cache_tag(), data_dir)
+            self.feature_cache_tag = "pooled"
 
         self.samples = []
         self.missing_rgb = 0
@@ -399,6 +405,9 @@ class WorldOnRailsDataset(Dataset):
         """Loads the cached frozen-backbone output for one frame. Raises if it is missing -
         see feature_cache_tag's docstring for why this cannot silently fall back to live
         encoding per-sample."""
+        if self._pooled is not None:
+            from src.training.pooled_feature_cache import rel_key
+            return self._pooled.get(rel_key(rgb_path, self.data_dir))
         cache_path = self._feature_cache_path(rgb_path)
         try:
             return np.load(cache_path)

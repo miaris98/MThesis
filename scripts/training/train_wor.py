@@ -139,6 +139,9 @@ def parse_args():
                              "backbone name (e.g. regnety_032); it must match the --backbone/--img_size/"
                              "--crop_bottom_frac/--route_overlay the cache was built with, and every frame "
                              "must already be cached - a miss is a hard error, never a silent fallback.")
+    parser.add_argument("--pooled_cache", type=str, default=None,
+                        help="TODO A59: comma-separated prefixes of pooled-token caches built by build_pooled_cache.py (one per data dir). The head reads the frozen encoder's map "
+                             "already pooled to its --vision_grid, so no JPEG is decoded and no encoder runs: exact (identity pooling) for frozen-backbone runs without colour augmentation.")
     parser.add_argument("--compile_model", type=int, default=0, help="Wrap the policy in torch.compile - trades a one-off compilation on the first epoch for faster steps afterwards, so it only pays off over a long run (1=True, 0=False)")
     parser.add_argument("--kill_stale", type=int, default=1, help="On startup, terminate SUSPENDED train_wor.py processes still pinning VRAM (what Ctrl+Z leaves behind). Running instances are reported but never killed (1=True, 0=False)")
     parser.add_argument("--auto_batch_size", type=int, default=0, help="Probe the largest batch size that fits in available VRAM instead of using --batch_size directly (1=True, 0=False)")
@@ -158,6 +161,15 @@ def main():
     os.environ["WOR_ROUTE_KEY"] = args.route_key  # read by WorldOnRailsDataset; inherited by DataLoader workers
     os.environ["WOR_SWERVE_FRAC"] = str(args.swerve_frac)      # read by the train loader (wor_dataloaders.swerve_sampler)
     os.environ["WOR_SWERVE_WINDOW"] = str(args.swerve_window)  # read when the dataset indexes routes
+    if args.pooled_cache:
+        import json
+        os.environ["WOR_POOLED_CACHE"] = args.pooled_cache      # read by WorldOnRailsDataset (TODO A59)
+        if not args.freeze_backbone or args.color_aug_prob > 0 or args.policy_arch == "cnn":
+            raise SystemExit("--pooled_cache is exact only for a frozen backbone, no colour augmentation and a qwen head (the CNN head convolves the full map)")
+        for _p in args.pooled_cache.split(","):
+            _g = tuple(json.load(open(_p + ".json"))["grid"])
+            if _g != tuple(_parse_vision_grid(args.vision_grid)):
+                raise SystemExit(f"pooled cache {_p} holds a {_g} grid but --vision_grid is {args.vision_grid}: pooling a pooled map is the identity only for the same grid")
 
     # Resolved once, here, because three separate things downstream need the real input shape:
     # the auto-batch-size probe (which must allocate the same shape the run will), the banner's

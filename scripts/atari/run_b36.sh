@@ -8,6 +8,7 @@
 # env:   MIXER_WD (0)  OUT_STD (0 = zero-init output projection; try 0.02 if the blocks stay at init, see B36's decision rule)
 #        TOTAL_STEPS (30000)  EVAL_INTERVAL (5000)  LABEL_SUFFIX ("")  GRAPH (1; 0 = eager)
 #        STATES (/workspace/b15_states_512.npy, from HF diag/b15_states_512.npy)
+#        EXTRA (""; extra trainer flags, e.g. B37: EXTRA="--mixer-optimizer adamw --mixer-lr 3e-4 --audit-every 1000" MIXER_WD=0.05 LABEL_SUFFIX=_b37
 # smoke test: TOTAL_STEPS=3000 EVAL_INTERVAL=1500 LABEL_SUFFIX=_smoke run_b36.sh 0 9
 cd /workspace/MThesis
 GPU=$1; shift
@@ -31,7 +32,7 @@ for seed in "$@"; do
     CUDA_VISIBLE_DEVICES=$GPU /venv/main/bin/python -u atari_qwen/training/train_ez_offpolicy.py \
       --trunk gtrxl --norm batch --priority-alpha 0 --seed $seed --mixer-weight-decay $MIXER_WD --mixer-out-init-std $OUT_STD \
       --total-steps $TOTAL_STEPS --schedule-steps 100000 --eval-interval $EVAL_INTERVAL --eval-episodes 10 --eval-mode deferred \
-      $GFLAG --run-label $LABEL --log-dir $L $RES >> /workspace/$LABEL.log 2>&1
+      $GFLAG ${EXTRA:-} --run-label $LABEL --log-dir $L $RES >> /workspace/$LABEL.log 2>&1
     rc=$?; echo "$(date -u) $LABEL exited rc=$rc"; [ $rc -eq 0 ] && break; sleep 30
   done
   sleep 120; kill $DGPID 2>/dev/null   # the evaluator exits by itself once the final checkpoint is scored

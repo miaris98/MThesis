@@ -272,7 +272,7 @@ def train(args):
     support = DiscreteSupport()
     model = EZV2Model(A, obs_channels=3 * 4, support=support, trunk=args.trunk, norm=args.norm,
                       state_hw=int(np.ceil(args.frame_size / 16)),
-                      mixer_out_init_std=args.mixer_out_init_std).to(device)
+                      mixer_out_init_std=args.mixer_out_init_std, mixer_bg_init=args.mixer_bg_init).to(device)
     target = copy.deepcopy(model).eval()
     # bf16 autocast only where the GPU has native bf16 (Ampere+). is_bf16_supported() also returns True for
     # emulated bf16, which ran ~4.5x slower than fp16 on a 2080 Ti (S-099); there is no GradScaler for fp16,
@@ -281,13 +281,38 @@ def train(args):
     amp = torch.bfloat16 if bf16_native else torch.float32
     for p in target.parameters():
         p.requires_grad_(False)
-    if args.mixer_weight_decay is None:
+    mix_params = [q for n, q in model.named_parameters() if "mixer" in n]
+    opt_mix = None
+    if args.mixer_optimizer == "adamw":
+        # TODO B37: scale-invariant optimiser for the GTrXL mixer only (SGD moved its q/k/v by lr x a gradient orders of magnitude below the rest of
+        # the net: |Wq| stayed at init); conv trunk and heads keep EZ-V2's SGD recipe.
+        assert mix_params, "--mixer-optimizer adamw needs --trunk gtrxl"
+        rest_params = [q for n, q in model.named_parameters() if "mixer" not in n]
+        opt = torch.optim.SGD(rest_params, lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
+        mwd = 0.05 if args.mixer_weight_decay is None else args.mixer_weight_decay
+        opt_mix = torch.optim.AdamW(mix_params, lr=args.mixer_lr, betas=(0.9, 0.95), weight_decay=mwd)
+    elif args.mixer_weight_decay is None:
         opt = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
     else:  # TODO B36: the GTrXL mixer's own weight decay (0 = exempt); everything else keeps --weight-decay
         mix = [q for n, q in model.named_parameters() if "mixer" in n]
         rest = [q for n, q in model.named_parameters() if "mixer" not in n]
         opt = torch.optim.SGD([{"params": rest, "weight_decay": args.weight_decay},
                                {"params": mix, "weight_decay": args.mixer_weight_decay}], lr=args.lr, momentum=0.9)
+    # TODO B37 step 1: per-category audit of the mixer (cumulative relative change |W - W0| / |W0| and gradient norm)
+    mix_w0 = {n: q.detach().clone() for n, q in model.named_parameters() if "mixer" in n} if args.audit_every else {}
+    audit_cat = lambda n: ("qkv" if any(t in n for t in ("q_proj", "k_proj", "v_proj")) else "attn_out" if "out_proj" in n else
+                           "ffn" if any(t in n for t in ("w_gate", "w_up", "w_down")) else "gate_w" if ".gate" in n and n.endswith("weight") else
+                           "gate_bias" if n.endswith(".bg") else "norm" if "norm" in n else "io" if ("mixer.out" in n or "mixer.inp" in n or n.endswith(".pos")) else "other")
+    def mixer_audit():
+        grads, rel = {}, {}
+        for n, q in model.named_parameters():
+            if n not in mix_w0:
+                continue
+            c = audit_cat(n)
+            rel.setdefault(c, []).append(((q.detach() - mix_w0[n]).norm() / (mix_w0[n].norm() + 1e-12)).item())
+            if q.grad is not None:
+                grads.setdefault(c, []).append(q.grad.norm().item())
+        return {c: float(np.mean(v)) for c, v in rel.items()}, {c: float(np.mean(v)) for c, v in grads.items()}
     mcts = GumbelMCTS(A, support, num_simulations=args.num_simulations, discount=gamma, lstm_horizon=H)
     # TODO B23 step 1b: replay the acting search (B = num_envs) and the reanalyze search (B = batch x (K+1), on the target
     # network, bf16 where native) from CUDA graphs; bit-identical to eager (see GraphedSearch), far fewer kernel launches
@@ -366,6 +391,9 @@ def train(args):
             lr = args.lr * min(1.0, (updates + 1) / warm) * (0.1 ** (max(0, updates - warm) // args.lr_decay_steps))
             for g_ in opt.param_groups:
                 g_["lr"] = lr
+            if opt_mix is not None:
+                for g_ in opt_mix.param_groups:
+                    g_["lr"] = args.mixer_lr * min(1.0, (updates + 1) / max(1, args.mixer_warmup))
 
             # ---------------- targets (target network, no grad) ---------------------------------
             tt = time.perf_counter()
@@ -452,10 +480,23 @@ def train(args):
                 wloss = (isw_ * loss).mean() / K                           # EZ-V2 gradient_scale = 1/K
             opt.zero_grad(set_to_none=True)
             wloss.backward()
-            gn = nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+            if opt_mix is not None:
+                nn.utils.clip_grad_norm_(mix_params, args.mixer_grad_clip)
+                gn = nn.utils.clip_grad_norm_([q for n, q in model.named_parameters() if "mixer" not in n], args.max_grad_norm)
+            else:
+                gn = nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+            if args.audit_every and (updates + 1) % args.audit_every == 0 and mix_w0:
+                _, audit_grad = mixer_audit()                       # gradient norms of this update (before the step)
             opt.step()
+            if opt_mix is not None:
+                opt_mix.step()
             updates += 1
             stepped = True
+            if args.audit_every and updates % args.audit_every == 0 and mix_w0:
+                rel, _ = mixer_audit()
+                print(f"[B37 audit] upd {updates}: |dW|/|W0| " + " ".join(f"{c} {v:.4f}" for c, v in sorted(rel.items())) +
+                      " | grad " + " ".join(f"{c} {v:.2e}" for c, v in sorted(audit_grad.items())), flush=True)
+                log({**{f"audit/rel_{c}": v for c, v in rel.items()}, **{f"audit/grad_{c}": v for c, v in audit_grad.items()}}, env_steps)
             replay.update_priorities(t, e, np.abs(v0.float().cpu().numpy() - val_t[:, 0]) + 1e-6)
             if updates % args.target_update_interval == 0:
                 target.load_state_dict(model.state_dict())
@@ -560,6 +601,14 @@ def parse_args(argv=None):
     ap.add_argument("--graph-search", action="store_true",
                     help="replay the acting, reanalyze and inline-eval searches from CUDA graphs (TODO B23 step 1b); "
                          "bit-identical to the eager search, CUDA only")
+    ap.add_argument("--mixer-optimizer", choices=["sgd", "adamw"], default="sgd",
+                    help="TODO B37: optimiser of the GTrXL mixer parameters (adamw: betas 0.9/0.95, --mixer-lr, --mixer-weight-decay default 0.05; "
+                         "the rest of the network keeps SGD)")
+    ap.add_argument("--mixer-lr", type=float, default=3e-4)
+    ap.add_argument("--mixer-warmup", type=int, default=500, help="warm-up updates of the mixer's AdamW lr")
+    ap.add_argument("--mixer-grad-clip", type=float, default=1.0, help="mixer-only gradient-norm clip (adamw mode)")
+    ap.add_argument("--mixer-bg-init", type=float, default=2.0, help="GRU gate bias init of the mixer blocks (2 = closed, ~88%% skip; 0 = open)")
+    ap.add_argument("--audit-every", type=int, default=0, help="TODO B37: log the mixer's per-category relative weight change and gradient norm every N updates (0 = off)")
     ap.add_argument("--mixer-weight-decay", type=float, default=None,
                     help="weight decay of the GTrXL token mixer's parameters (default: --weight-decay). With SGD lr 0.2, "
                          "wd 1e-4 and momentum 0.9 every mixer weight shrank by 0.13 per 10k updates and was ~0 by 40k "

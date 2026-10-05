@@ -167,7 +167,7 @@ class EZV2Model(nn.Module):
                  lstm_hidden: int = 512, proj_hidden: int = 1024, proj_out: int = 1024,
                  head_hidden: int = 256, action_embed_dim: int = 16, support: Optional[DiscreteSupport] = None,
                  trunk: str = "resnet", mixer_dim: int = 128, mixer_depth: int = 2, norm: str = "batch",
-                 mixer_out_init_std: float = 0.0):
+                 mixer_out_init_std: float = 0.0, mixer_bg_init: float = 2.0):
         super().__init__()
         assert trunk in ("resnet", "gtrxl")
         self.action_dim, self.C, self.hw, self.trunk = action_dim, num_channels, state_hw, trunk
@@ -207,8 +207,8 @@ class EZV2Model(nn.Module):
         # thesis variant: transformer token mixing in representation and dynamics
         if trunk == "gtrxl":
             hw2 = state_hw * state_hw
-            self.repr_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth, out_init_std=mixer_out_init_std)
-            self.dyn_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth, out_init_std=mixer_out_init_std)
+            self.repr_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth, bg_init=mixer_bg_init, out_init_std=mixer_out_init_std)
+            self.dyn_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth, bg_init=mixer_bg_init, out_init_std=mixer_out_init_std)
         self.lstm_hidden = lstm_hidden
         # norm: "batch" = EZ-V2; "heads" = LayerNorm in reward/value/policy heads; "all" = LayerNorm
         # everywhere except the SimSiam projection (its BatchNorm is what prevents collapse).
