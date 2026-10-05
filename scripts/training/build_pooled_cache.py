@@ -9,6 +9,9 @@ recipe (the head pools the map before any learnable layer; nothing random upstre
         --backbone regnety_032 --weights_path <tfpp model_0030_0.pth> --img_size 288x768 --crop_bottom_frac 0.0 --route_overlay 1 \\
         --route_points 4 --route_key route_original --use_augmented_camera 1 --grid 4 --device cuda:0 --shard 0 --num_shards 2
 
+Measured on 128 real Town01 frames of arm J (S-125): head output of the cached run vs live fp32 max |dwaypoint| 0.008 m (mean 0.00009), equal to the noise floor of two live runs at another batch split;
+a bf16-built cache differs by 0.125 m max, equal to bf16's own batch-shape noise. Step time (A40 shared with 6 CARLA lanes): live encoder 2.08 s, cache 0.087 s.
+
 then train with `train_wor.py ... --pooled_cache <the printed prefix>` (same flags, `--vision_grid 4`, frozen backbone, no colour augmentation).
 """
 import argparse
@@ -60,7 +63,8 @@ def main():
     p.add_argument("--data_dir", required=True)
     p.add_argument("--out_dir", required=True)
     p.add_argument("--backbone", default="regnety_032")
-    p.add_argument("--weights_path", required=True)
+    p.add_argument("--weights_path", default=None, help="the TF++ release checkpoint (model_0030_0.pth) the encoder was extracted from")
+    p.add_argument("--frozen_backbone", default=None, help="alternative to --weights_path: the training run's own frozen_backbone.pth (the exact encoder weights of that run)")
     p.add_argument("--img_size", default="288x768")
     p.add_argument("--crop_bottom_frac", type=float, default=0.0)
     p.add_argument("--route_overlay", type=int, default=1)
@@ -74,7 +78,7 @@ def main():
     p.add_argument("--shard", type=int, default=0)
     p.add_argument("--num_shards", type=int, default=1)
     p.add_argument("--limit_frames", type=int, default=0)
-    p.add_argument("--no_amp", action="store_true")
+    p.add_argument("--amp", action="store_true", help="bf16 autocast (default fp32: the cache then matches an fp32 forward to numerical noise, 0.008 m max on real frames; bf16 matches only to its own batch-shape noise, 0.125 m max)")
     a = p.parse_args()
 
     os.environ["WOR_ROUTE_KEY"] = a.route_key
@@ -93,8 +97,18 @@ def main():
     tag = ds.pixel_cache_tag()
     prefix = os.path.join(a.out_dir, f"{os.path.basename(os.path.normpath(a.data_dir))}_{tag}_{a.backbone}_g{gh}x{gw}")
 
-    encoder = build_vision_encoder(backbone_name=a.backbone, pretrained=True, freeze_backbone=True, weights_path=a.weights_path).to(a.device).eval()
-    meta = {"pixel_tag": tag, "data_dir_name": os.path.basename(os.path.normpath(a.data_dir)), "backbone": a.backbone, "weights_path": a.weights_path,
+    assert a.weights_path or a.frozen_backbone, "give --weights_path or --frozen_backbone"
+    encoder = build_vision_encoder(backbone_name=a.backbone, pretrained=a.frozen_backbone is None, freeze_backbone=True,
+                                   weights_path=None if a.frozen_backbone else a.weights_path)
+    if a.frozen_backbone:  # keys of the policy state dict: 'encoder.<name>'
+        sd = torch.load(a.frozen_backbone, map_location="cpu")
+        sd = sd.get("model", sd)
+        enc_sd = {k[len("encoder."):]: v for k, v in sd.items() if k.startswith("encoder.")}
+        missing, unexpected = encoder.load_state_dict(enc_sd, strict=False)
+        assert enc_sd and not missing, f"frozen_backbone.pth does not hold this encoder: missing {list(missing)[:5]}, {len(enc_sd)} tensors found"
+        print(f"--> encoder weights from {a.frozen_backbone}: {len(enc_sd)} tensors, unexpected {len(unexpected)}", flush=True)
+    encoder = encoder.to(a.device).eval()
+    meta = {"pixel_tag": tag, "data_dir_name": os.path.basename(os.path.normpath(a.data_dir)), "backbone": a.backbone, "weights_path": a.weights_path or a.frozen_backbone,
             "img_size": a.img_size, "crop_bottom_frac": a.crop_bottom_frac, "route_overlay": a.route_overlay, "route_points": a.route_points,
             "route_key": a.route_key, "use_augmented_camera": a.use_augmented_camera, "created": time.strftime("%F %T")}
     jp, fp, dp = cache_files(prefix)
@@ -117,7 +131,7 @@ def main():
         print(f"CACHE_PREFIX {prefix}")
         return
     loader = DataLoader(_Pending(ds, todo), batch_size=a.batch_size, num_workers=a.num_workers, pin_memory=a.device.startswith("cuda"), shuffle=False)
-    use_amp = (not a.no_amp) and a.device.startswith("cuda") and torch.cuda.is_bf16_supported(including_emulation=False)
+    use_amp = a.amp and a.device.startswith("cuda") and torch.cuda.is_bf16_supported(including_emulation=False)
     t0, n, last = time.time(), 0, time.time()
     with torch.no_grad():
         for b, (rows, rgb) in enumerate(loader):
