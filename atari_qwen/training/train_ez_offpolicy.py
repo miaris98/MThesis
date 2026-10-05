@@ -46,6 +46,7 @@ from atari_qwen.envs.atari_wrappers import make_vector_atari_envs
 from atari_qwen.models.ez_model import EZV2Model, DiscreteSupport
 from atari_qwen.mcts.gumbel_mcts import GumbelMCTS, GraphedSearch
 from atari_qwen.eval.evaluate import compute_hns
+from atari_qwen.training import mixer_audit
 
 
 # ------------------------------------------------------------------------------------------------
@@ -298,21 +299,9 @@ def train(args):
         rest = [q for n, q in model.named_parameters() if "mixer" not in n]
         opt = torch.optim.SGD([{"params": rest, "weight_decay": args.weight_decay},
                                {"params": mix, "weight_decay": args.mixer_weight_decay}], lr=args.lr, momentum=0.9)
-    # TODO B37 step 1: per-category audit of the mixer (cumulative relative change |W - W0| / |W0| and gradient norm)
-    mix_w0 = {n: q.detach().clone() for n, q in model.named_parameters() if "mixer" in n} if args.audit_every else {}
-    audit_cat = lambda n: ("qkv" if any(t in n for t in ("q_proj", "k_proj", "v_proj")) else "attn_out" if "out_proj" in n else
-                           "ffn" if any(t in n for t in ("w_gate", "w_up", "w_down")) else "gate_w" if ".gate" in n and n.endswith("weight") else
-                           "gate_bias" if n.endswith(".bg") else "norm" if "norm" in n else "io" if ("mixer.out" in n or "mixer.inp" in n or n.endswith(".pos")) else "other")
-    def mixer_audit():
-        grads, rel = {}, {}
-        for n, q in model.named_parameters():
-            if n not in mix_w0:
-                continue
-            c = audit_cat(n)
-            rel.setdefault(c, []).append(((q.detach() - mix_w0[n]).norm() / (mix_w0[n].norm() + 1e-12)).item())
-            if q.grad is not None:
-                grads.setdefault(c, []).append(q.grad.norm().item())
-        return {c: float(np.mean(v)) for c, v in rel.items()}, {c: float(np.mean(v)) for c, v in grads.items()}
+    # TODO B37 step 1: per-category audit of the mixer (relative change, absolute change and gradient norm; `mixer_audit.py`: the zero-initialised
+    # tensors have no meaningful relative change, read their absolute change)
+    mix_w0 = mixer_audit.snapshot(model) if args.audit_every else {}
     mcts = GumbelMCTS(A, support, num_simulations=args.num_simulations, discount=gamma, lstm_horizon=H)
     # TODO B23 step 1b: replay the acting search (B = num_envs) and the reanalyze search (B = batch x (K+1), on the target
     # network, bf16 where native) from CUDA graphs; bit-identical to eager (see GraphedSearch), far fewer kernel launches
@@ -486,17 +475,19 @@ def train(args):
             else:
                 gn = nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
             if args.audit_every and (updates + 1) % args.audit_every == 0 and mix_w0:
-                _, audit_grad = mixer_audit()                       # gradient norms of this update (before the step)
+                _, audit_grad, _ = mixer_audit.audit(model, mix_w0)  # gradient norms of this update (before the step)
             opt.step()
             if opt_mix is not None:
                 opt_mix.step()
             updates += 1
             stepped = True
             if args.audit_every and updates % args.audit_every == 0 and mix_w0:
-                rel, _ = mixer_audit()
-                print(f"[B37 audit] upd {updates}: |dW|/|W0| " + " ".join(f"{c} {v:.4f}" for c, v in sorted(rel.items())) +
+                rel, _, absd = mixer_audit.audit(model, mix_w0)
+                print(f"[B37 audit] upd {updates}: |dW|/max(|W0|,1e-3) " + " ".join(f"{c} {v:.4f}" for c, v in sorted(rel.items())) +
+                      " | |dW| " + " ".join(f"{c} {v:.3f}" for c, v in sorted(absd.items())) +
                       " | grad " + " ".join(f"{c} {v:.2e}" for c, v in sorted(audit_grad.items())), flush=True)
-                log({**{f"audit/rel_{c}": v for c, v in rel.items()}, **{f"audit/grad_{c}": v for c, v in audit_grad.items()}}, env_steps)
+                log({**{f"audit/rel_{c}": v for c, v in rel.items()}, **{f"audit/abs_{c}": v for c, v in absd.items()},
+                     **{f"audit/grad_{c}": v for c, v in audit_grad.items()}}, env_steps)
             replay.update_priorities(t, e, np.abs(v0.float().cpu().numpy() - val_t[:, 0]) + 1e-6)
             if updates % args.target_update_interval == 0:
                 target.load_state_dict(model.state_dict())

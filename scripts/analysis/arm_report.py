@@ -56,7 +56,7 @@ def main() -> int:
             continue
         print(f"== {arm}: {len(done)} of {len(base_routes)} routes driven, infrastructure failures on {len(infra[arm])} routes (left out)")
         ds = {r: mean(x["ds"] for x in runs(arm, r)) for r in done}
-        res = {"n": len(done), "ds": mean(ds.values()), "pairs": {}, "groups": {}}
+        res = {"n": len(done), "ds": mean(ds.values()), "pairs": {}, "mech": {}, "groups": {}}
         print(f"   mean DS {mean(ds.values()):.1f}")
         for name, ref in refs.items():
             rs = [r for r in done if ref(r) == ref(r)]
@@ -66,6 +66,17 @@ def main() -> int:
             lo, hi = boot_ci(d, n=10000)
             res["pairs"][name] = {"n": len(rs), "diff": mean(d), "ci": [lo, hi], "ref": mean(ref(r) for r in rs)}
             print(f"   vs {name:11s} n={len(rs):3d}: {mean(ref(r) for r in rs):5.1f} -> {mean(ds[r] for r in rs):5.1f}  diff {mean(d):+5.1f} [{lo:+.1f}, {hi:+.1f}]")
+        # the mechanism metric paired by route, with a bootstrap CI: vehicle-collision events per run (route mean) against each reference
+        evr = lambda key, r: mean(x["n_coll_vehicle"] for x in runs(key, r))  # noqa: E731
+        jev_r = lambda r: mean(split_run(records[s][r][0])["n_coll_vehicle"] for s in J_SEEDS if records[s].get(r))  # noqa: E731
+        for name, ref in (("E15", lambda r: evr("E15", r)), ("J(4 seeds)", jev_r), ("WoR", lambda r: evr("WOR", r))):
+            rs = [r for r in done if ref(r) == ref(r)]
+            if len(rs) < 5:
+                continue
+            d = [evr(arm, r) - ref(r) for r in rs]
+            lo, hi = boot_ci(d, n=10000)
+            res["mech"][name] = {"n": len(rs), "diff": mean(d), "ci": [lo, hi], "ref": mean(ref(r) for r in rs), "arm": mean(evr(arm, r) for r in rs)}
+            print(f"   collisions/run vs {name:11s} n={len(rs):3d}: {mean(ref(r) for r in rs):.2f} -> {mean(evr(arm, r) for r in rs):.2f}  diff {mean(d):+.2f} [{lo:+.2f}, {hi:+.2f}]")
         print(f"   {'group':9s} {'n':>3s} {'DS':>6s} | vehicle-collision events/run, runs with a collision, events per colliding run | time-cap share")
         for g in ("lead", "obstacle", "other", "all"):
             rs = [r for r in done if g == "all" or grp[r] == g]
@@ -77,7 +88,9 @@ def main() -> int:
             cap = mean(1.0 if x["reason"] == "other_incomplete" else 0.0 for x in allruns)
             line = f"   {g:9s} {len(rs):3d} {mean(ds[r] for r in rs):6.1f} | {mean(ev):.2f}   {100 * len(col) / len(ev):4.0f}%   {mean(col) if col else 0:.2f} | {100 * cap:4.0f}%"
             print(line)
-            res["groups"][g] = {"n": len(rs), "ds": mean(ds[r] for r in rs), "events_per_run": mean(ev), "share_colliding": len(col) / len(ev), "events_per_colliding": mean(col) if col else 0.0, "time_cap_share": cap}
+            refs_ds = {nm: mean(v for v in (ref(r) for r in rs) if v == v) for nm, ref in refs.items()}
+            print(f"   {'':9s} {'':>3s} references' DS on these routes: " + "  ".join(f"{nm} {v:.1f}" for nm, v in refs_ds.items()))
+            res["groups"][g] = {"refs_ds": refs_ds, "n": len(rs), "ds": mean(ds[r] for r in rs), "events_per_run": mean(ev), "share_colliding": len(col) / len(ev), "events_per_colliding": mean(col) if col else 0.0, "time_cap_share": cap}
         # the same mechanism numbers for the references on the same routes
         for name, key in (("E15", "E15"), ("WoR", "WOR")):
             rs = [r for r in done if records[key].get(r)]
