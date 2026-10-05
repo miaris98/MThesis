@@ -114,3 +114,21 @@ Before triggering any training or evaluation run:
   - **Parallel Data Loaders**: In supervised or offline distillation (e.g., PDM-Lite / World-on-Rails), scale PyTorch DataLoader workers (`num_workers=4` to `8`+), enable `pin_memory=True`, and set `prefetch_factor=2` to ensure GPU compute is never starved by CPU data loading.
   - **Parallel Evaluations & Sweeps**: Run evaluation rollouts, seed replications, and hyperparameter trials in parallel across available ports/threads.
   - **No Sequential / Single-Threaded Execution**: Never default to single-threaded or sequential execution (`num_envs=1`, `num_workers=0`, or sequential seed loops) unless the user explicitly instructs to run sequentially or single-threaded for isolated debugging.
+
+## Secret Handling & Daily API Key Rotation
+
+- **NEVER directly read any `.env` files or files starting with `.` (dotfiles)**:
+  - Do not use file viewing tools, grep, or shell commands to read `.env`, `.env.local`, `.vast_api_key`, `.remote`, etc.
+  - Assume all credentials and dotfiles work correctly.
+  - If you need any information regarding them, ask the user directly.
+- **Daily Key Rotation Reminder**:
+  - Prompt the user to reroll/rotate API keys (Vast.ai, Hugging Face, etc.) every day / at the start of each daily session.
+
+## Vast.ai Platform Integration & Autonomous Access
+
+Claude can now query and manage the Vast.ai fleet directly via CLI tools:
+- **CLI Command**: `vastai` (available via `python scripts/setup/vast_fleet.py list` or `vastai show instances`).
+- **Authentication**: Pre-configured in user profile (`~/.config/vastai/` with active 2FA session). No tokens needed in commands.
+- **Inspect Fleet**: `python scripts/setup/vast_fleet.py list` probes all active instances (direct and proxy SSH).
+- **Target an Instance**: `python scripts/setup/vast_fleet.py select <idx_or_id>` automatically writes the selected box IP and port into `.remote`.
+- **Search Offers**: `vastai search offers 'gpu_name=RTX_3090 num_gpus>=1 ...'`.
