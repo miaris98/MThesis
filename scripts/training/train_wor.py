@@ -145,6 +145,9 @@ def parse_args():
     parser.add_argument("--anticipate_s", type=float, default=0.0, help="TODO A38 step 1: the target-speed label becomes the minimum of the expert's target speed over the next S seconds (0 = the expert's current target); try 0.5 / 1 / 2")
     parser.add_argument("--brake_frac", type=float, default=0.0, help="TODO A38 step 2: oversample brake-onset frames (the --brake_window frames before the expert's target speed drops >= 4 m/s) as this fraction of each epoch; exclusive with --swerve_frac")
     parser.add_argument("--brake_window", type=int, default=8, help="frames (4 Hz) before a speed drop that count as brake onset")
+    parser.add_argument("--path_head", type=int, default=0, help="TODO A15: add a space-indexed path head (10 points of the expert's shifted route, ego frame) next to the waypoints (qwen heads only)")
+    parser.add_argument("--path_loss_weight", type=float, default=1.0, help="TODO A15: weight of the path L1 when --path_head 1")
+    parser.add_argument("--path_cascade", type=int, default=0, help="TODO A15: condition the speed head on the predicted path (AlignDrive-style aligned cascade; zero-initialised coupling); needs --path_head 1")
     parser.add_argument("--speed_lambda_over", type=float, default=0.0, help="TODO A39: weight of the expected squared OVERSHOOT of the speed posterior against the expert's speed (a collision costs x0.6) next to the two-hot CE; 0 = plain CE")
     parser.add_argument("--speed_lambda_under", type=float, default=0.0, help="TODO A39: weight of the expected squared undershoot (slowness is cheap until the time cap); use 2-4x less than --speed_lambda_over")
     parser.add_argument("--compile_model", type=int, default=0, help="Wrap the policy in torch.compile - trades a one-off compilation on the first epoch for faster steps afterwards, so it only pays off over a long run (1=True, 0=False)")
@@ -297,7 +300,9 @@ def main():
             target_speed_input=args.target_speed_input,
             use_rail_q=bool(args.use_rail_q),
             use_ray_geometry=bool(args.ray_geometry),
-            crop_bottom_frac=args.crop_bottom_frac
+            crop_bottom_frac=args.crop_bottom_frac,
+            use_path_head=bool(args.path_head),
+            path_cascade=bool(args.path_cascade)
         )
     else:
         policy = QwenWorldOnRailsPolicy(
@@ -312,7 +317,9 @@ def main():
             target_speed_input=args.target_speed_input,
             use_rail_q=bool(args.use_rail_q),
             use_ray_geometry=bool(args.ray_geometry),
-            crop_bottom_frac=args.crop_bottom_frac
+            crop_bottom_frac=args.crop_bottom_frac,
+            use_path_head=bool(args.path_head),
+            path_cascade=bool(args.path_cascade)
         )
 
     # 2. Initialize Trainer
@@ -348,6 +355,7 @@ def main():
         max_batches=args.max_batches,
         target_speed_loss_weight=args.target_speed_loss_weight,
         speed_loss_kwargs={"lambda_over": args.speed_lambda_over, "lambda_under": args.speed_lambda_under},
+        path_loss_weight=args.path_loss_weight if args.path_head else 0.0,
         wp_loss_weight=args.wp_loss_weight,
         q_loss_weight=args.q_loss_weight,
         lateral_loss_weight=args.lateral_loss_weight,

@@ -49,6 +49,10 @@ def load_trainable_state(model: nn.Module, state: Dict[str, torch.Tensor], froze
     missing, _ = model.load_state_dict({_key(k): v for k, v in state.items()}, strict=False)
     frozen = set(frozen_keys)
     missing = [k for k in missing if k not in frozen]
+    new_heads = [k for k in missing if k.startswith(("path_head.", "path_embed."))]   # TODO A15: heads a resumed arm adds on purpose
+    if new_heads:
+        print(f"--> {len(new_heads)} new-head tensors start from their own init (zero output): {', '.join(new_heads[:3])} ...", flush=True)
+    missing = [k for k in missing if k not in new_heads]
     if missing:
         raise RuntimeError(
             f"{source} does not hold {len(missing)} of this model's trainable tensors "

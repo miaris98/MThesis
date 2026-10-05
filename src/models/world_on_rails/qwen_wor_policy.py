@@ -14,6 +14,8 @@ controls, same WorldOnRailsTrainer/WorldOnRailsDataset training pipeline - with 
 the CNN+MLP head swapped for a Qwen transformer trunk.
 """
 from typing import Dict, Optional, Tuple, Union
+import os
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -157,7 +159,10 @@ class QwenWorldOnRailsPolicy(nn.Module):
         target_speed_input: str = "policy",
         use_rail_q: bool = True,
         use_ray_geometry: bool = False,
-        crop_bottom_frac: float = DEFAULT_CROP_BOTTOM_FRAC
+        crop_bottom_frac: float = DEFAULT_CROP_BOTTOM_FRAC,
+        use_path_head: bool = False,
+        path_cascade: bool = False,
+        path_points: int = 10
     ):
         super().__init__()
         self.num_commands = num_commands
@@ -240,6 +245,20 @@ class QwenWorldOnRailsPolicy(nn.Module):
         else:
             self.target_speed_head = None
 
+        # TODO A15: a space-indexed path head next to the time-indexed waypoints (TF++ path checkpoints, CarLLaVA / SimLingo / BevAD): `path_points` points of the expert's
+        # shifted route in the ego frame, read from the policy token. With `path_cascade` the speed head is conditioned on the predicted path (AlignDrive): path_embed
+        # is zero-initialised, so a cascade arm starts exactly as the plain head and learns the coupling.
+        self.use_path_head, self.path_cascade, self.path_points = bool(use_path_head), bool(path_cascade and use_path_head), int(path_points)
+        if self.use_path_head:
+            self.path_head = nn.Sequential(nn.Linear(self.embed_dim, 256), nn.GELU(), nn.Linear(256, self.path_points * 2))
+            nn.init.zeros_(self.path_head[-1].weight)
+            with torch.no_grad():  # zero weights + the nominal straight path as bias: the head starts at 'drive straight' (x = 3.5, 5.5, .. 21.5 m, y = 0), not at the ego origin
+                self.path_head[-1].bias.copy_(torch.tensor([[3.5 + 2.0 * k, 0.0] for k in range(self.path_points)]).reshape(-1))
+            if self.path_cascade:
+                self.path_embed = nn.Linear(self.path_points * 2, self.embed_dim)
+                nn.init.zeros_(self.path_embed.weight)
+                nn.init.zeros_(self.path_embed.bias)
+
         trunk_params = sum(p.numel() for p in self.trunk.parameters())
         seq_len = self.num_vision_tokens + 4
         print(f"✓ Qwen-{str(model_size).upper()} WoR Decision Transformer initialized! "
@@ -312,9 +331,13 @@ class QwenWorldOnRailsPolicy(nn.Module):
         # state tokens rather than a fused vector because that is what this trunk has - keeping
         # the two arms' target-speed inputs as close as their architectures allow, so the
         # comparison stays about the trunk and not about what the speed head could see.
+        if self.use_path_head:
+            out["path"] = self.path_head(policy_repr).view(B, self.path_points, 2)
         if self.target_speed_head is not None:
             if self.target_speed_input == "policy":
                 ts_in = policy_repr
+                if self.path_cascade:
+                    ts_in = ts_in + self.path_embed(out["path"].reshape(B, -1))
             else:
                 ts_in = torch.cat(
                     [speed_tok.squeeze(1), route_tok.squeeze(1), cmd_tok.squeeze(1)], dim=-1)
@@ -403,6 +426,17 @@ class QwenWorldOnRailsPolicy(nn.Module):
             # Published so the eval HUD and telemetry report the live decision rather
             # than the unchanging default (see eval_wor.py's target_speed_kmh read).
             self.controller.target_speed = target_speed_kmh
+
+        if getattr(self, "use_path_head", False) and "path" in out and os.environ.get("WOR_PATH_STEER") == "1":
+            # TODO A15 eval switch: the lateral coordinate of every waypoint comes from the predicted path (np.interp at the waypoint's forward position, clamped at the
+            # ends); the longitudinal spacing (speed) stays with the waypoint / speed heads. Logged once so a lane's log proves it ran.
+            p_ = out["path"][0].float().cpu().numpy()
+            o_ = np.argsort(p_[:, 0])
+            wps = np.array(wps, dtype=np.float32, copy=True)
+            wps[:, 1] = np.interp(wps[:, 0], p_[o_, 0], p_[o_, 1])
+            if not getattr(self, "_path_steer_logged", False):
+                print("[A15] steering from the predicted path (WOR_PATH_STEER=1)", flush=True)
+                self._path_steer_logged = True
 
         steer, throttle, brake = self.controller.control_from_waypoints(
             waypoints=wps,

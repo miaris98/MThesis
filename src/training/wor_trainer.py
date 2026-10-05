@@ -114,6 +114,7 @@ class WorldOnRailsTrainer:
         max_batches: int = 0,
         target_speed_loss_weight: float = 0.0,
         speed_loss_kwargs: Optional[dict] = None,
+        path_loss_weight: float = 0.0,
         grad_clip: float = 5.0,
         warmup_frac: float = 0.05,
         decay_gates_and_norms: bool = False,
@@ -139,6 +140,7 @@ class WorldOnRailsTrainer:
         self.use_amp = use_amp and (device == "cuda")
         self.wp_loss_weight = wp_loss_weight
         self.target_speed_loss_weight = target_speed_loss_weight
+        self.path_loss_weight = path_loss_weight                  # TODO A15: L1 on the path head's 10 ego-frame points (0 = off)
         self.speed_loss_kwargs = dict(speed_loss_kwargs or {})   # TODO A39: lambda_over / lambda_under of the asymmetric ordinal term
         # Datasets without precomputed Q-values (e.g. PDM-Lite) leave target_q at
         # zero, so q_loss_weight defaults to 0 to avoid supervising toward zero.
@@ -197,6 +199,8 @@ class WorldOnRailsTrainer:
             # same value or load_state_dict raises on a size mismatch - which is the loud
             # failure we want, but only if the value is recorded here to rebuild from.
             "use_target_speed": getattr(model, "target_speed_head", None) is not None,
+            "use_path_head": bool(getattr(model, "use_path_head", False)),
+            "path_cascade": bool(getattr(model, "path_cascade", False)),
             "target_speed_input": getattr(model, "target_speed_input", None),
             "use_rail_q": getattr(model, "use_rail_q", None),
             "use_ray_geometry": getattr(model, "use_ray_geometry", None),
@@ -308,6 +312,7 @@ class WorldOnRailsTrainer:
         self.model.train()
         total_loss_accum = 0.0
         q_loss_accum = 0.0
+        aux_accum = {"target_speed": 0.0, "path": 0.0}      # TODO A15 / A39: the auxiliary losses were never in the epoch metrics (MLflow)
         wp_loss_accum = 0.0
         ade_accum = 0.0
         fde_accum = 0.0
@@ -367,6 +372,12 @@ class WorldOnRailsTrainer:
                             out["target_speed_logits"], ts_target.to(self.device), **self.speed_loss_kwargs)
                         total_loss = total_loss + self.target_speed_loss_weight * ts_loss
                         losses["target_speed"] = ts_loss
+                if self.path_loss_weight > 0 and "path" in out and batch.get("target_path") is not None:
+                    tp = batch["target_path"].to(self.device).float()
+                    valid = batch["path_valid"].to(self.device).float()
+                    path_l1 = ((out["path"].float() - tp).abs().sum(-1).mean(-1) * valid).sum() / valid.sum().clamp(min=1.0)
+                    total_loss = total_loss + self.path_loss_weight * path_l1
+                    losses["path"] = path_l1
 
             if self.use_amp:
                 self.scaler.scale(total_loss).backward()
@@ -414,6 +425,9 @@ class WorldOnRailsTrainer:
             if math.isfinite(loss_val):
                 total_loss_accum += loss_val
                 q_loss_accum += losses["q"].item()
+                for _k in aux_accum:
+                    if _k in losses:
+                        aux_accum[_k] += float(losses[_k].item())
                 wp_loss_accum += losses["wp"].item()
                 ade_accum += losses["ade"].item()
                 fde_accum += losses["fde"].item()
@@ -484,6 +498,8 @@ class WorldOnRailsTrainer:
             "wp_longitudinal_error_m": avg_longitudinal_err,
             "wp_heading_err": avg_heading_err,
             "wp_curvature_err": avg_curvature_err,
+            "speed_head_loss": aux_accum["target_speed"] / max(1, num_batches),
+            "path_loss": aux_accum["path"] / max(1, num_batches),
             "grad_norm": avg_grad_norm,
             "nonfinite_grad_batches": nonfinite_batches,
             "clipped_grad_batches": clipped_batches,
@@ -539,7 +555,10 @@ class WorldOnRailsTrainer:
             ckpt = torch.load(resume_from, map_location=self.device)
             load_trainable_state(self.model, ckpt["model"], self.ckpt.frozen_keys, resume_from)
             if "optimizer" in ckpt:
-                self.optimizer.load_state_dict(ckpt["optimizer"])
+                try:
+                    self.optimizer.load_state_dict(ckpt["optimizer"])
+                except ValueError as e:  # a new head (TODO A15) changes the parameter groups: AdamW state starts fresh, the weights are loaded
+                    print(f"[Warning] optimizer state of {resume_from} does not fit this model ({e}); starting the AdamW state fresh.")
             else:
                 print(f"[Warning] {resume_from} has no 'optimizer' key - resuming with a "
                       f"freshly initialized optimizer (momentum/variance state is lost).")

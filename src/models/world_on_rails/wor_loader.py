@@ -170,7 +170,9 @@ def load_wor_model(
             target_speed_input=resolved_ts_input,
             use_rail_q=resolved_rail_q,
             use_ray_geometry=resolved_ray_geo,
-            crop_bottom_frac=resolved_crop
+            crop_bottom_frac=resolved_crop,
+            use_path_head=bool(_resolve("use_path_head", None, False)),
+            path_cascade=bool(_resolve("path_cascade", None, False))
         )
 
     if checkpoint_path and os.path.exists(checkpoint_path):

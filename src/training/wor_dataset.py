@@ -293,6 +293,8 @@ class WorldOnRailsDataset(Dataset):
                     "augmentation_translation": float(meas.get("augmentation_translation", 0.0)),
                     "augmentation_rotation": float(meas.get("augmentation_rotation", 0.0)),
                     "route_shift": route_shift(meas.get("route"), meas.get("route_original")),
+                    # TODO A15: the path label = every second point of the expert's SHIFTED route (20 points at 1 m from x = 2.5 m): 10 points, ego frame
+                    "path": ([[float(q[0]), float(q[1])] for q in meas["route"][1::2][:10]] if meas.get("route") and len(meas["route"]) >= 20 else None),
                 }
             except Exception:
                 parsed[i] = None
@@ -338,7 +340,8 @@ class WorldOnRailsDataset(Dataset):
                 "target_speed": _ant[i] if _ant_k > 0 else cur["target_speed"],
                 "waypoints": waypoints,
                 "swerve": bool(swerve[i]),
-                "brake_onset": bool(_onset[i])
+                "brake_onset": bool(_onset[i]),
+                "path": cur["path"]
             })
 
             # Recovery-augmentation sample: a second, genuinely re-rendered camera at this
@@ -367,7 +370,8 @@ class WorldOnRailsDataset(Dataset):
                         "waypoints": aug_waypoints,
                         "is_recovery_augmented": True,
                         "swerve": bool(swerve[i]),
-                        "brake_onset": bool(_onset[i])
+                        "brake_onset": bool(_onset[i]),
+                        "path": _reproject_points(cur["path"], offset_inv) if cur["path"] else None
                     })
 
     def __len__(self) -> int:
@@ -548,7 +552,11 @@ class WorldOnRailsDataset(Dataset):
         else:
             tgt_speed = float(self.samples[idx].get("target_speed", speed))
 
+        # TODO A15: path label (10 x 2, ego frame of this camera) and its validity; zeros + 0 where a frame carries no 20-point route
+        _path = None if self.is_synthetic else self.samples[idx].get("path")
         sample = {
+            "target_path": torch.as_tensor(np.array(_path if _path else np.zeros((10, 2)), dtype=np.float32), dtype=torch.float32),
+            "path_valid": torch.tensor(1.0 if _path else 0.0, dtype=torch.float32),
             "speed": speed_tensor,
             "command": command_tensor,
             "route": torch.as_tensor(route, dtype=torch.float32),
