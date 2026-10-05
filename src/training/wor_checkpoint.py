@@ -31,7 +31,7 @@ def to_cpu(obj):
 
 
 def load_trainable_state(model: nn.Module, state: Dict[str, torch.Tensor], frozen_keys: Iterable[str],
-                         source: str) -> None:
+                         source: str) -> List[str]:
     """Loads a resume checkpoint's head weights, and refuses a load that left any of them untouched.
 
     strict=False is needed because per-epoch files omit the frozen backbone, but on its own it also accepted a
@@ -46,18 +46,30 @@ def load_trainable_state(model: nn.Module, state: Dict[str, torch.Tensor], froze
         k = k[len("_orig_mod."):] if k.startswith("_orig_mod.") else k
         return "_orig_mod." + k if compiled else k
 
-    missing, _ = model.load_state_dict({_key(k): v for k, v in state.items()}, strict=False)
+    own = model.state_dict()
+    incoming = {_key(k): v for k, v in state.items()}
+    # TODO A54: the vision input of a space-to-depth model (vision_proj, the vision position table) has another shape than the resumed checkpoint's: those two tensors
+    # start from their own init and the rest of the trunk (the driving knowledge) is kept. Any OTHER shape mismatch stays an error.
+    reshaped = [k for k, v in incoming.items() if k in own and own[k].shape != v.shape]
+    ok_reshape = [k for k in reshaped if k.startswith(("vision_proj.", "trunk.vision_pos"))]
+    if ok_reshape:
+        print(f"--> {len(ok_reshape)} vision-input tensors changed shape and start from their own init: {', '.join(ok_reshape)}", flush=True)
+        incoming = {k: v for k, v in incoming.items() if k not in ok_reshape}
+    missing, _ = model.load_state_dict(incoming, strict=False)
+    missing = [k for k in missing if k not in ok_reshape]
     frozen = set(frozen_keys)
     missing = [k for k in missing if k not in frozen]
     new_heads = [k for k in missing if k.startswith(("path_head.", "path_embed."))]   # TODO A15: heads a resumed arm adds on purpose
     if new_heads:
         print(f"--> {len(new_heads)} new-head tensors start from their own init (zero output): {', '.join(new_heads[:3])} ...", flush=True)
     missing = [k for k in missing if k not in new_heads]
+    changed = new_heads + ok_reshape                      # tensors that start from their own init: the resumed optimizer state no longer fits them
     if missing:
         raise RuntimeError(
             f"{source} does not hold {len(missing)} of this model's trainable tensors "
             f"(e.g. {', '.join(missing[:4])}). It was written by a different configuration; resuming "
             f"would train randomly initialised heads with that run's optimizer state.")
+    return changed
 
 
 def best_metric_so_far(save_dir: str, select_on: str, resume_ckpt: Dict) -> float:

@@ -172,7 +172,9 @@ def load_wor_model(
             use_ray_geometry=resolved_ray_geo,
             crop_bottom_frac=resolved_crop,
             use_path_head=bool(_resolve("use_path_head", None, False)),
-            path_cascade=bool(_resolve("path_cascade", None, False))
+            path_cascade=bool(_resolve("path_cascade", None, False)),
+            token_mode=str(_resolve("token_mode", None, "pool")),
+            s2d_patch=int(_resolve("s2d_patch", None, 3))
         )
 
     if checkpoint_path and os.path.exists(checkpoint_path):

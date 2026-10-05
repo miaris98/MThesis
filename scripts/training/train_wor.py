@@ -145,6 +145,9 @@ def parse_args():
     parser.add_argument("--anticipate_s", type=float, default=0.0, help="TODO A38 step 1: the target-speed label becomes the minimum of the expert's target speed over the next S seconds (0 = the expert's current target); try 0.5 / 1 / 2")
     parser.add_argument("--brake_frac", type=float, default=0.0, help="TODO A38 step 2: oversample brake-onset frames (the --brake_window frames before the expert's target speed drops >= 4 m/s) as this fraction of each epoch; exclusive with --swerve_frac")
     parser.add_argument("--brake_window", type=int, default=8, help="frames (4 Hz) before a speed drop that count as brake onset")
+    parser.add_argument("--token_mode", type=str, default="pool", choices=["pool", "s2d"], help="TODO A54: 'pool' = the stride-32 map average-pooled to --vision_grid (default); 's2d' = the stride-16 level through a pixel-unshuffle of --s2d_patch (give --vision_grid HxW = H/16/p x W/16/p, e.g. 6x16 for 288x768 at p 3); live encoder only")
+    parser.add_argument("--s2d_patch", type=int, default=3, help="TODO A54: space-to-depth patch size")
+    parser.add_argument("--token_mask", type=float, default=0.0, help="TODO A54: fraction of lateral vision-token columns zeroed per sample in training (BevAD: 0.2)")
     parser.add_argument("--path_head", type=int, default=0, help="TODO A15: add a space-indexed path head (10 points of the expert's shifted route, ego frame) next to the waypoints (qwen heads only)")
     parser.add_argument("--path_loss_weight", type=float, default=1.0, help="TODO A15: weight of the path L1 when --path_head 1")
     parser.add_argument("--path_cascade", type=int, default=0, help="TODO A15: condition the speed head on the predicted path (AlignDrive-style aligned cascade; zero-initialised coupling); needs --path_head 1")
@@ -172,13 +175,15 @@ def main():
     os.environ["WOR_ANTICIPATE_S"] = str(args.anticipate_s)    # TODO A38 step 1 (read when the dataset indexes routes)
     os.environ["WOR_BRAKE_FRAC"] = str(args.brake_frac)        # TODO A38 step 2 (read by the train loader)
     os.environ["WOR_BRAKE_WINDOW"] = str(args.brake_window)
+    if args.token_mode == "s2d" and args.pooled_cache:
+        raise SystemExit("--token_mode s2d reads the stride-16 level and cannot use --pooled_cache (the cache holds the pooled stride-32 map)")
     if args.pooled_cache:
-        import json
+        import json as _json                                      # not `import json`: that would make json a local of main() and break the later uses
         os.environ["WOR_POOLED_CACHE"] = args.pooled_cache      # read by WorldOnRailsDataset (TODO A59)
         if not args.freeze_backbone or args.color_aug_prob > 0 or args.policy_arch == "cnn":
             raise SystemExit("--pooled_cache is exact only for a frozen backbone, no colour augmentation and a qwen head (the CNN head convolves the full map)")
         for _p in args.pooled_cache.split(","):
-            _g = tuple(json.load(open(_p + ".json"))["grid"])
+            _g = tuple(_json.load(open(_p + ".json"))["grid"])
             if _g != tuple(_parse_vision_grid(args.vision_grid)):
                 raise SystemExit(f"pooled cache {_p} holds a {_g} grid but --vision_grid is {args.vision_grid}: pooling a pooled map is the identity only for the same grid")
 
@@ -302,7 +307,10 @@ def main():
             use_ray_geometry=bool(args.ray_geometry),
             crop_bottom_frac=args.crop_bottom_frac,
             use_path_head=bool(args.path_head),
-            path_cascade=bool(args.path_cascade)
+            path_cascade=bool(args.path_cascade),
+            token_mode=args.token_mode,
+            s2d_patch=args.s2d_patch,
+            token_mask=args.token_mask
         )
     else:
         policy = QwenWorldOnRailsPolicy(
@@ -319,7 +327,10 @@ def main():
             use_ray_geometry=bool(args.ray_geometry),
             crop_bottom_frac=args.crop_bottom_frac,
             use_path_head=bool(args.path_head),
-            path_cascade=bool(args.path_cascade)
+            path_cascade=bool(args.path_cascade),
+            token_mode=args.token_mode,
+            s2d_patch=args.s2d_patch,
+            token_mask=args.token_mask
         )
 
     # 2. Initialize Trainer

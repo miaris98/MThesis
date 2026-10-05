@@ -19,6 +19,7 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from src.models.world_on_rails.wor_policy import (
     PretrainedVisionEncoder, PIDController, build_vision_encoder, tfpp_brake_override)
@@ -162,7 +163,10 @@ class QwenWorldOnRailsPolicy(nn.Module):
         crop_bottom_frac: float = DEFAULT_CROP_BOTTOM_FRAC,
         use_path_head: bool = False,
         path_cascade: bool = False,
-        path_points: int = 10
+        path_points: int = 10,
+        token_mode: str = "pool",
+        s2d_patch: int = 3,
+        token_mask: float = 0.0
     ):
         super().__init__()
         self.num_commands = num_commands
@@ -218,7 +222,16 @@ class QwenWorldOnRailsPolicy(nn.Module):
         self.use_ray_geometry = bool(use_ray_geometry)
         self.crop_bottom_frac = float(crop_bottom_frac)
         geo_ch = RAY_GEOMETRY_CHANNELS if self.use_ray_geometry else 0
-        self.vision_proj = nn.Linear(self.encoder.out_channels + geo_ch, self.embed_dim)
+        # TODO A54 (BevAD): token_mode "s2d" feeds the stride-16 pyramid level through a pixel-unshuffle (space-to-depth, patch p) instead of average-pooling the stride-32 map
+        # to a 4x4 grid: nothing is averaged away (a lead car at brake onset is 0.4-0.55 of one stride-32 cell), each token carries p*p x 576 channels, and `token_mask` zeroes
+        # that fraction of the lateral token columns in training (BevAD: the unmasked model attends to distant / irrelevant cells). Pass vision_grid = (H/16/p, W/16/p),
+        # e.g. 6x16 for 288x768 at p = 3. Live encoder only: the pooled cache holds the stride-32 map.
+        self.token_mode, self.s2d_patch, self.token_mask = str(token_mode), int(s2d_patch), float(token_mask)
+        vis_ch = self.encoder.out_channels
+        if self.token_mode == "s2d":
+            assert hasattr(self.encoder, "forward_pyramid") and self.encoder.feature_reductions[-2] == 16, "token_mode s2d needs the CARLA timm encoder (stride-16 level)"
+            vis_ch = self.encoder.feature_channels[-2] * self.s2d_patch ** 2
+        self.vision_proj = nn.Linear(vis_ch + geo_ch, self.embed_dim)
         self.speed_proj = nn.Linear(1, self.embed_dim)
         self.cmd_embed = nn.Embedding(num_commands, self.embed_dim)
         self.route_proj = nn.Linear(route_points * 2, self.embed_dim)
@@ -307,8 +320,17 @@ class QwenWorldOnRailsPolicy(nn.Module):
         None). See WorldOnRailsPolicy.forward's docstring - same cached-feature contract,
         same reasoning: the frozen backbone's output for an unaugmented frame never
         changes across epochs, so it need not be recomputed 50 times."""
-        feats = vision_features if vision_features is not None else self.encoder(rgb)
+        if self.token_mode == "s2d":
+            if vision_features is not None:
+                raise ValueError("token_mode s2d reads the stride-16 level: it cannot use the pooled stride-32 cache (--pooled_cache); train with the live encoder")
+            feats = F.pixel_unshuffle(self.encoder.forward_pyramid(rgb)[-2], self.s2d_patch)
+        else:
+            feats = vision_features if vision_features is not None else self.encoder(rgb)
         vision_tok, speed_tok, route_tok, cmd_tok, cmd_idx = self._tokenize_state(feats, speed, command, route)
+        if self.training and self.token_mask > 0 and self.vision_grid_hw[0] > 0:
+            gh, gw = self.vision_grid_hw
+            cols = (torch.rand(feats.shape[0], 1, gw, device=feats.device) >= self.token_mask).to(vision_tok.dtype)       # per sample: keep a lateral column or not
+            vision_tok = vision_tok * cols.expand(-1, gh, -1).reshape(feats.shape[0], gh * gw, 1)
 
         waypoints, rail_q, policy_repr = self.trunk(vision_tok, speed_tok, route_tok, cmd_tok)
 

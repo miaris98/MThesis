@@ -199,6 +199,8 @@ class WorldOnRailsTrainer:
             # same value or load_state_dict raises on a size mismatch - which is the loud
             # failure we want, but only if the value is recorded here to rebuild from.
             "use_target_speed": getattr(model, "target_speed_head", None) is not None,
+            "token_mode": getattr(model, "token_mode", "pool"),
+            "s2d_patch": getattr(model, "s2d_patch", 3),
             "use_path_head": bool(getattr(model, "use_path_head", False)),
             "path_cascade": bool(getattr(model, "path_cascade", False)),
             "target_speed_input": getattr(model, "target_speed_input", None),
@@ -553,8 +555,10 @@ class WorldOnRailsTrainer:
         start_epoch = 1
         if resume_from:
             ckpt = torch.load(resume_from, map_location=self.device)
-            load_trainable_state(self.model, ckpt["model"], self.ckpt.frozen_keys, resume_from)
-            if "optimizer" in ckpt:
+            changed = load_trainable_state(self.model, ckpt["model"], self.ckpt.frozen_keys, resume_from)
+            if changed:
+                print(f"[Warning] {len(changed)} tensors start from their own init (new or reshaped heads): the optimizer state of {resume_from} is not loaded, AdamW starts fresh.")
+            elif "optimizer" in ckpt:
                 try:
                     self.optimizer.load_state_dict(ckpt["optimizer"])
                 except ValueError as e:  # a new head (TODO A15) changes the parameter groups: AdamW state starts fresh, the weights are loaded

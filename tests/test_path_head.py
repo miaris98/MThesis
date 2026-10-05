@@ -64,3 +64,31 @@ def test_path_steering_replaces_the_lateral_coordinate_only(monkeypatch):
     m.controller.control_from_waypoints = lambda waypoints, current_speed_kmh, target_speed_kmh=None: (seen.setdefault("wps", np.array(waypoints)), (0.0, 0.0, 0.0))[1]
     m.act(rgb=np.random.randint(0, 255, (96, 256, 3), dtype=np.uint8), speed=5.0, command=3, device="cpu", route=np.zeros((4, 2), np.float32))
     assert np.allclose(seen["wps"][:, 1], 1.0, atol=1e-4)
+
+
+def test_s2d_tokens_and_masking_a54():
+    """TODO A54: space-to-depth tokens from the stride-16 level (576 ch x p^2), 6x16 grid at 96x256... and lateral column masking in training only."""
+    import torch.nn.functional as F
+    m = QwenWorldOnRailsPolicy(backbone_name="regnety_032", pretrained=False, model_size="10m", vision_grid=(2, 5), use_target_speed=True, route_points=4,
+                               token_mode="s2d", s2d_patch=3, token_mask=0.5)
+    # 96x240 input: stride 16 -> 6x15, patch 3 -> 2x5 tokens
+    x = _inputs()
+    x["rgb"] = torch.rand(3, 3, 96, 240)
+    assert m.vision_proj.in_features == 576 * 9
+    m.eval()
+    with torch.no_grad():
+        out = m(**x)
+    assert out["selected_waypoints"].shape == (3, 5, 2) and m.num_vision_tokens == 10
+    # masking is a training-time effect: eval is deterministic, train drops columns (outputs differ between two draws)
+    m.train()
+    torch.manual_seed(1)
+    a = m(**x)["selected_waypoints"]
+    torch.manual_seed(2)
+    b = m(**x)["selected_waypoints"]
+    assert not torch.allclose(a, b)
+    # the pooled cache cannot feed an s2d model
+    try:
+        m(None, x["speed"], x["command"], x["route"], vision_features=torch.zeros(3, 1512, 4, 4))
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
