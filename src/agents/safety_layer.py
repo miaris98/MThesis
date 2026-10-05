@@ -40,7 +40,7 @@ def quantile_speed(probs: np.ndarray, bins: np.ndarray, tau: float) -> float:
 
 def _parse_kv(spec: str, defaults: dict) -> dict:
     out = dict(defaults)
-    for part in spec.split(","):
+    for part in spec.replace(";", ",").split(","):
         if "=" in part:
             k, v = part.split("=", 1)
             out[k.strip()] = float(v)

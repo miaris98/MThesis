@@ -43,7 +43,7 @@ from atari_qwen.training.train_ez_offpolicy import (  # noqa: E402  (same code p
 CKPT_RE = re.compile(r"checkpoint_env(\d+)_upd(\d+)\.pt$")
 
 
-def load_model(ck_path: Path, device, sims=None):
+def load_model(ck_path: Path, device, sims=None, max_depth=None):
     ck = torch.load(ck_path, map_location=device, weights_only=False)
     a = argparse.Namespace(**ck["args"])
     probe = make_vector_atari_envs(a.env_id, num_envs=1, seed=a.seed, clip_reward=True, episodic_life=True,
@@ -56,7 +56,7 @@ def load_model(ck_path: Path, device, sims=None):
                       state_hw=int(np.ceil(a.frame_size / 16))).to(device)
     model.load_state_dict(ck["model"])
     mcts = GumbelMCTS(A, support, num_simulations=sims or a.num_simulations, discount=a.discount ** 4,
-                      lstm_horizon=a.lstm_horizon)
+                      lstm_horizon=a.lstm_horizon, max_depth=max_depth)
     return ck, a, model, mcts
 
 
@@ -67,7 +67,7 @@ def total_updates(a) -> int:
 
 
 def score(ck_path: Path, device, proto=None, graph=False):
-    ck, a, model, mcts = load_model(ck_path, device, proto and proto["sims"])
+    ck, a, model, mcts = load_model(ck_path, device, proto and proto["sims"], proto and proto.get("max_depth"))
     t0 = time.time()
     if proto is None:
         sc = evaluate(model, mcts, a.env_id, device, a.eval_episodes, a.frame_size, a.seed, graph=graph)
@@ -79,7 +79,7 @@ def score(ck_path: Path, device, proto=None, graph=False):
 
 def protocol_tag(proto, a) -> str:
     return proto["tag"] or (f"ep{proto['episodes'] or a.eval_episodes}_sim{proto['sims'] or a.num_simulations}"
-                            f"_st{proto['sticky']:g}" + ("_flip" if proto["flip"] else ""))
+                            f"_st{proto['sticky']:g}" + ("_flip" if proto["flip"] else "") + (f"_d{proto['max_depth']}" if proto.get("max_depth") else ""))
 
 
 def mlflow_run(label: str, a, proto=None, tag=None):
@@ -203,14 +203,15 @@ def main(argv=None):
                     help="replay the search from a CUDA graph (TODO B23; same scores, ~10x fewer CPU launches)")
     ap.add_argument("--flip-avg", action="store_true",
                     help="protocol override: average the search root with its mirror image (TODO B26 step 0)")
+    ap.add_argument("--max-depth", type=int, default=None, help="protocol override (TODO B43 step 1): cap the imagined search depth at D (default: unlimited)")
     ap.add_argument("--protocol", default=None, help="name for the override protocol's result files")
     ap.add_argument("--env-steps", type=lambda s: {int(x) for x in s.split(",")}, default=None,
                     help="only score the checkpoints at these env steps (comma list)")
     args = ap.parse_args(argv)
     proto = None
-    if args.episodes or args.sims or args.sticky > 0 or args.flip_avg or args.protocol:
+    if args.episodes or args.sims or args.sticky > 0 or args.flip_avg or args.protocol or args.max_depth:
         proto = {"episodes": args.episodes, "sims": args.sims, "sticky": args.sticky, "flip": args.flip_avg,
-                 "tag": args.protocol}
+                 "tag": args.protocol, "max_depth": args.max_depth}
         args.watch = False  # protocol runs score saved checkpoints; there is no final checkpoint to wait for
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if args.verify:

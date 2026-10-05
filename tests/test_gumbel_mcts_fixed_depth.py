@@ -38,3 +38,36 @@ def test_too_small_a_bound_is_reported():
     assert not bool(deeper[3])
     assert bool(overflow), "a depth bound of 1 cannot hold a 16-simulation tree"
     assert default[2].shape == (s.shape[0],)
+
+
+def _reachable_max_depth(mcts):
+    seen = mcts.visit > 0
+    return int(mcts.depth[seen].max())
+
+
+def test_max_depth_caps_the_tree_and_a_loose_cap_changes_nothing():
+    """TODO B43 step 1: a node at depth D is not expanded; D larger than any tree reproduces the uncapped search exactly."""
+    model, mcts, s, v, p = _setup(16)
+    g = torch.distributions.Gumbel(0.0, 1.0).sample((s.shape[0], 4))
+    ref = mcts.search(model, s, v, p, g=g)
+    deep = _reachable_max_depth(mcts)
+    assert deep >= 3, "the test needs a tree deeper than the cap"
+    for D in (1, 2):
+        capped = GumbelMCTS(4, mcts.support, num_simulations=16, discount=0.997 ** 4, lstm_horizon=5, max_depth=D)
+        out = capped.search(model, s, v, p, g=g)
+        assert _reachable_max_depth(capped) <= D
+        assert float(capped.visit[:, 0].min()) == 17.0, "every simulation must still back up to the root"
+        assert out[1].shape == ref[1].shape and abs(out[1].sum(-1) - 1).max() < 1e-5
+    loose = GumbelMCTS(4, mcts.support, num_simulations=16, discount=0.997 ** 4, lstm_horizon=5, max_depth=deep + 5)
+    out = loose.search(model, s, v, p, g=g)
+    assert (out[0] == ref[0]).all() and (out[1] == ref[1]).all() and (out[2] == ref[2]).all()
+
+
+def test_max_depth_works_in_the_sync_free_mode_too():
+    model, mcts, s, v, p = _setup(16)
+    capped = GumbelMCTS(4, mcts.support, num_simulations=16, discount=0.997 ** 4, lstm_horizon=5, max_depth=3)
+    g = torch.distributions.Gumbel(0.0, 1.0).sample((s.shape[0], 4))
+    a = capped.search(model, s, v, p, g=g)
+    b = capped.search(model, s, v, p, g=g, depth_bound=16)
+    assert not bool(b[3])
+    assert (b[0].numpy() == a[0]).all() and (b[1].numpy() == a[1]).all() and (b[2].numpy() == a[2]).all()

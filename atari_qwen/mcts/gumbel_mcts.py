@@ -43,7 +43,10 @@ def halving_schedule(num_simulations: int, num_top_actions: int):
 class GumbelMCTS:
     def __init__(self, num_actions: int, support, num_simulations: int = 16, num_top_actions: int = 4,
                  discount: float = 0.997 ** 4, c_visit: float = 50.0, c_scale: float = 0.1,
-                 minmax_delta: float = 0.01, lstm_horizon: int = 5):
+                 minmax_delta: float = 0.01, lstm_horizon: int = 5, max_depth: int = None):
+        # TODO B43 step 1: max_depth = D caps the imagined depth: a simulation that reaches a node at depth D does not expand it, it backs up that
+        # node's own value-head output again (the training unroll is K = 5, the 64-simulation tree reaches depth 17). None = the original search.
+        self.max_depth = max_depth
         self.A = num_actions
         self.S = num_simulations
         self.m = min(num_top_actions, num_actions)
@@ -113,6 +116,8 @@ class GumbelMCTS:
         hid_h = torch.zeros((N,) + tuple(hid[0].shape[1:]), device=dev, dtype=hid[0].dtype)
         hid_c = torch.zeros_like(hid_h)
 
+        self.raw_v = torch.zeros(B, N, **f32)       # each node's own value-head output (B43 depth cap)
+        self.raw_v[:, 0] = root_values.float()
         self.visit[:, 0] = 1.0
         self.vsum[:, 0] = root_values.float()
         self.logits[:, 0] = root_logits.float()
@@ -131,7 +136,12 @@ class GumbelMCTS:
             active = torch.ones(B, device=dev, dtype=torch.bool)
             leaf_parent = torch.zeros_like(cur)
             leaf_action = torch.zeros_like(cur)
+            capped = torch.zeros(B, device=dev, dtype=torch.bool)       # B43: rows whose selection ended at a depth-D node
+            stop_node = torch.zeros_like(cur)
             for _ in range(depth_bound if fixed else self.S + 1):
+                if self.max_depth is not None:
+                    hit = active & (self.depth[b, cur] >= self.max_depth)
+                    capped, stop_node, active = capped | hit, torch.where(hit, cur, stop_node), active & ~hit
                 # root rule: first of the top-m candidates with the fewest visits
                 cand = sel[:, :m_cur]
                 cand_ch = self.child[b.unsqueeze(1), 0, cand]
@@ -152,6 +162,9 @@ class GumbelMCTS:
                 cur = torch.where(active, nxt, cur)
                 if not fixed and not bool(active.any()):
                     break
+            if self.max_depth is not None:
+                hit = active & (self.depth[b, cur] >= self.max_depth)
+                capped, stop_node, active = capped | hit, torch.where(hit, cur, stop_node), active & ~hit
             if fixed:
                 overflow = overflow | active.any()
 
@@ -167,8 +180,10 @@ class GumbelMCTS:
             reset_here = (d_new % self.H) == 0
             hid_h[new] = torch.where(reset_here.unsqueeze(-1), torch.zeros_like(h_out[0][0]), h_out[0][0])
             hid_c[new] = torch.where(reset_here.unsqueeze(-1), torch.zeros_like(h_out[1][0]), h_out[1][0])
-            self.child[b, leaf_parent, leaf_action] = torch.full_like(leaf_action, new)  # a tensor: a Python int is a CPU copy
-            self.parent[:, new] = leaf_parent
+            link = ~capped                                                                # a capped row's new node stays unlinked (never reachable)
+            self.child[b, leaf_parent, leaf_action] = torch.where(link, torch.full_like(leaf_action, new), self.child[b, leaf_parent, leaf_action])
+            self.raw_v[:, new] = v
+            self.parent[:, new] = torch.where(link, leaf_parent, torch.full_like(leaf_parent, -1))
             self.depth[:, new] = d_new
             self.logits[:, new] = p_logits.float()
             self.prefix[:, new] = vp
@@ -176,8 +191,8 @@ class GumbelMCTS:
             self.reward[:, new] = vp - torch.where(parent_reset, torch.zeros_like(vp), self.prefix[b, leaf_parent])
 
             # ---- backup ------------------------------------------------------------------------
-            node = torch.full((B,), new, device=dev, dtype=torch.long)
-            value = v
+            node = torch.where(capped, stop_node, torch.full((B,), new, device=dev, dtype=torch.long))
+            value = torch.where(capped, self.raw_v[b, stop_node], v)
             alive = torch.ones(B, device=dev, dtype=torch.bool)
             levels = 0
             while (levels <= depth_bound) if fixed else bool(alive.any()):  # fixed: bounded, no sync; default: until done

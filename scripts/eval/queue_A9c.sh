@@ -6,6 +6,7 @@
 #       | E15L:<name>:<r1,r2,..>  arm E e15 on an explicit route list as a9_E15_<name> (retry of skipped routes)
 #       | WORL:<name>:<r1,r2,..>  the original WoR on an explicit route list as a9_WOR_<name> (rebalanced lanes, S-099)
 #       | CKL:<label>:<ckpt>:<r1,r2,..|R19>  any of our checkpoints (path under $CHECKPOINTS) as <label> (arm J, S-107)
+#       | CKE:<label>:<ckpt>:<r1,r2,..|R19>:<K=V,K=V>  as CKL with environment flags exported (a ';' inside a value stands for ',': WOR_NEWSVENDOR=q0=0.3;T=8;qmax=0.7)
 #       | CKD:<label>:<ckpt>:<r1,r2,..|R19>:<decode>  as CKL with the speed head read as mean | median | quantile:<tau>
 #                                     (WOR_SPEED_DECODE, TODO A28); quantile:0.3 keeps its colon, it is the last field
 # Lanes on one box need distinct PORTs (TM port = PORT+6000); each lane clears its own rpc range before a launch (S-091).
@@ -93,6 +94,9 @@ for job in "$@"; do
     CKD:*) spec=${job#*:}; lab=${spec%%:*}; rest=${spec#*:}; ck=${rest%%:*}; rest=${rest#*:}
       rl=${rest%%:*}; dec=${rest#*:}; [ "$rl" = R19 ] && rl=$R19   # CKD:<label>:<ckpt>:<routes|R19>:<mean|median|quantile:T>
       ( export WOR_SPEED_DECODE=$dec; eval_job $lab $C/$ck "$rl" ) ;;
+    CKE:*) spec=${job#*:}; lab=${spec%%:*}; rest=${spec#*:}; ck=${rest%%:*}; rest=${rest#*:}
+      rl=${rest%%:*}; envs=${rest#*:}; [ "$rl" = R19 ] && rl=$R19   # CKE:<label>:<ckpt>:<routes|R19>:<K=V,K=V,...> (A50 / A57 / A52 / A44 flags: WOR_CREEP_CLAMP=1,WOR_CONTACT_REFLEX=1,
+      ( IFS=, read -ra kv <<<"$envs"; for e in "${kv[@]}"; do export "$e"; done; eval_job $lab $C/$ck "$rl" ) ;;   # WOR_NEWSVENDOR=q0=0.3;T=8 uses ';' as its separator, WOR_SPEED_SCALE=0.9, B2D_CLIPS_DIR=/workspace/clips)
     WORL:*) spec=${job#*:}
       ( export EVAL_AGENT=$MTHESIS_ROOT/scripts/eval/wor_official_b2d_agent.py EVAL_AGENT_CONFIG=$WOR_CFG PCLA_ROOT=$PCLA_ROOT ALLOW_NO_FROZEN_BACKBONE=1
         eval_job a9_WOR_${spec%%:*} $WOR_CFG "${spec#*:}" ) ;;
