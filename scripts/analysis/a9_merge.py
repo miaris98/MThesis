@@ -39,7 +39,9 @@ ARMS = [(r"^a9_E15_", "E15"), (r"^a9_WOR_", "WOR"), (r"^j20_", "J20"), (r"^j18_"
         (r"^j18H_", "J18H"), (r"^j([1-9])s(\d\d)_", None), (r"^k(\d\d)_", None), (r"^a28m18_", "J18med"),
         # A36 weight-space merges of E e15 and J (scripts/training/a36_merge_checkpoints.py): alpha 0.25 / 0.5 / 0.75 with J seed 0,
         # the mean of J seeds 0-3, and E + that soup at 0.5
-        (r"^a36m25_", "M25"), (r"^a36m50_", "M50"), (r"^a36m75_", "M75"), (r"^a36soup_", "MSOUP"), (r"^a36esoup_", "MESOUP")]
+        (r"^a36m25_", "M25"), (r"^a36m50_", "M50"), (r"^a36m75_", "M75"), (r"^a36soup_", "MSOUP"), (r"^a36esoup_", "MESOUP"),
+        # finer interpolation (S-126): alpha 0.10 / 0.15 / 0.35 with J seed 0, E + the J soup at alpha 0.25 / 0.15 (`a36es25_`, `a36es15_`)
+        (r"^a36m10_", "M10"), (r"^a36m15_", "M15"), (r"^a36m35_", "M35"), (r"^a36es25_", "MES25"), (r"^a36es15_", "MES15")]
 
 
 def arm_of(name: str):
