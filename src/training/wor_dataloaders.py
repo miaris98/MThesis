@@ -44,9 +44,15 @@ def _wrap_loader(dataset, batch_size: int, num_workers: int, is_train: bool,
     if num_workers > 0:
         kwargs["prefetch_factor"] = 4
     frac = float(os.environ.get("WOR_SWERVE_FRAC", "0") or 0)
+    bfrac = float(os.environ.get("WOR_BRAKE_FRAC", "0") or 0)
+    if is_train and frac > 0 and bfrac > 0:
+        raise ValueError("--swerve_frac and --brake_frac both set: one sampler per run (one change per arm)")
     if is_train and frac > 0:
         kwargs.pop("shuffle")
         kwargs["sampler"] = swerve_sampler(dataset, frac, seed)  # TODO A16, arm K (src/training/swerve.py)
+    elif is_train and bfrac > 0:
+        kwargs.pop("shuffle")
+        kwargs["sampler"] = swerve_sampler(dataset, bfrac, seed, key="brake_onset")  # TODO A38 step 2: the braking side of arm K
     return DataLoader(dataset, **kwargs)
 
 

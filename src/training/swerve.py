@@ -35,7 +35,34 @@ def swerve_flags(shifts, window: int) -> np.ndarray:
     return flags
 
 
-def swerve_sampler(dataset, frac: float, seed: Optional[int] = None) -> WeightedRandomSampler:
+def anticipated_targets(target_speeds, k: int):
+    """TODO A38 step 1: v*(t) = min over the next k frames (inclusive) of the expert's target speed; k = 0 returns the targets unchanged. None entries stay None
+    and are skipped in the minimum. Frames are the dataset's 4 Hz measurement frames (k = 4 is one second)."""
+    n = len(target_speeds)
+    out = list(target_speeds)
+    if k <= 0:
+        return out
+    for i in range(n):
+        if target_speeds[i] is None:
+            continue
+        window = [target_speeds[j] for j in range(i, min(n, i + k + 1)) if target_speeds[j] is not None]
+        out[i] = min(window)
+    return out
+
+
+def brake_onset_flags(target_speeds, window: int = 8, drop: float = 4.0) -> np.ndarray:
+    """TODO A38 step 2: frames in the `window` frames (2 s at 4 Hz) before the expert's target speed falls by >= `drop` m/s below its current value."""
+    n = len(target_speeds)
+    flags = np.zeros(n, dtype=bool)
+    for i in range(n):
+        if target_speeds[i] is None:
+            continue
+        future = [target_speeds[j] for j in range(i + 1, min(n, i + window + 1)) if target_speeds[j] is not None]
+        flags[i] = bool(future) and min(future) <= target_speeds[i] - drop
+    return flags
+
+
+def swerve_sampler(dataset, frac: float, seed: Optional[int] = None, key: str = "swerve") -> WeightedRandomSampler:
     """Draws swerve frames as `frac` of the epoch, everything else uniformly.
 
     Moderate on purpose (the TODO's ~10%): training mostly on obstacle frames risks false overtakes (swerving
@@ -45,15 +72,15 @@ def swerve_sampler(dataset, frac: float, seed: Optional[int] = None) -> Weighted
     """
     base = dataset.dataset if isinstance(dataset, Subset) else dataset
     idx = dataset.indices if isinstance(dataset, Subset) else range(len(base))
-    flag = np.array([bool(isinstance(base.samples[i], dict) and base.samples[i].get("swerve")) for i in idx])
+    flag = np.array([bool(isinstance(base.samples[i], dict) and base.samples[i].get(key)) for i in idx])
     n, k = len(flag), int(flag.sum())
     if k == 0 or k == n or k / n >= frac:
         w = np.ones(n)
-        note = "natural share already at or above target" if k else "no swerve frames found"
+        note = "natural share already at or above target" if k else f"no {key} frames found"
     else:
         w = np.where(flag, frac / k, (1.0 - frac) / (n - k))
         note = f"x{(frac / k) / ((1.0 - frac) / (n - k)):.1f} weight on swerve frames"
-    print(f"--> Swerve sampler: {k}/{n} train frames flagged ({100 * k / max(n, 1):.1f}%), "
+    print(f"--> {key} sampler: {k}/{n} train frames flagged ({100 * k / max(n, 1):.1f}%), "
           f"target {100 * frac:.0f}% of draws ({note}).", flush=True)
     gen = make_generator(seed) if seed is not None else None
     return WeightedRandomSampler(torch.as_tensor(w, dtype=torch.double), num_samples=n, replacement=True,

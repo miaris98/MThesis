@@ -142,6 +142,9 @@ def parse_args():
     parser.add_argument("--pooled_cache", type=str, default=None,
                         help="TODO A59: comma-separated prefixes of pooled-token caches built by build_pooled_cache.py (one per data dir). The head reads the frozen encoder's map "
                              "already pooled to its --vision_grid, so no JPEG is decoded and no encoder runs: exact (identity pooling) for frozen-backbone runs without colour augmentation.")
+    parser.add_argument("--anticipate_s", type=float, default=0.0, help="TODO A38 step 1: the target-speed label becomes the minimum of the expert's target speed over the next S seconds (0 = the expert's current target); try 0.5 / 1 / 2")
+    parser.add_argument("--brake_frac", type=float, default=0.0, help="TODO A38 step 2: oversample brake-onset frames (the --brake_window frames before the expert's target speed drops >= 4 m/s) as this fraction of each epoch; exclusive with --swerve_frac")
+    parser.add_argument("--brake_window", type=int, default=8, help="frames (4 Hz) before a speed drop that count as brake onset")
     parser.add_argument("--speed_lambda_over", type=float, default=0.0, help="TODO A39: weight of the expected squared OVERSHOOT of the speed posterior against the expert's speed (a collision costs x0.6) next to the two-hot CE; 0 = plain CE")
     parser.add_argument("--speed_lambda_under", type=float, default=0.0, help="TODO A39: weight of the expected squared undershoot (slowness is cheap until the time cap); use 2-4x less than --speed_lambda_over")
     parser.add_argument("--compile_model", type=int, default=0, help="Wrap the policy in torch.compile - trades a one-off compilation on the first epoch for faster steps afterwards, so it only pays off over a long run (1=True, 0=False)")
@@ -163,6 +166,9 @@ def main():
     os.environ["WOR_ROUTE_KEY"] = args.route_key  # read by WorldOnRailsDataset; inherited by DataLoader workers
     os.environ["WOR_SWERVE_FRAC"] = str(args.swerve_frac)      # read by the train loader (wor_dataloaders.swerve_sampler)
     os.environ["WOR_SWERVE_WINDOW"] = str(args.swerve_window)  # read when the dataset indexes routes
+    os.environ["WOR_ANTICIPATE_S"] = str(args.anticipate_s)    # TODO A38 step 1 (read when the dataset indexes routes)
+    os.environ["WOR_BRAKE_FRAC"] = str(args.brake_frac)        # TODO A38 step 2 (read by the train loader)
+    os.environ["WOR_BRAKE_WINDOW"] = str(args.brake_window)
     if args.pooled_cache:
         import json
         os.environ["WOR_POOLED_CACHE"] = args.pooled_cache      # read by WorldOnRailsDataset (TODO A59)

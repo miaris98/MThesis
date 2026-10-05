@@ -90,3 +90,30 @@ def test_sampler_is_seeded():
     a = list(iter(swerve_sampler(_Fake(flags), 0.1, seed=3)))
     b = list(iter(swerve_sampler(_Fake(flags), 0.1, seed=3)))
     assert a == b
+
+
+def test_anticipated_targets_a38():
+    from src.training.swerve import anticipated_targets
+    ts = [10.0, 10.0, 10.0, 4.0, 4.0, 10.0, 10.0]
+    assert anticipated_targets(ts, 0) == ts
+    assert anticipated_targets(ts, 2) == [10.0, 4.0, 4.0, 4.0, 4.0, 10.0, 10.0]      # min over the next 2 frames (inclusive)
+    assert anticipated_targets([5.0, None, 3.0], 2) == [3.0, None, 3.0]              # unreadable frames are skipped, not zeros
+
+
+def test_brake_onset_flags_a38():
+    from src.training.swerve import brake_onset_flags
+    ts = [10.0] * 10 + [4.0] * 5                       # drops by 6 m/s at frame 10
+    f = brake_onset_flags(ts, window=3, drop=4.0)
+    assert list(f[:7]) == [False] * 7 and list(f[7:10]) == [True] * 3 and not f[10:].any()
+
+
+def test_sampler_key_selects_the_flag():
+    import numpy as np
+    from src.training.swerve import swerve_sampler
+
+    class DS:
+        samples = [{"swerve": False, "brake_onset": i < 10} for i in range(100)]
+        def __len__(self): return 100
+    s = swerve_sampler(DS(), 0.4, seed=0, key="brake_onset")
+    draws = np.array(list(s))
+    assert 0.3 < (draws < 10).mean() < 0.5               # ~40% of draws are flagged frames although they are 10% of the data

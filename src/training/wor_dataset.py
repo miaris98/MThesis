@@ -22,7 +22,7 @@ import torch
 from torch.utils.data import Dataset
 
 from src.config.camera import preprocess_rgb
-from src.training.swerve import route_shift, swerve_flags
+from src.training.swerve import anticipated_targets, brake_onset_flags, route_shift, swerve_flags
 
 
 def _camera_offset_matrix(translation_y: float, rotation_yaw_deg: float) -> np.ndarray:
@@ -298,6 +298,11 @@ class WorldOnRailsDataset(Dataset):
                 parsed[i] = None
         # TODO A16 (arm K): only marked here; the train loader oversamples them when --swerve_frac > 0 (src/training/swerve.py)
         swerve = swerve_flags([p and p["route_shift"] for p in parsed], int(os.environ.get("WOR_SWERVE_WINDOW", "8")))
+        # TODO A38: anticipatory speed labels (step 1, WOR_ANTICIPATE_S seconds) and brake-onset frames for the sampler (step 2, WOR_BRAKE_FRAC)
+        _ts = [p["target_speed"] if p else None for p in parsed]
+        _ant_k = int(round(float(os.environ.get("WOR_ANTICIPATE_S", "0") or 0) * 4))
+        _ant = anticipated_targets(_ts, _ant_k)
+        _onset = brake_onset_flags(_ts, int(os.environ.get("WOR_BRAKE_WINDOW", "8")))
 
         for i in range(5, num_frames - pred_len - 2):
             cur = parsed[i]
@@ -330,9 +335,10 @@ class WorldOnRailsDataset(Dataset):
                 "speed": cur["speed"],
                 "command": cur["command"],
                 "route": cur["route"],
-                "target_speed": cur["target_speed"],
+                "target_speed": _ant[i] if _ant_k > 0 else cur["target_speed"],
                 "waypoints": waypoints,
-                "swerve": bool(swerve[i])
+                "swerve": bool(swerve[i]),
+                "brake_onset": bool(_onset[i])
             })
 
             # Recovery-augmentation sample: a second, genuinely re-rendered camera at this
@@ -357,10 +363,11 @@ class WorldOnRailsDataset(Dataset):
                         "speed": cur["speed"],
                         "command": cur["command"],
                         "route": aug_route,
-                        "target_speed": cur["target_speed"],
+                        "target_speed": _ant[i] if _ant_k > 0 else cur["target_speed"],
                         "waypoints": aug_waypoints,
                         "is_recovery_augmented": True,
-                        "swerve": bool(swerve[i])
+                        "swerve": bool(swerve[i]),
+                        "brake_onset": bool(_onset[i])
                     })
 
     def __len__(self) -> int:
