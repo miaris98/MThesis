@@ -127,3 +127,25 @@ def test_target_speed_head_gradients_flow():
     target_speed_loss(logits, torch.tensor([0.0, 4.0, 10.0, 20.0])).backward()
     grads = [p.grad for p in head.net.parameters() if p.grad is not None]
     assert grads and any(g.abs().sum() > 0 for g in grads)
+
+
+def test_asymmetric_ordinal_speed_loss_a39():
+    """TODO A39: lambdas 0 = the plain CE; an overshoot costs more than an equal undershoot when lambda_over > lambda_under."""
+    import torch
+    from src.models.world_on_rails.aux_heads import TARGET_SPEEDS, target_speed_loss
+    speeds = torch.tensor([8.0, 8.0])
+    fast = torch.full((1, 8), -10.0); fast[0, 5] = 10.0     # confident 16 m/s
+    slow = torch.full((1, 8), -10.0); slow[0, 1] = 10.0     # confident 4 m/s
+    logits = torch.cat([fast, slow], 0)
+    base = target_speed_loss(logits, speeds)
+    assert torch.equal(base, target_speed_loss(logits, speeds, 0.0, 0.0))
+    over_only = target_speed_loss(logits[:1], speeds[:1], lambda_over=1.0) - target_speed_loss(logits[:1], speeds[:1])
+    under_only = target_speed_loss(logits[1:], speeds[1:], lambda_over=1.0) - target_speed_loss(logits[1:], speeds[1:])
+    assert over_only > 0.1 and abs(float(under_only)) < 1e-6          # lambda_over penalises only the fast side
+    asym = target_speed_loss(logits[:1], speeds[:1], 1.0, 0.25) - target_speed_loss(logits[:1], speeds[:1])
+    asym_u = target_speed_loss(logits[1:], speeds[1:], 1.0, 0.25) - target_speed_loss(logits[1:], speeds[1:])
+    assert asym_u > 0 and asym > 5 * asym_u                           # both sides now cost something; the overshoot 16 vs 8 m/s costs far more than 4 vs 8
+    # the extra term has a gradient that pushes the posterior toward slower bins
+    lg = fast.clone().requires_grad_(True)
+    target_speed_loss(lg, speeds[:1], lambda_over=1.0).backward()
+    assert lg.grad is not None and torch.isfinite(lg.grad).all()

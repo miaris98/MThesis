@@ -149,10 +149,21 @@ def two_hot_target_speed(speeds: torch.Tensor,
     return out
 
 
-def target_speed_loss(logits: torch.Tensor, speeds: torch.Tensor) -> torch.Tensor:
-    """Soft cross-entropy against the two-hot encoding of the expert's target speed."""
+def target_speed_loss(logits: torch.Tensor, speeds: torch.Tensor, lambda_over: float = 0.0, lambda_under: float = 0.0) -> torch.Tensor:
+    """Soft cross-entropy against the two-hot encoding of the expert's target speed.
+
+    TODO A39 (asymmetric ordinal speed loss): `lambda_over` / `lambda_under` add the expected squared overshoot / undershoot of the posterior against the expert's
+    speed, sum_j p_j relu(v_j - v*)^2 / v_max^2 (and the mirror), because a collision multiplies the route score by 0.6 while slowness is free until the time cap and a
+    wrong bin is not equally wrong at any distance. Both 0 (default) is the plain cross-entropy, bit-identical to every earlier run; the decode stays the mean."""
     target = two_hot_target_speed(speeds, bins=None)
-    return -(target * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
+    loss = -(target * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
+    if lambda_over > 0 or lambda_under > 0:
+        bins = torch.tensor(TARGET_SPEEDS, dtype=logits.dtype, device=logits.device)
+        p = F.softmax(logits, dim=-1)
+        diff = bins.unsqueeze(0) - speeds.reshape(-1, 1).to(logits.dtype)       # (B, bins): + = the bin is faster than the expert
+        vmax2 = float(bins.max()) ** 2
+        loss = loss + lambda_over * (p * F.relu(diff) ** 2).sum(-1).mean() / vmax2 + lambda_under * (p * F.relu(-diff) ** 2).sum(-1).mean() / vmax2
+    return loss
 
 
 class DenseDecoder(nn.Module):

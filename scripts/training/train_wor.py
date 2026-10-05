@@ -142,6 +142,8 @@ def parse_args():
     parser.add_argument("--pooled_cache", type=str, default=None,
                         help="TODO A59: comma-separated prefixes of pooled-token caches built by build_pooled_cache.py (one per data dir). The head reads the frozen encoder's map "
                              "already pooled to its --vision_grid, so no JPEG is decoded and no encoder runs: exact (identity pooling) for frozen-backbone runs without colour augmentation.")
+    parser.add_argument("--speed_lambda_over", type=float, default=0.0, help="TODO A39: weight of the expected squared OVERSHOOT of the speed posterior against the expert's speed (a collision costs x0.6) next to the two-hot CE; 0 = plain CE")
+    parser.add_argument("--speed_lambda_under", type=float, default=0.0, help="TODO A39: weight of the expected squared undershoot (slowness is cheap until the time cap); use 2-4x less than --speed_lambda_over")
     parser.add_argument("--compile_model", type=int, default=0, help="Wrap the policy in torch.compile - trades a one-off compilation on the first epoch for faster steps afterwards, so it only pays off over a long run (1=True, 0=False)")
     parser.add_argument("--kill_stale", type=int, default=1, help="On startup, terminate SUSPENDED train_wor.py processes still pinning VRAM (what Ctrl+Z leaves behind). Running instances are reported but never killed (1=True, 0=False)")
     parser.add_argument("--auto_batch_size", type=int, default=0, help="Probe the largest batch size that fits in available VRAM instead of using --batch_size directly (1=True, 0=False)")
@@ -339,6 +341,7 @@ def main():
         color_aug_prob=args.color_aug_prob,
         max_batches=args.max_batches,
         target_speed_loss_weight=args.target_speed_loss_weight,
+        speed_loss_kwargs={"lambda_over": args.speed_lambda_over, "lambda_under": args.speed_lambda_under},
         wp_loss_weight=args.wp_loss_weight,
         q_loss_weight=args.q_loss_weight,
         lateral_loss_weight=args.lateral_loss_weight,

@@ -113,6 +113,7 @@ class WorldOnRailsTrainer:
         val_every: int = 1,
         max_batches: int = 0,
         target_speed_loss_weight: float = 0.0,
+        speed_loss_kwargs: Optional[dict] = None,
         grad_clip: float = 5.0,
         warmup_frac: float = 0.05,
         decay_gates_and_norms: bool = False,
@@ -138,6 +139,7 @@ class WorldOnRailsTrainer:
         self.use_amp = use_amp and (device == "cuda")
         self.wp_loss_weight = wp_loss_weight
         self.target_speed_loss_weight = target_speed_loss_weight
+        self.speed_loss_kwargs = dict(speed_loss_kwargs or {})   # TODO A39: lambda_over / lambda_under of the asymmetric ordinal term
         # Datasets without precomputed Q-values (e.g. PDM-Lite) leave target_q at
         # zero, so q_loss_weight defaults to 0 to avoid supervising toward zero.
         self.q_loss_weight = q_loss_weight
@@ -362,7 +364,7 @@ class WorldOnRailsTrainer:
                     ts_target = batch.get("target_speed")
                     if ts_target is not None:
                         ts_loss = target_speed_loss(
-                            out["target_speed_logits"], ts_target.to(self.device))
+                            out["target_speed_logits"], ts_target.to(self.device), **self.speed_loss_kwargs)
                         total_loss = total_loss + self.target_speed_loss_weight * ts_loss
                         losses["target_speed"] = ts_loss
 
