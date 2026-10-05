@@ -7,8 +7,9 @@ Switched on per eval by environment variables (all unset = the plain mean decode
                                          (the cost of waiting accumulates; the literal q -> 1 limit would read the fastest bin with any mass).
   WOR_CREEP_CLAMP=1                      A50: at speed < 3 m/s with stop mass P(bin 0) >= 0.3 command 0 instead of the mean, so a bimodal stop/go posterior cannot average into a
                                          creep toward the obstacle; released by the stall breaker (standing > 4 s and stop mass < 0.9), re-armed once the car drives again.
-  WOR_CONTACT_REFLEX=1                   A50: a contact signature (speed drop >= 2.5 m/s within 0.25 s while the commanded brake was < 0.5) holds a full brake for 3 s, then
-                                         the clamp above takes over (move again only when the stop mass is < 0.9 after 4 s of standing).
+  WOR_CONTACT_REFLEX=1                   A50: a contact signature - a speed drop >= 2.5 m/s within 0.25 s while the commanded brake was < 0.5, or PUSHING (throttle > 0.3 commanded
+                                         but speed < 0.3 m/s for 1.5 s: wheels against an obstacle; the closed-loop test of S-126 showed J creeping into a parked car for 155 s with no speed
+                                         drop to see) - holds a full brake for 3 s, then the clamp above takes over (move again only when the stop mass is < 0.9 after 4 s of standing).
   WOR_SPEED_SCALE=0.9                    A52: matched-speed control: the plain head's target speed times a constant.
   WOR_TICK_DT=0.05                       agent tick (the Leaderboard calls the agent every simulation tick, 20 Hz).
 
@@ -26,6 +27,7 @@ SLOW_MPS = 3.0
 CONTACT_DROP_MPS = 2.5
 CONTACT_WINDOW_S = 0.25
 CONTACT_HOLD_S = 3.0
+PUSH_THROTTLE, PUSH_SPEED_MPS, PUSH_S = 0.3, 0.3, 1.5
 CLAMP_STOP_MASS = 0.3
 BREAKER_STANDING_S = 4.0
 BREAKER_STOP_MASS = 0.9
@@ -54,6 +56,7 @@ class SafetyLayer:
         self.standing = 0.0
         self.hist: deque = deque()      # (t, speed) of the last CONTACT_WINDOW_S
         self.hold_until = -1.0
+        self.push_s = 0.0
         self.clamp_active = False
         self.released = False
         self.events = {"contacts": 0, "clamp_ticks": 0, "hold_ticks": 0}
@@ -70,7 +73,7 @@ class SafetyLayer:
         print(f"[A50/A57] safety layer: newsvendor={layer.nv} creep_clamp={clamp} contact_reflex={reflex} speed_scale={scale}", flush=True)
         return layer
 
-    def update(self, speed_mps: float, probs: np.ndarray, bins: np.ndarray, mean_mps: float, last_brake: float) -> Tuple[float, bool]:
+    def update(self, speed_mps: float, probs: np.ndarray, bins: np.ndarray, mean_mps: float, last_brake: float, last_throttle: float = 0.0) -> Tuple[float, bool]:
         """One tick -> (target speed in m/s, force a full brake)."""
         self.t += self.dt
         probs = np.asarray(probs, dtype=np.float64)
@@ -87,7 +90,10 @@ class SafetyLayer:
             self.hist.append((self.t, speed_mps))
             while self.hist and self.t - self.hist[0][0] > CONTACT_WINDOW_S:
                 self.hist.popleft()
-            if self.t >= self.hold_until and last_brake < 0.5 and max(s for _, s in self.hist) - speed_mps >= CONTACT_DROP_MPS:
+            self.push_s = self.push_s + self.dt if (last_throttle > PUSH_THROTTLE and speed_mps < PUSH_SPEED_MPS) else 0.0
+            drop = max(s for _, s in self.hist) - speed_mps >= CONTACT_DROP_MPS
+            if self.t >= self.hold_until and ((last_brake < 0.5 and drop) or self.push_s >= PUSH_S):
+                self.push_s = 0.0
                 self.hold_until = self.t + CONTACT_HOLD_S
                 self.clamp_active = True
                 self.released = False

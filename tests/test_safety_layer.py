@@ -106,3 +106,18 @@ def test_policy_act_publishes_debug_and_honours_the_layer(monkeypatch):
     assert m.last_debug["probs"].shape == (8,) and abs(m.last_debug["probs"][0] - 0.5) < 0.01
     assert m.last_debug["target_kmh"] == 0.0                      # clamp: stop mass 0.5 >= 0.3 at 1 m/s
     assert m._safety is not None and m._safety.events["clamp_ticks"] == 1
+
+
+def test_pushing_into_an_obstacle_triggers_the_reflex_without_any_speed_drop():
+    """The S-126 closed-loop finding: J creeps into a parked car for minutes; speed never drops 2.5 m/s, but throttle > 0.3 with no motion is a contact."""
+    L = SafetyLayer(contact_reflex=True, dt=0.05)
+    for _ in range(40):
+        t, brake = L.update(0.1, P(b2=1.0), BINS, 8.0, 0.0, last_throttle=0.6)      # 2 s of full throttle at 0.1 m/s
+        if brake:
+            break
+    assert brake and L.events["contacts"] == 1 and t == 0.0
+    # standing at a red light (no throttle) is not a contact
+    L = SafetyLayer(contact_reflex=True, dt=0.05)
+    for _ in range(200):
+        _, brake = L.update(0.0, P(b0=1.0), BINS, 0.0, 0.0, last_throttle=0.0)
+    assert L.events["contacts"] == 0

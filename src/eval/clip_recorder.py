@@ -26,8 +26,12 @@ def _jpeg(rgb: np.ndarray, width: int = 256, quality: int = 70) -> bytes:
 
 
 class ClipRecorder:
-    def __init__(self, out_dir: str, tag: str, hz: float = 4.0, before_s: float = 6.0, after_s: float = 2.0, tick_dt: float = 0.05, min_gap_s: float = 5.0):
-        self.dir, self.tag, self.after_s, self.min_gap_s = out_dir, tag, after_s, min_gap_s
+    def __init__(self, out_dir: str, tag: str, hz: float = 4.0, before_s: float = 6.0, after_s: float = 2.0, tick_dt: float = 0.05, min_gap_s: float = 20.0,
+                 max_per_kind: int = 6):
+        # min_gap_s per (kind, other actor): a car in continuous contact fires the collision sensor every tick (the S-126 test: 31 clips in 155 s of pushing a parked car);
+        # max_per_kind caps what one route can write
+        self.dir, self.tag, self.after_s, self.min_gap_s, self.max_per_kind = out_dir, tag, after_s, min_gap_s, max_per_kind
+        self.count: Dict[str, int] = {}
         self.every = max(1, round(1.0 / (hz * tick_dt)))
         self.buf: deque = deque(maxlen=max(2, int(before_s * hz)))
         self.pending: List[Dict] = []
@@ -49,9 +53,11 @@ class ClipRecorder:
             self.pending.remove(p)
 
     def trigger(self, t: float, kind: str, event: Dict) -> bool:
-        if t - self.last_trigger.get(kind, -1e9) < self.min_gap_s:
+        key = f"{kind}:{event.get('other_id', '')}"
+        if t - self.last_trigger.get(key, -1e9) < self.min_gap_s or self.count.get(kind, 0) >= self.max_per_kind:
             return False
-        self.last_trigger[kind] = t
+        self.last_trigger[key] = t
+        self.count[kind] = self.count.get(kind, 0) + 1
         self.pending.append({"t": t, "kind": kind, "event": event, "before": list(self.buf), "after": []})
         return True
 

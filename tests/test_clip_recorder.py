@@ -34,3 +34,14 @@ def test_clip_is_written_on_close_when_the_route_ends_inside_the_after_window(tm
     rec.trigger(2.9, "stuck", {})
     rec.close()
     assert len(rec.written) == 1
+
+
+def test_continuous_contact_does_not_write_a_clip_every_few_seconds(tmp_path):
+    rec = ClipRecorder(str(tmp_path), "r", before_s=1.0, after_s=0.5)
+    img = np.zeros((32, 64, 3), np.uint8)
+    for i in range(20 * 120):                              # 120 s at 20 Hz of a collision sensor that fires every tick
+        t = i * 0.05
+        rec.push(t, img, {})
+        rec.trigger(t, "vehicle", {"other_id": 7})
+    rec.close()
+    assert 5 <= len(rec.written) <= 6                      # one per 20 s for the same actor, capped at 6

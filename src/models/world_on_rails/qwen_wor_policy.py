@@ -420,7 +420,8 @@ class QwenWorldOnRailsPolicy(nn.Module):
                 self._safety, self._safety_ready, self._last_brake = SafetyLayer.from_env(), True, 0.0
             probs = out["target_speed_logits"][0].float().softmax(-1).cpu().numpy()
             if self._safety is not None:
-                tgt_mps, force_brake = self._safety.update(speed_mps, probs, self.target_speed_head.bins.cpu().numpy(), target_speed_kmh / 3.6, self._last_brake)
+                tgt_mps, force_brake = self._safety.update(speed_mps, probs, self.target_speed_head.bins.cpu().numpy(), target_speed_kmh / 3.6,
+                                                         self._last_brake, getattr(self, "_last_throttle", 0.0))
                 target_speed_kmh = 3.6 * tgt_mps
             self.last_debug = {"probs": probs, "waypoints": wps, "target_kmh": target_speed_kmh, "force_brake": bool(self._safety is not None and force_brake)}
             # Published so the eval HUD and telemetry report the live decision rather
@@ -446,5 +447,5 @@ class QwenWorldOnRailsPolicy(nn.Module):
         throttle, brake = tfpp_brake_override(throttle, brake, speed_mps, target_speed_kmh)
         if getattr(self, "last_debug", None) is not None and self.last_debug["force_brake"]:
             throttle, brake = 0.0, 1.0                                   # A50 contact reflex hold
-        self._last_brake = float(brake)
+        self._last_brake, self._last_throttle = float(brake), float(throttle)
         return steer, throttle, brake
