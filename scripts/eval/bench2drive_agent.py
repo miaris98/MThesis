@@ -133,6 +133,8 @@ class WorB2DAgent(AutonomousAgent):
         )
         self._route_idx = 0
         self._route_locations = None  # built on first step, once the map is certainly loaded
+        # the evaluator appends '+<save_name>' per route (see above): the last suffix is the current route (A44 clip names)
+        self._route_tag = path_to_conf_file.rsplit("+", 1)[-1] if "+" in path_to_conf_file else "route"
 
     def sensors(self):
         return self._inner.sensors()
@@ -201,7 +203,57 @@ class WorB2DAgent(AutonomousAgent):
             control = self._creep(input_data, control)
         if os.environ.get("B2D_TELEMETRY_DIR"):
             self._log_telemetry(hero, control, timestamp)
+        if os.environ.get("B2D_CLIPS_DIR") and not getattr(self, "_clips_failed", False):
+            try:  # a recorder bug must never cost a route
+                self._clip_step(hero, rgb, control, timestamp, input_data)
+            except Exception as e:
+                self._clips_failed = True
+                print(f"[A44] clip recorder disabled for this route: {e!r}", flush=True)
         return control
+
+    # ---- A44 collision-clip recorder (B2D_CLIPS_DIR); off by default ------------------------------------------------------------
+    # A 6 s ring buffer at 4 Hz (frame, speed, control, speed posterior, target speed, waypoints) written as one npz per collision / long stand-still,
+    # with the other actors' poses for analysis only (never an input). Loader and format: src/eval/clip_recorder.py.
+    def _clip_step(self, hero, rgb, control, timestamp, input_data):
+        import queue
+        from src.eval.clip_recorder import ClipRecorder
+        if getattr(self, "_clips", None) is None:
+            self._clips = ClipRecorder(os.environ["B2D_CLIPS_DIR"], f"{self._route_tag}_h{hero.id}")
+            self._clip_q = queue.Queue()
+            world = CarlaDataProvider.get_world()
+            self._clip_sensor = world.spawn_actor(world.get_blueprint_library().find("sensor.other.collision"), carla.Transform(), attach_to=hero)
+
+            def on_collision(ev, hero=hero, q=self._clip_q):
+                hv, ov = hero.get_velocity(), ev.other_actor.get_velocity()
+                rel, ht = ev.other_actor.get_location() - hero.get_location(), hero.get_transform()
+                fwd, right = ht.get_forward_vector(), ht.get_right_vector()
+                kind = "vehicle" if ev.other_actor.type_id.startswith("vehicle") else "walker" if ev.other_actor.type_id.startswith("walker") else "layout"
+                q.put((kind, {"other_type": ev.other_actor.type_id, "other_id": ev.other_actor.id, "ego_speed": (hv.x ** 2 + hv.y ** 2) ** 0.5,
+                              "other_speed": (ov.x ** 2 + ov.y ** 2) ** 0.5, "other_rel_fwd": rel.x * fwd.x + rel.y * fwd.y,
+                              "other_rel_right": rel.x * right.x + rel.y * right.y, "ego_xy": [ht.location.x, ht.location.y, ht.rotation.yaw]}))
+            self._clip_sensor.listen(on_collision)
+            self._clip_stand = 0.0
+        spd = input_data["speed"][1]
+        spd = float(spd.get("speed", 0.0)) if isinstance(spd, dict) else float(spd)
+        dbg = getattr(getattr(self._inner, "net", None), "last_debug", None) or {}
+        self._clips.push(timestamp, rgb, {"speed": spd, "throttle": float(control.throttle), "brake": float(control.brake), "steer": float(control.steer),
+                                          "target_kmh": dbg.get("target_kmh"), "probs": None if dbg.get("probs") is None else [round(float(x), 4) for x in dbg["probs"]],
+                                          "waypoints": None if dbg.get("waypoints") is None else [[round(float(a), 2) for a in w] for w in dbg["waypoints"]],
+                                          "force_brake": dbg.get("force_brake")})
+        self._clip_stand = self._clip_stand + 0.05 if spd < 0.1 else 0.0
+        events = []
+        while not self._clip_q.empty():
+            events.append(self._clip_q.get())
+        if self._clip_stand > 60.0:
+            events.append(("stuck", {"standing_s": self._clip_stand})); self._clip_stand = 0.0
+        for kind, ev in events:
+            actors = []
+            _all = CarlaDataProvider.get_world().get_actors()
+            for a in list(_all.filter("*vehicle*")) + list(_all.filter("*walker*")):
+                if a.id != hero.id and a.get_location().distance(hero.get_location()) < 50.0:
+                    t, v = a.get_transform(), a.get_velocity()
+                    actors.append({"type": a.type_id, "id": a.id, "xy": [t.location.x, t.location.y, t.rotation.yaw], "speed": (v.x ** 2 + v.y ** 2) ** 0.5})
+            self._clips.trigger(timestamp, kind, {**ev, "actors": actors})
 
     def _creep(self, input_data, control):
         """TF++ stuck recovery (sensor_agent.py): after stuck_threshold=1100 ticks below 0.1 m/s,
@@ -258,6 +310,12 @@ class WorB2DAgent(AutonomousAgent):
                              f"{control.throttle:.2f}", f"{control.brake:.2f}", f"{control.steer:.3f}"])
 
     def destroy(self):
+        if getattr(self, "_clips", None) is not None:
+            try:
+                self._clip_sensor.stop(); self._clip_sensor.destroy()
+                self._clips.close()
+            except Exception:
+                pass
         if getattr(self, "_coll_sensor", None) is not None:
             try:
                 self._coll_sensor.stop(); self._coll_sensor.destroy()
