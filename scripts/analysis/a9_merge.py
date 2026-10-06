@@ -42,6 +42,11 @@ ARMS = [(r"^a9_E15_", "E15"), (r"^a9_WOR_", "WOR"), (r"^j20_", "J20"), (r"^j18_"
         (r"^a36m25_", "M25"), (r"^a36m50_", "M50"), (r"^a36m75_", "M75"), (r"^a36soup_", "MSOUP"), (r"^a36esoup_", "MESOUP"),
         # finer interpolation (S-126): alpha 0.10 / 0.15 / 0.35 with J seed 0, E + the J soup at alpha 0.25 / 0.15 (`a36es25_`, `a36es15_`)
         (r"^a36m10_", "M10"), (r"^a36m15_", "M15"), (r"^a36m35_", "M35"), (r"^a36es25_", "MES25"), (r"^a36es15_", "MES15")]
+# 2026-10-06 (D2): lane labels are `<label>_n<box>_<port>_x` (gen_lanes.py): J / E15 with the A50 / A57 / A52 switches, the M25 repeat and the finer merges re-run on the new boxes,
+# and the head-only arms trained on the pooled cache (jc_s0 = the J-cache control, a39 / tsw / a15 / a38 arms, `_s1` = training seed 1)
+for _lab in ("j_a50", "j_a57", "j_a52_08", "j_a52_09", "e15_a50", "e15_a57", "m25r", "m35", "m15", "m10", "s15", "s25", "jc_s0", "jc_s1", "a39_o1_u025", "a39_o1_u025_s1",
+             "a39_o2_u05", "tsw1", "tsw1_s1", "tsw3", "a15_plain", "a15_plain_s1", "a15_casc", "a38_ant10", "m49", "m49_s1", "e15_ss08", "e15_ss09"):
+    ARMS.append((rf"^{_lab}_n", _lab.upper()))
 
 
 def arm_of(name: str):
