@@ -34,7 +34,11 @@ INFRA = ("couldn't be set up", "Simulation crashed", "Agent crashed")
 OBSTACLE_TYPES = ("Accident", "Obstacle", "HazardAtSideLane", "InvadingTurn", "OpensDoor")
 TRAIN_TOWNS = {"Town01", "Town02", "Town03", "Town04", "Town05", "Town10HD"}
 #: result-file label -> arm; first match wins
-ARMS = [(r"^a9_E15_", "E15"), (r"^a9_WOR_", "WOR"), (r"^j20_", "J20"), (r"^j18_", "J18"),
+ARMS = [# 2026-10-10 Epic/Low hybrid 220-route runs (Town03 + routes 26956, 26966, 28048, 25955 at Epic, the rest at Low): J e20 and E15 with the
+        # A50/A57-style switches; the one-factor diagnostics (xplain / xscale / xnews / xboth) are different configurations and stay out
+        (r"^(?:epic220r?_j_|mix_j_)(?!.*_x(?:plain|scale|news|both))", "JHYB"),
+        (r"^(?:epic220r?_e15_|mix_e15_)(?!.*_x(?:plain|scale|news|both))", "E15HYB"),
+        (r"^a9_E15_", "E15"), (r"^a9_WOR_", "WOR"), (r"^j20_", "J20"), (r"^j18_", "J18"),
         # S-112/S-113: arm J seeds 1-3 (j<s>s<epoch>), arm J e18 re-run on the A40 box (j18H), arm K, A28 median decode
         (r"^j18H_", "J18H"), (r"^j([1-9])s(\d\d)_", None), (r"^k(\d\d)_", None), (r"^a28m18_", "J18med"),
         # A36 weight-space merges of E e15 and J (scripts/training/a36_merge_checkpoints.py): alpha 0.25 / 0.5 / 0.75 with J seed 0,

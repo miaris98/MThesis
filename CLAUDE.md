@@ -132,6 +132,7 @@ Claude can now query and manage the Vast.ai fleet directly via CLI tools:
 - **Inspect Fleet**: `python scripts/setup/vast_fleet.py list` probes all active instances (direct and proxy SSH).
 - **Target an Instance**: `python scripts/setup/vast_fleet.py select <idx_or_id>` automatically writes the selected box IP and port into `.remote`.
 - **Search Offers**: `vastai search offers 'gpu_name=RTX_3090 num_gpus>=1 ...'`.
+- **Rental rule (user, 2026-10-10)**: only rent offers whose internet traffic costs are below **$8 per terabyte in both directions** (`inet_up_cost * 1024 < 8` and `inet_down_cost * 1024 < 8`, the offer fields are $/GB). Never rent "deverified" hosts (unverified is fine). Print both costs for every candidate before renting and check the box's CPU model (Ryzen/EPYC over Xeon E5).
 
 ## Evaluation Protocol & Crash Diagnosis (full rules: `.agents/rules/evaluation_protocol_and_crash_diagnosis.md`)
 - **CARLA renders at Epic for any claim**: training data and Bench2Drive's evaluator use CARLA's default (Epic); our historical `-quality-level=Low` segfaults Town03 and is a train/eval rendering mismatch (S-137). Pass `CARLA_QUALITY=Epic`; never pair runs that differ in any simulator flag.
