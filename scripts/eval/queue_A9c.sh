@@ -29,6 +29,7 @@ PCLA_ROOT=${PCLA_ROOT:-$WORKSPACE/PCLA}
 WOR_CFG=$PCLA_ROOT/pcla_agents/wor_pretrained/leaderboard_weights/config_leaderboard.yaml
 OUT=$B2D_OUT
 EXCL=$WORKSPACE/a9_exclude.txt
+CRASH_ATTEMPTS=${CRASH_ATTEMPTS:-4}   # launch attempts at the same progress before a route counts as a crash route
 
 chunk() {  # k use_exclusions(0/1)
   python3 -c '
@@ -63,16 +64,16 @@ eval_job() {  # label ckpt routes
   fi
   while pgrep -f "b2d_guardian.sh ${label}_x " > /dev/null; do
     sleep 60
-    p3=$(grep -a "launch attempt=" "$GUARDIAN_LOGS/${label}_x.log" 2>/dev/null | tail -4 | grep -o "progress=[0-9]*" | sort -u)
+    p3=$(grep -a "launch attempt=" "$GUARDIAN_LOGS/${label}_x.log" 2>/dev/null | tail -$CRASH_ATTEMPTS | grep -o "progress=[0-9]*" | sort -u)
     na=$(grep -a -c "launch attempt=" "$GUARDIAN_LOGS/${label}_x.log" 2>/dev/null)
-    if [ "${na:-0}" -ge 4 ] && [ -n "$p3" ] && [ "$(wc -l <<<"$p3")" = 1 ]; then
+    if [ "${na:-0}" -ge $CRASH_ATTEMPTS ] && [ -n "$p3" ] && [ "$(wc -l <<<"$p3")" = 1 ]; then
       p=${p3#progress=}
       read -r X rest < <(python3 -c 'import sys; r = sys.argv[1].split(","); p = int(sys.argv[2]); print(r[p] if p < len(r) else "", ",".join(r[p + 1:]))' "$routes" "$p")
       [ -n "$X" ] || continue
       kill_tree $(pgrep -f "b2d_guardian.sh ${label}_x ")
       clear_carla_ports $PORT
       echo "$X" >> $EXCL
-      echo "$(date) CRASH ROUTE $X: $label stuck at progress $p for 4 attempts - skipped (added to $EXCL)"
+      echo "$(date) CRASH ROUTE $X: $label stuck at progress $p for $CRASH_ATTEMPTS attempts - skipped (added to $EXCL)"
       if [ -n "$rest" ]; then echo "${label}r $rest" > $OUT/${label}_x.skipped; eval_job ${label}r "$ckpt" "$rest"; fi
       return
     fi

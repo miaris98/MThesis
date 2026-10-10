@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "analysis"))
 from a3_failure_classes import LEAD_FAMILIES, OBSTACLE_FAMILIES, scenario_table  # noqa: E402
 
-CRASH = {27515, 25854, 25896, 25955, 24816}   # routes that kill the CARLA server on every attempt (S-095, S-119)
+CRASH = {27515, 25854, 25896, 25955, 24816}   # crash at -quality-level=Low (S-095, S-119); all but 25955 are Town03, which loads at Epic (S-137)
 
 
 def main():

@@ -82,13 +82,14 @@ AGENT_PYTHONPATH=""
 # concurrently to cut the Bench2Drive comparison's wall time is the whole point, so isolation
 # has to hold from the first concurrent run, not be bolted on after a corrupted run explains why.
 SHIM="$SHIM/$LABEL"
+# CARLA_QUALITY=Epic renders like Bench2Drive's evaluator and carla_garage's data collection (no flag = Epic); Low is our historical default
 XDG_RUNTIME_DIR="/tmp/runtime-carlauser-b2d-${LABEL}"
 mkdir -p "$SHIM" "$XDG_RUNTIME_DIR"
 chown carlauser:carlauser "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 cat > "$SHIM/CarlaUE4.sh" <<SHIMEOF
 #!/usr/bin/env bash
-exec su carlauser -c "export XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR; $REAL_CARLA/CarlaUE4.sh \$* -vulkan -quality-level=Low"
+exec su carlauser -c "export XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR; $REAL_CARLA/CarlaUE4.sh \$* -vulkan -quality-level=${CARLA_QUALITY:-Low}"
 SHIMEOF
 chmod +x "$SHIM/CarlaUE4.sh"
 

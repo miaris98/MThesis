@@ -45,7 +45,7 @@ ARMS = [(r"^a9_E15_", "E15"), (r"^a9_WOR_", "WOR"), (r"^j20_", "J20"), (r"^j18_"
 # 2026-10-06 (D2): lane labels are `<label>_n<box>_<port>_x` (gen_lanes.py): J / E15 with the A50 / A57 / A52 switches, the M25 repeat and the finer merges re-run on the new boxes,
 # and the head-only arms trained on the pooled cache (jc_s0 = the J-cache control, a39 / tsw / a15 / a38 arms, `_s1` = training seed 1)
 for _lab in ("j_a50", "j_a57", "j_a52_08", "j_a52_09", "e15_a50", "e15_a57", "m25r", "m35", "m15", "m10", "s15", "s25", "jc_s0", "jc_s1", "a39_o1_u025", "a39_o1_u025_s1",
-             "a39_o2_u05", "tsw1", "tsw1_s1", "tsw3", "a15_plain", "a15_plain_s1", "a15_casc", "a38_ant10", "m49", "m49_s1", "e15_ss08", "e15_ss09"):
+             "a39_o2_u05", "tsw1", "tsw1_s1", "tsw3", "a15_plain", "a15_plain_s1", "a15_casc", "a38_ant10", "m49", "m49_s1", "e15_ss08", "e15_ss09", "e15_ss08v", "e15_ss09v", "e15r", "j_ss08v", "e15_ss09v2", "j_ss08v2", "e15_ss09v220", "j_ss08v220"):
     ARMS.append((rf"^{_lab}_n", _lab.upper()))
 
 

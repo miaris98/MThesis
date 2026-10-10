@@ -132,3 +132,10 @@ Claude can now query and manage the Vast.ai fleet directly via CLI tools:
 - **Inspect Fleet**: `python scripts/setup/vast_fleet.py list` probes all active instances (direct and proxy SSH).
 - **Target an Instance**: `python scripts/setup/vast_fleet.py select <idx_or_id>` automatically writes the selected box IP and port into `.remote`.
 - **Search Offers**: `vastai search offers 'gpu_name=RTX_3090 num_gpus>=1 ...'`.
+
+## Evaluation Protocol & Crash Diagnosis (full rules: `.agents/rules/evaluation_protocol_and_crash_diagnosis.md`)
+- **CARLA renders at Epic for any claim**: training data and Bench2Drive's evaluator use CARLA's default (Epic); our historical `-quality-level=Low` segfaults Town03 and is a train/eval rendering mismatch (S-137). Pass `CARLA_QUALITY=Epic`; never pair runs that differ in any simulator flag.
+- **A route is not "broken" until shown**: check where it crashes (load vs drive), search the E: archive for past completions, vary one factor at a time on one host (plain vs switches, WoR, Low vs Epic, another host), run `run_town_probe.sh` for load-time crashes. Exclusions are per (agent, switches, rendering), never global by default. Report route coverage with every DS.
+- **Atari numbers against a paper use the paper's protocol** (EZ-V2 400.1: no sticky actions, up to 30 no-op starts); sticky p=0.25 is a separate robustness column (S-138). State the protocol with every score.
+- **Resumable runs are backed up as a pair**: an Atari seed resumes only from `checkpoint_latest.pt` + `replay_latest.npz` (saved together every 2,500 updates). Back up both to E: and HF on a wall-clock schedule (every 30 min), verify sizes against the box (a repeated "WRITE FAILED/MISMATCH" is a failure), give each box its own sync timeout, and do the final save at least 30 min before a destroy deadline (S-140).
+- A paid box with no running job is idle: flag it in the 10-minute check and start the next prepared job.
