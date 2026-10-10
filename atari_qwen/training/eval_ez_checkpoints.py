@@ -66,14 +66,15 @@ def total_updates(a) -> int:
     return online + (int(full_online * a.offline_frac) if a.total_steps >= a.schedule_steps else 0)
 
 
-def score(ck_path: Path, device, proto=None, graph=False):
+def score(ck_path: Path, device, proto=None, graph=False, partial=None):
+    """partial: .npz with the actions of a half-finished eval (written by evaluate every 500 steps, resumed from if present)."""
     ck, a, model, mcts = load_model(ck_path, device, proto and proto["sims"], proto and proto.get("max_depth"))
     t0 = time.time()
     if proto is None:
-        sc = evaluate(model, mcts, a.env_id, device, a.eval_episodes, a.frame_size, a.seed, graph=graph)
+        sc = evaluate(model, mcts, a.env_id, device, a.eval_episodes, a.frame_size, a.seed, graph=graph, resume_path=partial)
     else:
         sc = evaluate(model, mcts, a.env_id, device, proto["episodes"] or a.eval_episodes, a.frame_size, a.seed,
-                      sticky=proto["sticky"], flip_avg=proto["flip"], graph=graph)
+                      sticky=proto["sticky"], flip_avg=proto["flip"], graph=graph, resume_path=partial)
     return ck, a, sc, time.time() - t0
 
 
@@ -124,7 +125,8 @@ def process_run(run_dir: Path, device, state: dict, proto=None, env_steps=None, 
             res = json.loads(out.read_text())
             final_done |= res.get("tag") == "final"
             continue
-        ck, a, sc, secs = score(p, device, proto, graph)
+        partial = ckdir / f"evalpartial_{tag or 'train'}_env{env}_upd{upd}.npz"   # resume point of a half-finished eval
+        ck, a, sc, secs = score(p, device, proto, graph, partial)
         mean, se = float(sc.mean()), float(sc.std() / np.sqrt(len(sc)))
         hns = compute_hns(mean, a.env_id)
         res = {"tag": ck.get("eval_tag") or ("final" if upd >= total_updates(a) else f"env{env}"),
@@ -134,6 +136,7 @@ def process_run(run_dir: Path, device, state: dict, proto=None, env_steps=None, 
             res.update(protocol=tag, episodes=len(sc), simulations=proto["sims"] or a.num_simulations,
                        sticky=proto["sticky"], flip_avg=proto["flip"], median=float(np.median(sc)), tunnel_rate=float(np.mean(sc >= 200)))
         tmp = out.with_suffix(".json.tmp"); tmp.write_text(json.dumps(res, indent=1)); os.replace(tmp, out)
+        partial.unlink(missing_ok=True)   # the result file exists now; the resume point is no longer needed
         print(f"[EVAL{' ' + tag if tag else ''}] {run_dir.name} {res['tag']} env {env} upd {upd}: {mean:.2f} +/- {se:.2f} SE (HNS {hns:.1f}%) "
               f"scores={sc.tolist()} ({secs / 60:.1f} min)", flush=True)
         st = state.setdefault(run_dir.name, {})

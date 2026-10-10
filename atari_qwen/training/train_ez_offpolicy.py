@@ -197,11 +197,15 @@ def run_search(model, mcts: GumbelMCTS, obs: torch.Tensor, add_noise: bool, chun
 
 @torch.no_grad()
 def evaluate(model, mcts, env_id: str, device, episodes: int, frame_size: int, seed: int,
-             max_steps: int = 27_000, sticky: float = 0.0, flip_avg: bool = False, graph: bool = False) -> np.ndarray:
+             max_steps: int = 27_000, sticky: float = 0.0, flip_avg: bool = False, graph: bool = False,
+             resume_path=None) -> np.ndarray:
     """One full-game episode (no episodic life, raw reward) per parallel env, search without noise.
     sticky > 0: ALE sticky actions with that probability (B2's robustness protocol; off for Atari-100k).
     flip_avg: average the root with its mirror image (run_search's flip_perm, TODO B26 step 0).
-    graph: replay the search from a CUDA graph (GraphedSearch, TODO B23; same results, far fewer launches)."""
+    graph: replay the search from a CUDA graph (GraphedSearch, TODO B23; same results, far fewer launches).
+    resume_path: an .npz that holds every action taken so far (the policy is stateless per step, so a game is fixed by its seed
+    and its actions). It is rewritten every 500 steps; a restart replays those actions through the envs (no model calls, minutes
+    not hours) and continues from there. The caller deletes it once the result file exists."""
     model.eval()
     graphed = GraphedSearch(mcts, model) if graph and device.type == "cuda" else None
     envs = make_vector_atari_envs(env_id, num_envs=episodes, seed=seed + 10_000, clip_reward=False,
@@ -216,13 +220,56 @@ def evaluate(model, mcts, env_id: str, device, episodes: int, frame_size: int, s
         probe.close()
     scores = np.zeros(episodes)
     finished = np.zeros(episodes, dtype=bool)
-    for _ in range(max_steps):
+    actions = []                                       # one row of per-env actions per step, for the resume file
+    start = 0
+    meta = np.array([episodes, seed, max_steps, int(sticky * 1000)])
+    if resume_path is not None and Path(resume_path).exists():
+        try:
+            z = np.load(resume_path)
+            if np.array_equal(z["meta"], meta):
+                past = z["actions"]
+                t_rp = time.time()
+                for step in range(len(past)):          # replay: the same env code path as the live loop, no search
+                    obs, r, term, trunc, _ = envs.step(past[step].astype(np.int64))
+                    scores += np.where(finished, 0.0, r)
+                    finished |= np.logical_or(term, trunc)
+                actions = [row for row in past]
+                start = len(past)
+                print(f"  eval resumed from {resume_path}: replayed {start} steps in {(time.time() - t_rp) / 60:.1f} min, "
+                      f"games over {int(finished.sum())}/{episodes}", flush=True)
+            else:
+                print("  eval resume file does not match this protocol; starting from step 0", flush=True)
+        except Exception as ex:
+            print(f"  eval resume file unusable ({ex}); starting from step 0", flush=True)
+            actions, start = [], 0
+            scores = np.zeros(episodes); finished = np.zeros(episodes, dtype=bool)
+            obs, _ = envs.reset(seed=seed + 10_000)
+    t_eval = time.time()
+    for step in range(start, max_steps):
+        if finished.all():
+            break
+        # TODO B-eval-speed (tried, ruled out 2026-10-08): searching only the still-running games (instead of all `episodes`
+        # every step) to skip wasted work on finished games was NOT bit-identical and was not even faster: a smaller batch
+        # picks a different cuDNN conv algorithm, the tiny float rounding difference flips an argmax at some close decision,
+        # and the game's subsequent trajectory diverges from there (measured: one episode's score 107 vs 377, mean -18%,
+        # wall time x1.1 slower, not faster, because of extra CUDA-graph captures per batch size). Keep the full batch.
         _, _, a = run_search(model, mcts, to_input(obs, device), add_noise=False, flip_perm=perm, graphed=graphed)
+        actions.append(np.asarray(a, dtype=np.int16))
         obs, r, term, trunc, _ = envs.step(a)
         scores += np.where(finished, 0.0, r)
         finished |= np.logical_or(term, trunc)
         if finished.all():
             break
+        if step % 500 == 499:   # progress for ETAs: the loop ends when every game is over or at max_steps
+            el = time.time() - t_eval
+            rate = (step + 1 - start) / el
+            print(f"  eval progress: step {step + 1}/{max_steps}, games over {int(finished.sum())}/{episodes}, "
+                  f"{rate:.2f} steps/s, {el / 60:.1f} min elapsed, worst-case end in "
+                  f"{(max_steps - step - 1) / rate / 60:.0f} min", flush=True)
+            if resume_path is not None:
+                tmp = Path(str(resume_path) + ".tmp.npz")
+                np.savez(tmp, actions=np.stack(actions), meta=meta)
+                os.replace(tmp, resume_path)
     envs.close()
     if graphed is not None and graphed.fallbacks:
         print(f"  graphed search: {graphed.fallbacks} of {graphed.calls} searches exceeded the depth bound (eager fallback)", flush=True)
@@ -351,6 +398,8 @@ def train(args):
     upd_credit = 0.0
     horizon = K + TD
     stepped = False
+    gn_hot = 0
+    nan_skips = 0                                                   # updates skipped by --nan-guard (non-finite gradient norm)
 
     while updates < total_updates:
         # ---------------- collect (stops at total_steps; the rest is offline training) ----------
@@ -469,16 +518,26 @@ def train(args):
                 wloss = (isw_ * loss).mean() / K                           # EZ-V2 gradient_scale = 1/K
             opt.zero_grad(set_to_none=True)
             wloss.backward()
+            mgn = None
             if opt_mix is not None:
-                nn.utils.clip_grad_norm_(mix_params, args.mixer_grad_clip)
+                mgn = nn.utils.clip_grad_norm_(mix_params, args.mixer_grad_clip)
                 gn = nn.utils.clip_grad_norm_([q for n, q in model.named_parameters() if "mixer" not in n], args.max_grad_norm)
             else:
                 gn = nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+            bad = args.nan_guard and not (bool(torch.isfinite(gn)) and (mgn is None or bool(torch.isfinite(mgn))))
             if args.audit_every and (updates + 1) % args.audit_every == 0 and mix_w0:
                 _, audit_grad, _ = mixer_audit.audit(model, mix_w0)  # gradient norms of this update (before the step)
-            opt.step()
-            if opt_mix is not None:
-                opt_mix.step()
+            if bad:                                  # B37 retry guard: a non-finite gradient would poison AdamW's moments for good
+                nan_skips += 1
+                opt.zero_grad(set_to_none=True)
+                if opt_mix is not None:
+                    opt_mix.zero_grad(set_to_none=True)
+                if nan_skips <= 5 or nan_skips % 100 == 0:
+                    print(f"[nan-guard] upd {updates}: non-finite grad norm (gn {float(gn)}, mixer {None if mgn is None else float(mgn)}), update skipped ({nan_skips} so far)", flush=True)
+            else:
+                opt.step()
+                if opt_mix is not None:
+                    opt_mix.step()
             updates += 1
             stepped = True
             if args.audit_every and updates % args.audit_every == 0 and mix_w0:
@@ -503,6 +562,10 @@ def train(args):
             ret = float(np.mean(recent_returns[-20:])) if recent_returns else 0.0
             mixer_w = (sum(q.detach().norm() ** 2 for n, q in model.named_parameters()
                            if "mixer" in n and n.endswith("weight")) ** 0.5).item() if args.trunk == "gtrxl" else None
+            gn_hot = gn_hot + 1 if (args.gn_stop > 0 and float(gn) > args.gn_stop) else 0
+            if gn_hot >= 3:                          # B37 retry guard: B37's lr 3e-4 runs sat at gn 1e8-1e16 for 20k steps before anyone looked
+                print(f"[gn-stop] gradient norm {float(gn):.3g} > {args.gn_stop:g} on 3 consecutive log lines: stopping at env {env_steps}", flush=True)
+                raise SystemExit(3)
             print(f"env {env_steps:6d}/{args.total_steps} upd {updates:6d}/{total_updates} | lr {lr:.3f} | "
                   f"loss v {value_loss.mean().item():.3f} p {policy_loss.mean().item():.3f} "
                   f"r {prefix_loss.mean().item():.3f} c {cons_loss.mean().item():.3f} | gn {float(gn):.2f} | "
@@ -605,6 +668,10 @@ def parse_args(argv=None):
                          "wd 1e-4 and momentum 0.9 every mixer weight shrank by 0.13 per 10k updates and was ~0 by 40k "
                          "(S-115): the mixer never trained")
     ap.add_argument("--max-grad-norm", type=float, default=5.0)
+    ap.add_argument("--gn-stop", type=float, default=0.0,
+                    help="TODO B37 retry: stop the run when the (clipped-input) gradient norm exceeds this on 3 consecutive log lines (0 = off)")
+    ap.add_argument("--nan-guard", action="store_true",
+                    help="TODO B37 retry: skip an update whose gradient norm (rest or mixer) is not finite instead of stepping (counted and printed)")
     ap.add_argument("--reward-coeff", type=float, default=1.0)
     ap.add_argument("--value-coeff", type=float, default=0.5)
     ap.add_argument("--policy-coeff", type=float, default=1.0)

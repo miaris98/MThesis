@@ -33,7 +33,7 @@ for seed in "$@"; do
       --trunk gtrxl --norm batch --priority-alpha 0 --seed $seed --mixer-weight-decay $MIXER_WD --mixer-out-init-std $OUT_STD \
       --total-steps $TOTAL_STEPS --schedule-steps 100000 --eval-interval $EVAL_INTERVAL --eval-episodes 10 --eval-mode deferred \
       $GFLAG ${EXTRA:-} --run-label $LABEL --log-dir $L $RES >> /workspace/$LABEL.log 2>&1
-    rc=$?; echo "$(date -u) $LABEL exited rc=$rc"; [ $rc -eq 0 ] && break; sleep 30
+    rc=$?; echo "$(date -u) $LABEL exited rc=$rc"; { [ $rc -eq 0 ] || [ $rc -eq 3 ]; } && break; sleep 30   # rc 3 = --gn-stop fired: do not resume it
   done
   sleep 120; kill $DGPID 2>/dev/null   # the evaluator exits by itself once the final checkpoint is scored
 done
