@@ -298,8 +298,8 @@ class WorldOnRailsTrainer:
                 print("[Warning] torch.compile unavailable on this torch version - running uncompiled.")
             else:
                 try:
-                    self.model = torch.compile(self.model)
-                    print("--> torch.compile enabled (first epoch includes one-off compilation).")
+                    self.model = torch.compile(self.model, mode="reduce-overhead")
+                    print("--> torch.compile enabled with mode='reduce-overhead' (Inductor + CUDAGraphs).")
                 except Exception as e:
                     print(f"[Warning] torch.compile failed ({e}) - running uncompiled.")
 
