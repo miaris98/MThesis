@@ -9,7 +9,7 @@ GPU=$1; SEED=$2; TOTAL=${3:-100000}
 L=/workspace/MThesis/results/100k_benchmark/S058_ezv2_match; mkdir -p $L
 LABEL=S058h_gtrxl_100k_s${SEED}_uniform; mkdir -p $L/$LABEL/checkpoints
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True OMP_NUM_THREADS=4 MLFLOW_ALLOW_FILE_STORE=true
-CUDA_VISIBLE_DEVICES=$GPU setsid nohup /venv/main/bin/python -u atari_qwen/training/eval_ez_checkpoints.py $L/$LABEL --watch --graph >> /workspace/${LABEL}_eval.log 2>&1 < /dev/null &
+CUDA_VISIBLE_DEVICES=$GPU setsid nohup /venv/main/bin/python -u atari_qwen/training/eval_ez_checkpoints.py $L/$LABEL --watch --graph --env-steps ${EVAL_STEPS:-100000} >> /workspace/${LABEL}_eval.log 2>&1 < /dev/null &
 for try in 1 2 3; do
   CK=$L/$LABEL/checkpoints/checkpoint_latest.pt; RES=""; [ -f $CK ] && RES="--resume-from $CK"
   echo "$(date -u) start $LABEL try $try ${RES:-fresh}" >> /workspace/$LABEL.log

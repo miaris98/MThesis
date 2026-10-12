@@ -74,13 +74,15 @@ def score(ck_path: Path, device, proto=None, graph=False, partial=None):
         sc = evaluate(model, mcts, a.env_id, device, a.eval_episodes, a.frame_size, a.seed, graph=graph, resume_path=partial)
     else:
         sc = evaluate(model, mcts, a.env_id, device, proto["episodes"] or a.eval_episodes, a.frame_size, a.seed,
-                      sticky=proto["sticky"], flip_avg=proto["flip"], graph=graph, resume_path=partial)
+                      sticky=proto["sticky"], flip_avg=proto["flip"], graph=graph, resume_path=partial,
+                      fire_reset=proto.get("fire", False))
     return ck, a, sc, time.time() - t0
 
 
 def protocol_tag(proto, a) -> str:
     return proto["tag"] or (f"ep{proto['episodes'] or a.eval_episodes}_sim{proto['sims'] or a.num_simulations}"
-                            f"_st{proto['sticky']:g}" + ("_flip" if proto["flip"] else "") + (f"_d{proto['max_depth']}" if proto.get("max_depth") else ""))
+                            f"_st{proto['sticky']:g}" + ("_flip" if proto["flip"] else "") + (f"_d{proto['max_depth']}" if proto.get("max_depth") else "")
+                            + ("_fire" if proto.get("fire") else ""))
 
 
 def mlflow_run(label: str, a, proto=None, tag=None):
@@ -104,9 +106,10 @@ def mlflow_run(label: str, a, proto=None, tag=None):
         return None, None
 
 
-def process_run(run_dir: Path, device, state: dict, proto=None, env_steps=None, graph=False) -> bool:
+def process_run(run_dir: Path, device, state: dict, proto=None, env_steps=None, graph=False, upd_steps=None) -> bool:
     """Score every unscored checkpoint of one run. Returns True once the run's final checkpoint is scored.
-    proto: protocol overrides (own result files, no checkpoint_best.pt); env_steps: only these checkpoints."""
+    proto: protocol overrides (own result files, no checkpoint_best.pt); env_steps: only these checkpoints;
+    upd_steps: only the checkpoints at these update counts (the final one is upd 120000 for the S058h runs)."""
     ckdir = run_dir / "checkpoints"
     found = []
     for p in ckdir.glob("checkpoint_env*_upd*.pt"):
@@ -115,6 +118,8 @@ def process_run(run_dir: Path, device, state: dict, proto=None, env_steps=None, 
             found.append((int(m.group(2)), int(m.group(1)), p))
     if env_steps:
         found = [f for f in found if f[1] in env_steps]
+    if upd_steps:
+        found = [f for f in found if f[0] in upd_steps]
     final_done = False
     tag = None
     for upd, env, p in sorted(found):
@@ -207,21 +212,25 @@ def main(argv=None):
     ap.add_argument("--flip-avg", action="store_true",
                     help="protocol override: average the search root with its mirror image (TODO B26 step 0)")
     ap.add_argument("--max-depth", type=int, default=None, help="protocol override (TODO B43 step 1): cap the imagined search depth at D (default: unlimited)")
+    ap.add_argument("--fire-reset", action="store_true",
+                    help="protocol override: press FIRE after each reset and lost life (the standard FireResetEnv); without it Breakout freezes")
     ap.add_argument("--protocol", default=None, help="name for the override protocol's result files")
     ap.add_argument("--env-steps", type=lambda s: {int(x) for x in s.split(",")}, default=None,
                     help="only score the checkpoints at these env steps (comma list)")
+    ap.add_argument("--updates", type=lambda s: {int(x) for x in s.split(",")}, default=None,
+                    help="only score the checkpoints at these update counts (comma list), e.g. 120000 for the final checkpoint")
     args = ap.parse_args(argv)
     proto = None
-    if args.episodes or args.sims or args.sticky > 0 or args.flip_avg or args.protocol or args.max_depth:
+    if args.episodes or args.sims or args.sticky > 0 or args.flip_avg or args.protocol or args.max_depth or args.fire_reset:
         proto = {"episodes": args.episodes, "sims": args.sims, "sticky": args.sticky, "flip": args.flip_avg,
-                 "tag": args.protocol, "max_depth": args.max_depth}
+                 "tag": args.protocol, "max_depth": args.max_depth, "fire": args.fire_reset}
         args.watch = False  # protocol runs score saved checkpoints; there is no final checkpoint to wait for
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if args.verify:
         return verify(args.verify, device, args.graph)
     state, pending = {}, list(args.run_dirs)
     while pending:
-        pending = [r for r in pending if not process_run(r, device, state, proto, args.env_steps, args.graph)]
+        pending = [r for r in pending if not process_run(r, device, state, proto, args.env_steps, args.graph, args.updates)]
         if not args.watch:
             break
         if pending:

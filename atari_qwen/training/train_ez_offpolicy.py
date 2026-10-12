@@ -17,8 +17,10 @@ interleaved at a fixed update ratio instead of Ray workers), and `--trunk gtrxl`
 import argparse
 import copy
 import os
+import queue
 import random
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Dict, Optional
@@ -47,6 +49,74 @@ from atari_qwen.models.ez_model import EZV2Model, DiscreteSupport
 from atari_qwen.mcts.gumbel_mcts import GumbelMCTS, GraphedSearch
 from atari_qwen.eval.evaluate import compute_hns
 from atari_qwen.training import mixer_audit
+
+
+class AsyncCheckpointSaver:
+    """Asynchronous background worker that saves model weights and replay buffers without stalling training."""
+    def __init__(self):
+        self.queue = queue.Queue(maxsize=2)
+        self.worker = threading.Thread(target=self._worker_loop, daemon=True)
+        self.worker.start()
+
+    def _worker_loop(self):
+        while True:
+            item = self.queue.get()
+            if item is None:
+                self.queue.task_done()
+                break
+            tag, ckpt_data, ckpt_path, replay_data, replay_path = item
+            try:
+                if ckpt_data is not None and ckpt_path is not None:
+                    tmp_ckpt = Path(str(ckpt_path) + ".tmp")
+                    torch.save(ckpt_data, tmp_ckpt)
+                    os.replace(tmp_ckpt, ckpt_path)
+                if replay_data is not None and replay_path is not None:
+                    tmp_rp = Path(str(replay_path) + ".tmp.npz")
+                    np.savez(tmp_rp, **replay_data)
+                    os.replace(tmp_rp, replay_path)
+            except Exception as e:
+                print(f"[AsyncCheckpointSaver Error] {e}", file=sys.stderr, flush=True)
+            finally:
+                self.queue.task_done()
+
+    def save_async(self, tag: str, model, target, opt, env_steps: int, updates: int, best: float, args_dict: dict,
+                   ckpt_dir: Path, replay=None, extra=None):
+        ckpt_data = {
+            "model": {k: v.cpu().clone() for k, v in model.state_dict().items()},
+            "target": {k: v.cpu().clone() for k, v in target.state_dict().items()},
+            "opt": {k: v for k, v in opt.state_dict().items()},
+            "env_steps": env_steps,
+            "updates": updates,
+            "best": best,
+            "args": args_dict
+        }
+        if extra:
+            ckpt_data.update(extra)
+        ckpt_path = ckpt_dir / f"checkpoint_{tag}.pt"
+
+        replay_data = None
+        replay_path = None
+        if tag == "latest" and replay is not None:
+            replay_path = ckpt_dir / "replay_latest.npz"
+            n = replay.size
+            replay_data = {
+                "frames": replay.frames[:n].cpu().numpy(),
+                "act": replay.act[:n].copy(),
+                "rew": replay.rew[:n].copy(),
+                "done": replay.done[:n].copy(),
+                "ep_start": replay.ep_start[:n].copy(),
+                "pi": replay.pi[:n].copy(),
+                "root_v": replay.root_v[:n].copy(),
+                "prio": replay.prio[:n].copy(),
+                "cur_start": replay.cur_start.copy() if hasattr(replay.cur_start, "copy") else replay.cur_start,
+                "max_prio": np.float64(replay.max_prio)
+            }
+
+        self.queue.put((tag, ckpt_data, ckpt_path, replay_data, replay_path))
+
+    def join(self):
+        self.queue.join()
+
 
 
 # ------------------------------------------------------------------------------------------------
@@ -198,9 +268,12 @@ def run_search(model, mcts: GumbelMCTS, obs: torch.Tensor, add_noise: bool, chun
 @torch.no_grad()
 def evaluate(model, mcts, env_id: str, device, episodes: int, frame_size: int, seed: int,
              max_steps: int = 27_000, sticky: float = 0.0, flip_avg: bool = False, graph: bool = False,
-             resume_path=None) -> np.ndarray:
+             resume_path=None, fire_reset: bool = False) -> np.ndarray:
     """One full-game episode (no episodic life, raw reward) per parallel env, search without noise.
     sticky > 0: ALE sticky actions with that probability (B2's robustness protocol; off for Atari-100k).
+    fire_reset: press FIRE after each reset and lost life (the standard FireResetEnv). Breakout freezes until FIRE is pressed, so
+    a policy that never presses it plays to max_steps (44 of 60 capped episodes in the seed-0 paper-protocol eval, 2026-10-11).
+    Off = the protocol that produced the 364.25 score; on = the same protocol with the freeze removed.
     flip_avg: average the root with its mirror image (run_search's flip_perm, TODO B26 step 0).
     graph: replay the search from a CUDA graph (GraphedSearch, TODO B23; same results, far fewer launches).
     resume_path: an .npz that holds every action taken so far (the policy is stateless per step, so a game is fixed by its seed
@@ -210,7 +283,7 @@ def evaluate(model, mcts, env_id: str, device, episodes: int, frame_size: int, s
     graphed = GraphedSearch(mcts, model) if graph and device.type == "cuda" else None
     envs = make_vector_atari_envs(env_id, num_envs=episodes, seed=seed + 10_000, clip_reward=False,
                                   episodic_life=False, frame_size=frame_size, grayscale=False,
-                                  fire_reset=False, max_episode_steps=max_steps, repeat_action_probability=sticky)
+                                  fire_reset=fire_reset, max_episode_steps=max_steps, repeat_action_probability=sticky)
     obs, _ = envs.reset(seed=seed + 10_000)
     perm = None
     if flip_avg:
@@ -222,7 +295,7 @@ def evaluate(model, mcts, env_id: str, device, episodes: int, frame_size: int, s
     finished = np.zeros(episodes, dtype=bool)
     actions = []                                       # one row of per-env actions per step, for the resume file
     start = 0
-    meta = np.array([episodes, seed, max_steps, int(sticky * 1000)])
+    meta = np.array([episodes, seed, max_steps, int(sticky * 1000), int(fire_reset)])
     if resume_path is not None and Path(resume_path).exists():
         try:
             z = np.load(resume_path)
@@ -311,6 +384,15 @@ def train(args):
             except Exception:
                 pass
 
+    if device.type == "cuda":
+        props = torch.cuda.get_device_properties(device)
+        total_gb = props.total_memory / (1024 ** 3)
+        if total_gb < 12.0:
+            os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+            print(f"--> [GPU Profile] {props.name} ({total_gb:.1f} GB VRAM) - Enforcing expandable_segments:True (10GB profile)", flush=True)
+        else:
+            print(f"--> [GPU Profile] {props.name} ({total_gb:.1f} GB VRAM) - Standard high-headroom profile", flush=True)
+
     E, K, TD, H = args.num_envs, args.unroll_steps, args.td_steps, args.lstm_horizon
     gamma = args.discount ** 4                       # per agent step (frame skip 4), as EZ-V2
     envs = make_vector_atari_envs(args.env_id, num_envs=E, seed=args.seed, clip_reward=True, episodic_life=True,
@@ -329,6 +411,9 @@ def train(args):
     amp = torch.bfloat16 if bf16_native else torch.float32
     for p in target.parameters():
         p.requires_grad_(False)
+    if getattr(args, "channels_last", True) and device.type == "cuda":
+        model = model.to(memory_format=torch.channels_last)
+        target = target.to(memory_format=torch.channels_last)
     mix_params = [q for n, q in model.named_parameters() if "mixer" in n]
     opt_mix = None
     if args.mixer_optimizer == "adamw":
@@ -349,6 +434,12 @@ def train(args):
     # TODO B37 step 1: per-category audit of the mixer (relative change, absolute change and gradient norm; `mixer_audit.py`: the zero-initialised
     # tensors have no meaningful relative change, read their absolute change)
     mix_w0 = mixer_audit.snapshot(model) if args.audit_every else {}
+    if getattr(args, "compile_model", False) and hasattr(torch, "compile") and device.type == "cuda":
+        try:
+            model = torch.compile(model, mode="reduce-overhead")
+            print("--> Model compiled with torch.compile(mode='reduce-overhead')", flush=True)
+        except Exception as ex:
+            print(f"[Warning] torch.compile failed ({ex}); continuing in eager mode", flush=True)
     mcts = GumbelMCTS(A, support, num_simulations=args.num_simulations, discount=gamma, lstm_horizon=H)
     # TODO B23 step 1b: replay the acting search (B = num_envs) and the reanalyze search (B = batch x (K+1), on the target
     # network, bf16 where native) from CUDA graphs; bit-identical to eager (see GraphedSearch), far fewer kernel launches
@@ -380,15 +471,21 @@ def train(args):
             replay.load(rp)
         print(f"--> resumed at env step {env_steps:,}, update {updates:,} (replay {replay.transitions:,})", flush=True)
 
+    saver = AsyncCheckpointSaver() if getattr(args, "async_checkpoint", True) else None
+
     def save(tag: str, extra=None):
-        st = {"model": model.state_dict(), "target": target.state_dict(), "opt": opt.state_dict(),
-              "env_steps": env_steps, "updates": updates, "best": best, "args": vars(args)}
-        if extra:
-            st.update(extra)
-        tmp = ckpt_dir / f"checkpoint_{tag}.pt.tmp"
-        torch.save(st, tmp); os.replace(tmp, ckpt_dir / f"checkpoint_{tag}.pt")
-        if tag == "latest":
-            replay.save(ckpt_dir / "replay_latest.npz")
+        if saver is not None:
+            saver.save_async(tag, model, target, opt, env_steps, updates, best, vars(args), ckpt_dir,
+                             replay=replay if tag == "latest" else None, extra=extra)
+        else:
+            st = {"model": model.state_dict(), "target": target.state_dict(), "opt": opt.state_dict(),
+                  "env_steps": env_steps, "updates": updates, "best": best, "args": vars(args)}
+            if extra:
+                st.update(extra)
+            tmp = ckpt_dir / f"checkpoint_{tag}.pt.tmp"
+            torch.save(st, tmp); os.replace(tmp, ckpt_dir / f"checkpoint_{tag}.pt")
+            if tag == "latest":
+                replay.save(ckpt_dir / "replay_latest.npz")
 
     obs, _ = envs.reset(seed=args.seed)
     print(f"autocast dtype: {amp} (native bf16: {bf16_native}); graph search: {graph_on}", flush=True)
@@ -445,10 +542,21 @@ def train(args):
             ee = np.repeat(e, K + 1)
             root_stacks = replay.stacks(pos[:, :K + 1].reshape(-1), ee)          # states t..t+K
             boot_stacks = replay.stacks(pos[:, TD:TD + K + 1].reshape(-1), ee)   # states t+TD..t+K+TD
+            if getattr(args, "channels_last", True) and device.type == "cuda":
+                root_stacks = root_stacks.contiguous(memory_format=torch.channels_last)
+                boot_stacks = boot_stacks.contiguous(memory_format=torch.channels_last)
+            recent = ((t * E + e) > (replay.transitions - args.mixed_value_threshold)) if updates >= args.mixed_value_start else np.ones(B, bool)
             with torch.no_grad(), torch.autocast(device_type=device.type, dtype=amp, enabled=bf16_native):
-                x_boot = boot_stacks
-                _, vb, _ = target.initial_inference(x_boot)
-                v_boot = support.vector_to_scalar(vb).float().cpu().numpy().reshape(B, K + 1)
+                v_boot = np.zeros((B, K + 1), np.float32)
+                recent_idx = np.nonzero(recent)[0]
+                if len(recent_idx) == B:
+                    _, vb, _ = target.initial_inference(boot_stacks)
+                    v_boot = support.vector_to_scalar(vb).float().cpu().numpy().reshape(B, K + 1)
+                elif len(recent_idx) > 0:
+                    sel = torch.as_tensor(recent_idx, device=device)
+                    xb = boot_stacks.view(B, K + 1, *boot_stacks.shape[1:])[sel].reshape(-1, *boot_stacks.shape[1:])
+                    _, vb, _ = target.initial_inference(xb)
+                    v_boot[recent_idx] = support.vector_to_scalar(vb).float().cpu().numpy().reshape(len(recent_idx), K + 1)
                 x_root = root_stacks
                 s_re, v_re, p_re = target.initial_inference(x_root)
                 v_root = support.vector_to_scalar(v_re)
@@ -462,9 +570,7 @@ def train(args):
             ex_k = exists[:, :K + 1]
             val_t *= ex_k
             srch_v = srch_v * ex_k
-            if updates >= args.mixed_value_start:
-                recent = (t * E + e) > (replay.transitions - args.mixed_value_threshold)
-                val_t = np.where(recent[:, None], val_t, srch_v)
+            val_t = np.where(recent[:, None], val_t, srch_v)
             pol_t = srch_pi * ex_k[..., None]
             # value prefix: running reward sum, reset every H steps
             prefix = np.zeros((B, K), np.float32); run = np.zeros(B, np.float32)
@@ -547,7 +653,8 @@ def train(args):
                       " | grad " + " ".join(f"{c} {v:.2e}" for c, v in sorted(audit_grad.items())), flush=True)
                 log({**{f"audit/rel_{c}": v for c, v in rel.items()}, **{f"audit/abs_{c}": v for c, v in absd.items()},
                      **{f"audit/grad_{c}": v for c, v in audit_grad.items()}}, env_steps)
-            replay.update_priorities(t, e, np.abs(v0.float().cpu().numpy() - val_t[:, 0]) + 1e-6)
+            if args.priority_alpha > 0:
+                replay.update_priorities(t, e, np.abs(v0.float().cpu().numpy() - val_t[:, 0]) + 1e-6)
             if updates % args.target_update_interval == 0:
                 target.load_state_dict(model.state_dict())
             tm["update"] += time.perf_counter() - tu
@@ -615,6 +722,8 @@ def train(args):
     if act_graph is not None:  # searches deeper than the captured bound are re-run eagerly (same result, just slower)
         print(f"graphed search fallbacks: acting {act_graph.fallbacks}/{act_graph.calls}, "
               f"reanalyze {re_graph.fallbacks}/{re_graph.calls}", flush=True)
+    if saver is not None:
+        saver.join()
     if mlrun:
         try:
             if np.isfinite(best):  # deferred mode: eval_ez_checkpoints.py logs best_eval on the <label>_eval run
@@ -655,6 +764,8 @@ def parse_args(argv=None):
     ap.add_argument("--graph-search", action="store_true",
                     help="replay the acting, reanalyze and inline-eval searches from CUDA graphs (TODO B23 step 1b); "
                          "bit-identical to the eager search, CUDA only")
+    ap.add_argument("--compile-model", action="store_true",
+                    help="Compile model with torch.compile(mode='reduce-overhead') for ~3x transformer head speedup")
     ap.add_argument("--mixer-optimizer", choices=["sgd", "adamw"], default="sgd",
                     help="TODO B37: optimiser of the GTrXL mixer parameters (adamw: betas 0.9/0.95, --mixer-lr, --mixer-weight-decay default 0.05; "
                          "the rest of the network keeps SGD)")
@@ -694,6 +805,10 @@ def parse_args(argv=None):
     ap.add_argument("--experiment", default="Atari_EZV2_Match")
     ap.add_argument("--no-mlflow", dest="mlflow", action="store_false")
     ap.add_argument("--resume-from", default=None)
+    ap.add_argument("--channels-last", action=argparse.BooleanOptionalAction, default=True,
+                    help="use channels_last memory format for faster Tensor Core convolutions on Ampere+")
+    ap.add_argument("--async-checkpoint", action=argparse.BooleanOptionalAction, default=True,
+                    help="save checkpoints and replay buffers in a background thread to prevent training stalls")
     return ap.parse_args(argv)
 
 
