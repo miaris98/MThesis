@@ -1,0 +1,41 @@
+# Stratified 20-route subset of Bench2Drive's bench2drive220.xml, used to compare TF++, cnn,
+# and qwen at a "viable in terms of evaluation time" scale (docs/design/eval_tiers_design.md, Stage 1
+# revised). Full 220 routes x 3 architectures serially is ~42h; this subset is ~3.8h.
+#
+# Selection: proportional allocation by town (Town12/Town13's 151/220-route majority kept
+# proportionally represented, every other town gets exactly 1 route so no town is silently
+# dropped), Random(seed=0) picking which route within each town. Same seed as FAST_EVAL_SEED's
+# convention elsewhere in this project - fixed, not derived from the label or the clock, so every
+# arm compared against this subset drives the identical routes.
+#
+# Regenerate with (must match exactly - this file is the record of what was actually run, not a
+# script to re-derive it from):
+#   python3 -c "
+#   import xml.etree.ElementTree as ET, random
+#   tree = ET.parse('leaderboard/data/bench2drive220.xml')  # from carla_garage/Bench2Drive
+#   routes = tree.getroot().findall('route')
+#   by_town = {}
+#   for r in routes: by_town.setdefault(r.get('town'), []).append(r.get('id'))
+#   rng = random.Random(0)
+#   total, target = len(routes), 20
+#   raw = {t: len(ids)/total*target for t, ids in by_town.items()}
+#   alloc = {t: max(1, int(raw[t])) for t in raw}
+#   diff = target - sum(alloc.values())
+#   towns_by_size_desc = sorted(by_town, key=lambda t: -len(by_town[t]))
+#   i = 0
+#   while diff != 0:
+#       t = towns_by_size_desc[i % len(towns_by_size_desc)]
+#       if diff > 0 and alloc[t] < len(by_town[t]): alloc[t] += 1; diff -= 1
+#       elif diff < 0 and alloc[t] > 1: alloc[t] -= 1; diff += 1
+#       i += 1
+#   selected = []
+#   for t, n in alloc.items():
+#       ids = by_town[t][:]; rng.shuffle(ids)
+#       selected.extend(sorted(ids[:n], key=int))
+#   print(','.join(sorted(set(selected), key=int)))
+#   "
+#
+# Town allocation: Town12=7, Town13=3, Town01=1, Town02=1, Town03=1, Town04=1, Town05=1,
+# Town06=1, Town07=1, Town10HD=1, Town11=1, Town15=1
+
+2050,2143,2286,2509,2664,3373,3457,3717,3936,23687,24340,24784,24795,25318,25975,26401,27515,27532,28035,28198

@@ -8,7 +8,7 @@ PPO/SAC trainers' logging stack).
 The objective and the held-out pass live in src/training/wor_eval.py; the optimizer
 groups and LR schedule live in src/training/wor_optim.py.
 """
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 import math
 import os
 import time
@@ -18,17 +18,35 @@ from torch.optim.lr_scheduler import LambdaLR
 
 from src.models.world_on_rails.wor_policy import WorldOnRailsPolicy
 from src.training.wor_dataset import create_wor_train_val_dataloaders
-from src.training.wor_eval import run_validation, to_device_batch, waypoint_losses
-from src.training.wor_checkpoint import CheckpointWriter, to_cpu
+from src.training.wor_eval import run_validation, to_device_batch_with_features, waypoint_losses
+from src.models.world_on_rails.aux_heads import target_speed_loss
+from src.training.wor_checkpoint import (
+    CheckpointWriter, best_metric_so_far, load_trainable_state, to_cpu)
 from src.training.wor_optim import build_optimizer, build_warmup_cosine_scheduler
 from src.logging.csv_logger import CSVTelemetryLogger
 from src.logging.experiment_logger import ExperimentLogger
 from src.logging.hardware_monitor import HardwareMonitor
 
 try:
-    from torch.cuda.amp import GradScaler, autocast
+    from torch.cuda.amp import GradScaler, autocast as _autocast
 except ImportError:
-    from torch.amp import GradScaler, autocast
+    from torch.amp import GradScaler, autocast as _autocast
+
+# fp16 (autocast's CUDA default) has an 8-bit mantissa / 5-bit exponent, so its dynamic
+# range tops out around 65504 - a QK^T attention logit or an activation that drifts past
+# that overflows to inf, and softmax(inf) is nan. Seen in practice on the qwen30m+geom
+# 8-town run: training reproducibly hit a non-finite loss at the *exact same* epoch and
+# batch index across three separate resumes from a clean checkpoint (same seed -> same
+# weight trajectory -> same forward pass overflowing every time), while the cnn arm -
+# sharing this same trainer, same data, same fp16 autocast, just no attention - never
+# once did, pointing at attention-logit overflow rather than a corrupt data sample.
+# bfloat16 has fp32's 8-bit exponent (same ~1e38 range, just less mantissa precision),
+# so the identical activation pattern that overflows fp16 does not overflow bf16 - the
+# standard fix for exactly this failure signature in transformer training. Ampere GPUs
+# (this project's boxes) support bf16 natively at full speed, so this is not a
+# precision-for-speed tradeoff the way switching off AMP entirely would be.
+def autocast(enabled: bool = True):
+    return _autocast(enabled=enabled, dtype=torch.bfloat16) if torch.cuda.is_available() else _autocast(enabled=enabled)
 
 
 class WorldOnRailsTrainer:
@@ -43,11 +61,16 @@ class WorldOnRailsTrainer:
         "data_wait_sec", "compute_sec",
         "total_loss", "q_loss", "wp_loss", "wp_ade_m", "wp_fde_m",
         "wp_lateral_error_m", "wp_longitudinal_error_m",
+        # Path-shape errors. Logged unconditionally, including on runs whose objective
+        # does not contain them, so a run trained with heading supervision can be
+        # compared against the existing ones on the same two columns.
+        "wp_heading_err", "wp_curvature_err",
         # Held-out metrics, blank when no validation set is configured. Training loss
         # alone cannot tell a model that generalises from one that has memorised, and
         # `is_best` used to be selected on it.
         "val_loss", "val_wp_ade_m", "val_wp_fde_m",
-        "val_wp_lateral_error_m", "val_wp_longitudinal_error_m", "val_time_sec",
+        "val_wp_lateral_error_m", "val_wp_longitudinal_error_m",
+        "val_wp_heading_err", "val_wp_curvature_err", "val_time_sec",
         "lr_backbone", "lr_heads", "grad_norm",
         # grad_norm is a mean over finite batches only. A single non-finite batch used
         # to poison the whole epoch's mean to inf, which is what made the periodic
@@ -75,10 +98,23 @@ class WorldOnRailsTrainer:
         wp_loss_weight: float = 1.0,
         q_loss_weight: float = 0.0,
         lateral_loss_weight: float = 3.0,
+        heading_loss_weight: float = 0.0,
+        curvature_loss_weight: float = 0.0,
         synthetic_samples: int = 0,
         cache_decoded: bool = True,
         compile_model: bool = False,
         route_points: int = 4,
+        img_size: Tuple[int, int] = (256, 256),
+        crop_bottom_frac: float = 0.0,
+        route_overlay: bool = False,
+        feature_cache_tag: Optional[str] = None,
+        use_augmented_camera: bool = False,
+        color_aug_prob: float = 0.0,
+        val_every: int = 1,
+        max_batches: int = 0,
+        target_speed_loss_weight: float = 0.0,
+        speed_loss_kwargs: Optional[dict] = None,
+        path_loss_weight: float = 0.0,
         grad_clip: float = 5.0,
         warmup_frac: float = 0.05,
         decay_gates_and_norms: bool = False,
@@ -103,6 +139,9 @@ class WorldOnRailsTrainer:
         self.device = device
         self.use_amp = use_amp and (device == "cuda")
         self.wp_loss_weight = wp_loss_weight
+        self.target_speed_loss_weight = target_speed_loss_weight
+        self.path_loss_weight = path_loss_weight                  # TODO A15: L1 on the path head's 10 ego-frame points (0 = off)
+        self.speed_loss_kwargs = dict(speed_loss_kwargs or {})   # TODO A39: lambda_over / lambda_under of the asymmetric ordinal term
         # Datasets without precomputed Q-values (e.g. PDM-Lite) leave target_q at
         # zero, so q_loss_weight defaults to 0 to avoid supervising toward zero.
         self.q_loss_weight = q_loss_weight
@@ -115,6 +154,18 @@ class WorldOnRailsTrainer:
         # producing a policy that accelerates fine but steers close to zero. Weight
         # the lateral term up to correct for that scale mismatch.
         self.lateral_loss_weight = lateral_loss_weight
+        # Scale-free path-shape terms, off by default so the objective is unchanged
+        # unless asked for. The lateral weight above rescales an axis; these two change
+        # *what* is supervised. Measured on the four-town runs the weighted L1
+        # decomposes as 0.433 longitudinal + 0.156 lateral, so 73% of the gradient is
+        # spent on forward displacement the steering controller never reads - and which
+        # is close to the integral of the speed scalar the policy already receives.
+        # `heading` supervises segment direction (what the controller aims at) and
+        # `curvature` the second difference (the zig-zag its derivative term reacts to);
+        # neither can be dominated by the longitudinal magnitude, because both are
+        # normalised or differenced away from it. See src/training/wor_eval.py.
+        self.heading_loss_weight = heading_loss_weight
+        self.curvature_loss_weight = curvature_loss_weight
         # Global-norm clip threshold. The default of 5.0 was chosen against the CNN
         # head, whose epoch-mean gradient norm falls under it around epoch 17 and so
         # spends the back half of a run unclipped. The 106M-parameter Qwen trunk sat
@@ -136,9 +187,26 @@ class WorldOnRailsTrainer:
             "fold": fold,
             "num_folds": num_folds,
             "split_seed": split_seed,
-            "vision_grid": getattr(model, "vision_grid", None),
+            # The (H, W) pair, not the scalar. `model.vision_grid` collapses a rectangular
+            # grid to its height - so a 6x16 run stamped "6", and the loader rebuilt a 6x6
+            # 36-token trunk whose vision_pos cannot accept the checkpoint's 96 rows.
+            # Every v2 qwen checkpoint is rectangular, so this was fatal at evaluation.
+            "vision_grid": list(getattr(model, "vision_grid_hw", None)
+                                or []) or getattr(model, "vision_grid", None),
             "pool_vision": getattr(model, "pool_vision", None),
-            "num_vision_tokens": getattr(model, "num_vision_tokens", None)
+            "num_vision_tokens": getattr(model, "num_vision_tokens", None),
+            # Each of these changes a tensor shape, so evaluation must rebuild with the
+            # same value or load_state_dict raises on a size mismatch - which is the loud
+            # failure we want, but only if the value is recorded here to rebuild from.
+            "use_target_speed": getattr(model, "target_speed_head", None) is not None,
+            "token_mode": getattr(model, "token_mode", "pool"),
+            "s2d_patch": getattr(model, "s2d_patch", 3),
+            "use_path_head": bool(getattr(model, "use_path_head", False)),
+            "path_cascade": bool(getattr(model, "path_cascade", False)),
+            "target_speed_input": getattr(model, "target_speed_input", None),
+            "use_rail_q": getattr(model, "use_rail_q", None),
+            "use_ray_geometry": getattr(model, "use_ray_geometry", None),
+            "crop_bottom_frac": getattr(model, "crop_bottom_frac", None)
         }
         self.train_start_time = time.time()
 
@@ -154,11 +222,15 @@ class WorldOnRailsTrainer:
             "lr_backbone": lr_backbone, "lr_heads": lr_heads, "batch_size": batch_size,
             "wp_loss_weight": wp_loss_weight, "q_loss_weight": q_loss_weight,
             "lateral_loss_weight": lateral_loss_weight,
+            "heading_loss_weight": heading_loss_weight,
+            "curvature_loss_weight": curvature_loss_weight,
             "grad_clip": grad_clip, "warmup_frac": warmup_frac,
             "decay_gates_and_norms": decay_gates_and_norms,
             "val_split": val_split, "val_data_dir": val_data_dir or "", "seed": seed,
             "vision_grid": getattr(model, "vision_grid", ""),
-            "pool_vision": getattr(model, "pool_vision", "")
+            "pool_vision": getattr(model, "pool_vision", ""),
+            "use_augmented_camera": use_augmented_camera,
+            "color_aug_prob": color_aug_prob
         })
 
         # Per-epoch CSV telemetry.
@@ -179,8 +251,24 @@ class WorldOnRailsTrainer:
             split_seed=split_seed,
             fold=fold,
             num_folds=num_folds,
-            seed=seed
+            seed=seed,
+            img_size=img_size,
+            crop_bottom_frac=crop_bottom_frac,
+            route_overlay=route_overlay,
+            feature_cache_tag=feature_cache_tag,
+            use_augmented_camera=use_augmented_camera,
+            color_aug_prob=color_aug_prob
         )
+        # Cap on batches per epoch, for smoke tests that measure cost without paying for a full
+        # epoch. 0 means no cap. Stored rather than applied here so both the train and eval
+        # loops can honour it consistently.
+        self.max_batches = max_batches
+        # Validate every Nth epoch instead of every epoch. TF++ uses 5. The cost is real
+        # (~10% of an epoch here), but it changes what `best_model.pth` can mean: best is
+        # only ever selected among epochs that were actually validated, so a coarser N
+        # means a coarser choice. The final epoch is always validated regardless, so a run
+        # never ends on an unvalidated model.
+        self.val_every = max(1, int(val_every))
         base_ds = getattr(self.train_loader.dataset, "dataset", self.train_loader.dataset)
         if len(self.train_loader.dataset) == 0 or getattr(base_ds, "is_synthetic", False):
             print(f"[Warning] Training on SYNTHETIC data - no real frames were indexed under {data_dir}.")
@@ -210,8 +298,8 @@ class WorldOnRailsTrainer:
                 print("[Warning] torch.compile unavailable on this torch version - running uncompiled.")
             else:
                 try:
-                    self.model = torch.compile(self.model)
-                    print("--> torch.compile enabled (first epoch includes one-off compilation).")
+                    self.model = torch.compile(self.model, mode="reduce-overhead")
+                    print("--> torch.compile enabled with mode='reduce-overhead' (Inductor + CUDAGraphs).")
                 except Exception as e:
                     print(f"[Warning] torch.compile failed ({e}) - running uncompiled.")
 
@@ -226,15 +314,19 @@ class WorldOnRailsTrainer:
         self.model.train()
         total_loss_accum = 0.0
         q_loss_accum = 0.0
+        aux_accum = {"target_speed": 0.0, "path": 0.0}      # TODO A15 / A39: the auxiliary losses were never in the epoch metrics (MLflow)
         wp_loss_accum = 0.0
         ade_accum = 0.0
         fde_accum = 0.0
         lateral_err_accum = 0.0
         longitudinal_err_accum = 0.0
+        heading_err_accum = 0.0
+        curvature_err_accum = 0.0
         grad_norm_accum = 0.0
         grad_norm_batches = 0
         nonfinite_batches = 0
         clipped_batches = 0
+        consecutive_nonfinite_loss = 0
         num_batches = 0
         num_samples = 0
         # Split the epoch into "blocked waiting for the dataloader" vs "actually
@@ -247,22 +339,47 @@ class WorldOnRailsTrainer:
         t_batch_start = time.time()
 
         for batch_idx, batch in enumerate(self.train_loader):
+            # Smoke-test cap. Breaking rather than slicing the loader keeps the sampler, the
+            # seeding and the per-batch bookkeeping identical to a real run, so the s/batch this
+            # measures is the number a full epoch would actually pay.
+            if self.max_batches and batch_idx >= self.max_batches:
+                break
             data_wait += time.time() - t_batch_start
             t_compute_start = time.time()
 
-            rgb, speed, command, route, target_q, target_wp = to_device_batch(batch, self.device)
+            rgb, vision_features, speed, command, route, target_q, target_wp = \
+                to_device_batch_with_features(batch, self.device)
 
             self.optimizer.zero_grad()
 
             # One shared definition of the objective for training and validation - see
             # src/training/wor_eval.py.
             with autocast(enabled=self.use_amp):
-                out = self.model(rgb, speed, command, route)
+                out = self.model(rgb, speed, command, route, vision_features=vision_features)
                 losses = waypoint_losses(
                     out, target_wp, target_q,
-                    self.wp_loss_weight, self.q_loss_weight, self.lateral_loss_weight
+                    self.wp_loss_weight, self.q_loss_weight, self.lateral_loss_weight,
+                    self.heading_loss_weight, self.curvature_loss_weight
                 )
                 total_loss = losses["total"]
+
+                # Auxiliary target-speed objective. Added to the same scalar the optimizer
+                # steps on, rather than a second backward pass, so gradient clipping and the
+                # AMP scaler see one consistent graph. Weight 0 disables it entirely, which is
+                # the default: enabling it changes the objective, so it is opt-in per run.
+                if self.target_speed_loss_weight > 0 and "target_speed_logits" in out:
+                    ts_target = batch.get("target_speed")
+                    if ts_target is not None:
+                        ts_loss = target_speed_loss(
+                            out["target_speed_logits"], ts_target.to(self.device), **self.speed_loss_kwargs)
+                        total_loss = total_loss + self.target_speed_loss_weight * ts_loss
+                        losses["target_speed"] = ts_loss
+                if self.path_loss_weight > 0 and "path" in out and batch.get("target_path") is not None:
+                    tp = batch["target_path"].to(self.device).float()
+                    valid = batch["path_valid"].to(self.device).float()
+                    path_l1 = ((out["path"].float() - tp).abs().sum(-1).mean(-1) * valid).sum() / valid.sum().clamp(min=1.0)
+                    total_loss = total_loss + self.path_loss_weight * path_l1
+                    losses["path"] = path_l1
 
             if self.use_amp:
                 self.scaler.scale(total_loss).backward()
@@ -299,15 +416,54 @@ class WorldOnRailsTrainer:
             # waypoint loss; the unweighted per-axis errors are tracked separately so a
             # lateral/longitudinal imbalance (the near-zero-steering failure mode) stays
             # visible even though the loss weights the axes unevenly on purpose.
-            total_loss_accum += total_loss.item()
-            q_loss_accum += losses["q"].item()
-            wp_loss_accum += losses["wp"].item()
-            ade_accum += losses["ade"].item()
-            fde_accum += losses["fde"].item()
-            lateral_err_accum += losses["lateral"].item()
-            longitudinal_err_accum += losses["longitudinal"].item()
-            num_batches += 1
-            num_samples += rgb.shape[0]
+            #
+            # Only fold a batch into these running sums when its own loss came out
+            # finite - same reasoning as the grad-norm split above (nan + anything is
+            # nan forever), but this accumulator used to skip that check entirely, so
+            # one bad batch silently turned the whole epoch's printed loss/ADE/FDE into
+            # nan even on epochs where the gradient step for that batch was correctly
+            # skipped by the scaler and every other batch was fine.
+            loss_val = total_loss.item()
+            if math.isfinite(loss_val):
+                total_loss_accum += loss_val
+                q_loss_accum += losses["q"].item()
+                for _k in aux_accum:
+                    if _k in losses:
+                        aux_accum[_k] += float(losses[_k].item())
+                wp_loss_accum += losses["wp"].item()
+                ade_accum += losses["ade"].item()
+                fde_accum += losses["fde"].item()
+                lateral_err_accum += losses["lateral"].item()
+                longitudinal_err_accum += losses["longitudinal"].item()
+                heading_err_accum += losses["heading"].item()
+                curvature_err_accum += losses["curvature"].item()
+                num_batches += 1
+                consecutive_nonfinite_loss = 0
+            else:
+                consecutive_nonfinite_loss += 1
+                # A handful of nan/inf losses in a row is the routine AMP overflow case
+                # the scaler already recovers from by skipping the step and halving its
+                # scale. A long run of them back-to-back instead means every forward
+                # pass is nan - i.e. the model's own weights have gone non-finite (seen
+                # in practice on the qwen30m+geom arm: one bad batch's loss was nan, the
+                # scaler correctly skipped that step, but the *next* batch was nan too,
+                # and every batch after it, because the corruption was already in the
+                # weights, not just that one gradient). Grinding through the remaining
+                # epochs at that point trains nothing and only burns GPU time, so fail
+                # fast instead - the orchestrator's watchdog resumes from the latest
+                # dated model_epoch_*.pth, which predates the corruption.
+                if consecutive_nonfinite_loss >= 50:
+                    raise RuntimeError(
+                        f"Aborting: {consecutive_nonfinite_loss} consecutive non-finite "
+                        f"training losses at epoch {epoch}, batch {batch_idx} - the "
+                        "model's weights are almost certainly corrupted (nan/inf), not "
+                        "recovering from a transient overflow. Let the watchdog resume "
+                        "from the latest model_epoch_*.pth instead of continuing here."
+                    )
+            # Counted off `speed` rather than `rgb`: with feature caching on, the batch
+            # carries "vision_features" and no "rgb" at all, so rgb is legitimately None
+            # here. `speed` is present on both paths and is always batch-sized.
+            num_samples += speed.shape[0]
 
             # CUDA work is async, so the compute window has to be closed on a sync or
             # its cost would silently land in the next iteration's data-wait bucket.
@@ -323,6 +479,8 @@ class WorldOnRailsTrainer:
         avg_fde = fde_accum / max(1, num_batches)
         avg_lateral_err = lateral_err_accum / max(1, num_batches)
         avg_longitudinal_err = longitudinal_err_accum / max(1, num_batches)
+        avg_heading_err = heading_err_accum / max(1, num_batches)
+        avg_curvature_err = curvature_err_accum / max(1, num_batches)
         avg_grad_norm = grad_norm_accum / max(1, grad_norm_batches)
         elapsed = time.time() - start_time
         samples_per_sec = num_samples / max(1e-6, elapsed)
@@ -340,6 +498,10 @@ class WorldOnRailsTrainer:
             "wp_fde_m": avg_fde,
             "wp_lateral_error_m": avg_lateral_err,
             "wp_longitudinal_error_m": avg_longitudinal_err,
+            "wp_heading_err": avg_heading_err,
+            "wp_curvature_err": avg_curvature_err,
+            "speed_head_loss": aux_accum["target_speed"] / max(1, num_batches),
+            "path_loss": aux_accum["path"] / max(1, num_batches),
             "grad_norm": avg_grad_norm,
             "nonfinite_grad_batches": nonfinite_batches,
             "clipped_grad_batches": clipped_batches,
@@ -356,7 +518,8 @@ class WorldOnRailsTrainer:
         """Held-out evaluation; empty dict when no validation loader is configured."""
         return run_validation(
             self.model, self.val_loader, self.device, autocast, self.use_amp,
-            self.wp_loss_weight, self.q_loss_weight, self.lateral_loss_weight
+            self.wp_loss_weight, self.q_loss_weight, self.lateral_loss_weight,
+            max_batches=self.max_batches
         )
 
     def _build_scheduler(self, num_epochs: int) -> LambdaLR:
@@ -365,8 +528,18 @@ class WorldOnRailsTrainer:
             warmup_frac=self.warmup_frac, peak_lr=self.lr_heads
         )
 
-    def train(self, num_epochs: int = 50, save_freq: int = 5):
-        """Runs the full distillation training loop with checkpointing."""
+    def train(self, num_epochs: int = 50, save_freq: int = 5, resume_from: Optional[str] = None,
+              stop_epoch: Optional[int] = None):
+        """Runs the full distillation training loop with checkpointing.
+
+        resume_from: path to a `model_epoch_*.pth` written by a prior call (needs its
+        "optimizer" key, so pick a dated snapshot rather than a mid-epoch `latest_model.pth`).
+        Restarts at that checkpoint's epoch + 1 with the same optimizer state and a
+        fast-forwarded LR schedule, so a run interrupted (or deliberately stopped, e.g. to
+        destroy a cloud instance) resumes rather than restarting from scratch. The frozen
+        backbone is not reloaded - it's rebuilt identically from --weights_path/pretrained
+        init, since it never changes during training.
+        """
         print(f"--> Starting World on Rails Distillation Training for {num_epochs} epochs on {self.device.upper()}...")
         self.scheduler = self._build_scheduler(num_epochs)
         best_loss = float("inf")
@@ -379,10 +552,40 @@ class WorldOnRailsTrainer:
         # reference it by name and carry only the trained heads.
         self.ckpt.write_frozen_backbone_once()
 
-        for epoch in range(1, num_epochs + 1):
+        start_epoch = 1
+        if resume_from:
+            ckpt = torch.load(resume_from, map_location=self.device)
+            changed = load_trainable_state(self.model, ckpt["model"], self.ckpt.frozen_keys, resume_from)
+            if changed:
+                print(f"[Warning] {len(changed)} tensors start from their own init (new or reshaped heads): the optimizer state of {resume_from} is not loaded, AdamW starts fresh.")
+            elif "optimizer" in ckpt:
+                try:
+                    self.optimizer.load_state_dict(ckpt["optimizer"])
+                except ValueError as e:  # a new head (TODO A15) changes the parameter groups: AdamW state starts fresh, the weights are loaded
+                    print(f"[Warning] optimizer state of {resume_from} does not fit this model ({e}); starting the AdamW state fresh.")
+            else:
+                print(f"[Warning] {resume_from} has no 'optimizer' key - resuming with a "
+                      f"freshly initialized optimizer (momentum/variance state is lost).")
+            start_epoch = ckpt["epoch"] + 1
+            best_loss = best_metric_so_far(self.save_dir, select_on, ckpt)
+            # LambdaLR's schedule is a pure function of its internal step counter, so
+            # fast-forward by replaying steps rather than reconstructing one - cheap even
+            # over tens of thousands of steps.
+            for _ in range((start_epoch - 1) * len(self.train_loader)):
+                self.scheduler.step()
+            print(f"--> Resumed from {resume_from}: continuing at epoch {start_epoch}/{num_epochs}")
+
+        # stop_epoch ends the run early without shortening the LR schedule (built above for
+        # num_epochs), so a screening run is an exact prefix of the full run it may later resume into.
+        last_epoch = min(num_epochs, stop_epoch) if stop_epoch else num_epochs
+        for epoch in range(start_epoch, last_epoch + 1):
             metrics = self.train_epoch(epoch)
-            metrics.update(self.validate())
-            is_best = metrics[select_on] < best_loss
+            if self.val_loader is not None and (epoch % self.val_every == 0
+                                                or epoch == last_epoch):
+                metrics.update(self.validate())
+            # `select_on` is absent from metrics on a skipped-validation epoch, which is
+            # exactly when no checkpoint should be promoted to best - not a failure case.
+            is_best = select_on in metrics and metrics[select_on] < best_loss
 
             # Checkpointing. One CPU snapshot of the trained heads is shared by every
             # file written this epoch, and the serialization itself runs in a thread,
@@ -408,9 +611,17 @@ class WorldOnRailsTrainer:
             # Optimizer state is only needed to resume, and for AdamW it is twice the
             # size of the weights it tracks - so it rides along with the periodic
             # snapshots rather than being rewritten every epoch.
-            if epoch % save_freq == 0 or epoch == num_epochs:
-                payloads[0][0]["optimizer"] = to_cpu(self.optimizer.state_dict())
-                payloads.append((dict(common), os.path.join(self.save_dir, f"model_epoch_{epoch:03d}.pth")))
+            if epoch % save_freq == 0 or epoch == last_epoch:
+                # Both the "latest" and the dated snapshot need this: "latest" gets
+                # overwritten every subsequent epoch (without optimizer state, since
+                # `common` is rebuilt from scratch each iteration), so it's only ever
+                # resumable in the narrow window before the next epoch's save. The
+                # dated file is the one a resume should actually target.
+                opt_state = to_cpu(self.optimizer.state_dict())
+                payloads[0][0]["optimizer"] = opt_state
+                epoch_payload = dict(common)
+                epoch_payload["optimizer"] = opt_state
+                payloads.append((epoch_payload, os.path.join(self.save_dir, f"model_epoch_{epoch:03d}.pth")))
 
             self.ckpt.save_async(payloads)
             metrics["save_sec"] = time.time() - save_start
@@ -424,6 +635,7 @@ class WorldOnRailsTrainer:
                 f"WP Loss: {metrics['wp_loss']:.4f} | "
                 f"ADE: {metrics['wp_ade_m']:.3f}m | FDE: {metrics['wp_fde_m']:.3f}m | "
                 f"Lat Err: {metrics['wp_lateral_error_m']:.3f}m | Lon Err: {metrics['wp_longitudinal_error_m']:.3f}m | "
+                f"Head: {metrics['wp_heading_err']:.4f} | "
                 f"{val_str}"
                 f"GradNorm: {metrics['grad_norm']:.2f} "
                 f"(clipped {metrics['clipped_grad_batches']}/{metrics['num_batches']}, "
@@ -439,8 +651,10 @@ class WorldOnRailsTrainer:
                            "grad_norm", "nonfinite_grad_batches", "clipped_grad_batches",
                            "lr_backbone", "lr_heads", "samples_per_sec",
                            "data_wait_sec", "compute_sec", "save_sec"]
+            scalar_tags += ["wp_heading_err", "wp_curvature_err"]
             scalar_tags += [k for k in ("val_loss", "val_wp_ade_m", "val_wp_fde_m",
-                                        "val_wp_lateral_error_m", "val_wp_longitudinal_error_m")
+                                        "val_wp_lateral_error_m", "val_wp_longitudinal_error_m",
+                                        "val_wp_heading_err", "val_wp_curvature_err")
                             if k in metrics]
             for tag in scalar_tags:
                 self.logger.add_scalar(f"wor/{tag}", metrics[tag], epoch)
@@ -449,7 +663,8 @@ class WorldOnRailsTrainer:
             # a perfect held-out score in any downstream plot.
             val_cols = {k: round(metrics[k], 5) for k in (
                 "val_loss", "val_wp_ade_m", "val_wp_fde_m",
-                "val_wp_lateral_error_m", "val_wp_longitudinal_error_m", "val_time_sec"
+                "val_wp_lateral_error_m", "val_wp_longitudinal_error_m",
+                "val_wp_heading_err", "val_wp_curvature_err", "val_time_sec"
             ) if k in metrics}
 
             self.csv_logger.log_step({
@@ -472,6 +687,8 @@ class WorldOnRailsTrainer:
                 "wp_fde_m": round(metrics["wp_fde_m"], 4),
                 "wp_lateral_error_m": round(metrics["wp_lateral_error_m"], 4),
                 "wp_longitudinal_error_m": round(metrics["wp_longitudinal_error_m"], 4),
+                "wp_heading_err": round(metrics["wp_heading_err"], 5),
+                "wp_curvature_err": round(metrics["wp_curvature_err"], 5),
                 "lr_backbone": f"{metrics['lr_backbone']:.2e}",
                 "lr_heads": f"{metrics['lr_heads']:.2e}",
                 "grad_norm": round(metrics["grad_norm"], 4),

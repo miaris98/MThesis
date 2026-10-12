@@ -5,150 +5,23 @@ Implements the end-to-end sensorimotor driving model from:
 and compatible with the PCLA (Pretrained CARLA Leaderboard Agents) framework.
 """
 from typing import Dict, List, Optional, Tuple, Union
-import math
-import os
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.models as models
 
 # Re-exported so `from ...wor_policy import PIDController` keeps working.
-from src.models.world_on_rails.pid_controller import PIDController
+from src.models.world_on_rails.pid_controller import PIDController, tfpp_brake_override
 
 
-class PretrainedVisionEncoder(nn.Module):
-    """
-    Multi-Camera / Wide-RGB Vision Backbone initialized with ImageNet or CARLA-domain weights.
-    Supports ResNet-18, ResNet-34, ResNet-50, and ConvNeXt.
-    """
-    def __init__(
-        self,
-        backbone_name: str = "resnet34",
-        pretrained: bool = True,
-        freeze_backbone: bool = True,
-        weights_path: Optional[str] = None
-    ):
-        super().__init__()
-        self.backbone_name = backbone_name.lower()
-        # Frozen by default: this project trains the driving policy on top of a
-        # pretrained perception stack and treats training the vision model itself as
-        # out of scope (the PPO/SAC path in config/training_config.py already
-        # defaults the same way).
-        self.freeze_backbone = freeze_backbone
-
-        if "resnet18" in self.backbone_name:
-            weights = models.ResNet18_Weights.IMAGENET1K_V1 if (pretrained and weights_path is None) else None
-            base = models.resnet18(weights=weights)
-            self.out_channels = 512
-        elif "resnet50" in self.backbone_name:
-            weights = models.ResNet50_Weights.IMAGENET1K_V2 if (pretrained and weights_path is None) else None
-            base = models.resnet50(weights=weights)
-            self.out_channels = 2048
-        else:  # Default: resnet34
-            weights = models.ResNet34_Weights.IMAGENET1K_V1 if (pretrained and weights_path is None) else None
-            base = models.resnet34(weights=weights)
-            self.out_channels = 512
-
-        # Extract spatial feature extractor (retaining 2D spatial dimensions)
-        self.conv1 = base.conv1
-        self.bn1 = base.bn1
-        self.relu = base.relu
-        self.maxpool = base.maxpool
-        self.layer1 = base.layer1
-        self.layer2 = base.layer2
-        self.layer3 = base.layer3
-        self.layer4 = base.layer4
-
-        # ImageNet normalization constants
-        self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
-        self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
-
-        if weights_path is not None:
-            self._load_custom_weights(weights_path)
-
-        if self.freeze_backbone:
-            for param in self.parameters():
-                param.requires_grad = False
-
-    def train(self, mode: bool = True):
-        """Keeps a frozen backbone in eval mode.
-
-        requires_grad=False and torch.no_grad() stop the *weights* changing, but
-        BatchNorm still updates running_mean/running_var on every forward pass while
-        in train mode. A "frozen" backbone would therefore keep drifting its
-        normalization statistics toward the training data - which both contradicts
-        using a fixed pretrained perception stack and makes its features
-        non-deterministic across epochs.
-        """
-        return super().train(False) if self.freeze_backbone else super().train(mode)
-
-    def _load_custom_weights(self, path: str):
-        """Loads domain-specific CARLA weights (e.g., LAV, TransFuser++, WoR, TCP, Roach, or PCLA)."""
-        if not os.path.exists(path):
-            print(f"[Warning] Specified weights path does not exist: {path}")
-            return
-
-        print(f"--> Loading CARLA-domain pretrained vision weights from: {path}")
-        checkpoint = torch.load(path, map_location="cpu")
-        state_dict = checkpoint.get("state_dict", checkpoint.get("model", checkpoint.get("state_dict_bev", checkpoint)))
-
-        prefixes = [
-            "image_encoder.", "encoder.image_encoder.", "encoder.backbone.", "encoder.",
-            "backbone.", "perception.", "bev_planner.", "rgb_encoder.", "camera_encoder.",
-            "bev_encoder.", "model.", "net.", "policy.encoder.",
-            # The original WoR paper's own CameraModel (pcla_agents/wor/rails/models/
-            # main_model.py) names its ResNet34 backbone "backbone_wide" - its
-            # checkpoints are otherwise a plain torchvision-style ResNet, so this
-            # prefix alone is enough for a near-full match (unlike RegNet-backboned
-            # sources like TransFuser++/garage_2, which can only ever partially match
-            # regardless of prefix stripping since the layers themselves differ).
-            "backbone_wide.", "image_model.backbone_wide."
-        ]
-
-        filtered = {}
-        for k, v in state_dict.items():
-            clean_k = k
-            for prefix in prefixes:
-                if clean_k.startswith(prefix):
-                    clean_k = clean_k[len(prefix):]
-            filtered[clean_k] = v
-
-        missing, unexpected = self.load_state_dict(filtered, strict=False)
-        matched_keys = len(self.state_dict()) - len(missing)
-        print(f"✓ Matched & loaded {matched_keys}/{len(self.state_dict())} vision backbone parameters from CARLA checkpoint.")
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: RGB tensor of shape (B, 3, H, W) or (B, H, W, 3) in range [0, 255] or [0.0, 1.0].
-        Returns:
-            Spatial feature map of shape (B, out_channels, H/32, W/32).
-        """
-        if x.ndim == 4 and x.shape[-1] == 3:
-            x = x.permute(0, 3, 1, 2)
-        if x.max() > 1.0:
-            x = x / 255.0
-
-        x_norm = (x - self.mean) / self.std
-
-        if self.freeze_backbone:
-            with torch.no_grad():
-                h = self.relu(self.bn1(self.conv1(x_norm)))
-                h = self.maxpool(h)
-                h = self.layer1(h)
-                h = self.layer2(h)
-                h = self.layer3(h)
-                h = self.layer4(h)
-        else:
-            h = self.relu(self.bn1(self.conv1(x_norm)))
-            h = self.maxpool(h)
-            h = self.layer1(h)
-            h = self.layer2(h)
-            h = self.layer3(h)
-            h = self.layer4(h)
-
-        return h
+# Re-exported so `from ...wor_policy import PretrainedVisionEncoder` (and build_vision_encoder)
+# keeps working for every existing caller. The implementations moved to vision_encoder.py when
+# this module outgrew the 500-line limit; see that module's docstring for the seam.
+from src.models.world_on_rails.vision_encoder import (  # noqa: F401
+    PretrainedVisionEncoder, build_vision_encoder)
+from src.models.world_on_rails.ray_geometry import (
+    RAY_GEOMETRY_CHANNELS, append_ray_geometry)
+from src.config.camera import DEFAULT_CROP_BOTTOM_FRAC
 
 
 class SpatialQHead(nn.Module):
@@ -161,10 +34,12 @@ class SpatialQHead(nn.Module):
         state_dim: int = 64,
         num_commands: int = 6,
         grid_size: Tuple[int, int] = (16, 16),
-        num_rails: int = 9
+        num_rails: int = 9,
+        use_rail_q: bool = True
     ):
         super().__init__()
         self.grid_size = grid_size
+        self.use_rail_q = use_rail_q
         self.num_commands = num_commands
         self.num_rails = num_rails
 
@@ -178,12 +53,14 @@ class SpatialQHead(nn.Module):
             nn.ReLU(inplace=True)
         )
 
-        # Q-map decoder: outputs (B, num_commands, H_grid, W_grid)
+        # Q-map decoder: outputs (B, num_commands, H_grid, W_grid). Built only when
+        # something trains it - with --q_loss_weight 0 and PDM-Lite's all-zero target_q it
+        # gets no gradient, and act() never reads it.
         self.q_map_head = nn.Sequential(
             nn.Conv2d(128, 64, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(64, num_commands, kernel_size=1)
-        )
+        ) if use_rail_q else None
 
         # Direct rail-path Q-value head: (B, num_commands, num_rails)
         self.rail_head = nn.Sequential(
@@ -192,7 +69,7 @@ class SpatialQHead(nn.Module):
             nn.Linear(128, 128),
             nn.ReLU(inplace=True),
             nn.Linear(128, num_commands * num_rails)
-        )
+        ) if use_rail_q else None
 
         # Waypoint trajectory offset head: (B, num_commands, 5, 2)
         self.waypoint_head = nn.Sequential(
@@ -224,17 +101,27 @@ class SpatialQHead(nn.Module):
         fused = self.fusion_conv(fused)
 
         # Q-map
-        q_map = self.q_map_head(fused)
-        if (H, W) != self.grid_size:
-            q_map = F.interpolate(q_map, size=self.grid_size, mode="bilinear", align_corners=False)
+        q_map = None
+        if self.q_map_head is not None:
+            q_map = self.q_map_head(fused)
+            if (H, W) != self.grid_size:
+                q_map = F.interpolate(q_map, size=self.grid_size, mode="bilinear",
+                                      align_corners=False)
 
         # Discrete Rail Q-values
-        rail_q = self.rail_head(fused).view(B, self.num_commands, self.num_rails)
+        rail_q = (self.rail_head(fused).view(B, self.num_commands, self.num_rails)
+                  if self.rail_head is not None else None)
 
         # Continuous Waypoint offsets (x_forward, y_lateral)
         waypoints = self.waypoint_head(fused).view(B, self.num_commands, 5, 2)
 
-        return q_map, rail_q, waypoints
+        # The globally-pooled fusion output is returned too: it is this head's equivalent of
+        # the transformer's policy token - the one vector that has seen both the features and
+        # the state - and it is what the target-speed head needs in order to see the road at
+        # all. Pooled here rather than by the caller so the two arms stay symmetric.
+        fused_vec = F.adaptive_avg_pool2d(fused, 1).flatten(1)
+
+        return q_map, rail_q, waypoints, fused_vec
 
 
 class WorldOnRailsPolicy(nn.Module):
@@ -253,7 +140,12 @@ class WorldOnRailsPolicy(nn.Module):
         grid_size: Tuple[int, int] = (16, 16),
         num_rails: int = 9,
         route_points: int = 4,
-        pool_vision: bool = False
+        pool_vision: bool = False,
+        use_target_speed: bool = False,
+        target_speed_input: str = "policy",
+        use_rail_q: bool = True,
+        use_ray_geometry: bool = False,
+        crop_bottom_frac: float = DEFAULT_CROP_BOTTOM_FRAC
     ):
         super().__init__()
         self.num_commands = num_commands
@@ -267,7 +159,7 @@ class WorldOnRailsPolicy(nn.Module):
         self.pool_vision = pool_vision
 
         # 1. Pretrained Multi-view Vision Encoder
-        self.encoder = PretrainedVisionEncoder(
+        self.encoder = build_vision_encoder(
             backbone_name=backbone_name,
             pretrained=pretrained,
             freeze_backbone=freeze_backbone,
@@ -297,16 +189,38 @@ class WorldOnRailsPolicy(nn.Module):
         )
 
         # 3. Spatial Q-Value and Waypoint Head
+        # Same contract as the qwen arm: geometry arrives as extra channels on the feature
+        # map, so both trunks are handed identical information.
+        self.use_rail_q = bool(use_rail_q)
+        self.use_ray_geometry = bool(use_ray_geometry)
+        self.crop_bottom_frac = float(crop_bottom_frac)
+        geo_ch = RAY_GEOMETRY_CHANNELS if self.use_ray_geometry else 0
         self.q_head = SpatialQHead(
-            in_channels=self.encoder.out_channels,
+            in_channels=self.encoder.out_channels + geo_ch,
             state_dim=state_dim,
             num_commands=num_commands,
             grid_size=grid_size,
-            num_rails=num_rails
+            num_rails=num_rails,
+            use_rail_q=bool(use_rail_q)
         )
 
         # 4. Controller
         self.controller = PIDController()
+
+        # 5. Optional target-speed classifier, reading the same fused state the waypoint head
+        # does. Opt-in so it can be ablated against an otherwise identical run.
+        # "policy" reads SpatialQHead's pooled fusion output, which has seen the image.
+        # "state" reads the pre-fusion state embedding, which has not - the original
+        # behaviour, kept only so earlier runs stay reproducible. The comment this replaces
+        # claimed the head read "the same fused state the waypoint head does"; it did not.
+        self.target_speed_input = str(target_speed_input).lower()
+        if use_target_speed:
+            from src.models.world_on_rails.aux_heads import TargetSpeedHead
+            # 128 is SpatialQHead.fusion_conv's output width.
+            ts_dim = 128 if self.target_speed_input == "policy" else state_dim
+            self.target_speed_head = TargetSpeedHead(ts_dim)
+        else:
+            self.target_speed_head = None
 
     def embed_state(
         self,
@@ -339,17 +253,28 @@ class WorldOnRailsPolicy(nn.Module):
 
     def forward(
         self,
-        rgb: torch.Tensor,
+        rgb: Optional[torch.Tensor],
         speed: torch.Tensor,
         command: torch.Tensor,
-        route: Optional[torch.Tensor] = None
+        route: Optional[torch.Tensor] = None,
+        vision_features: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass.
         Args:
-            rgb: Image tensor (B, 3, H, W) or (B, H, W, 3)
+            rgb: Image tensor (B, 3, H, W) or (B, H, W, 3). May be None if
+                `vision_features` is supplied instead (see below).
             speed: Scalar vehicle speed tensor (B, 1) or (B, )
             command: High-level command indices (B, )
+            vision_features: Precomputed `self.encoder(rgb)` output, (B, C, H/32, W/32).
+                The frozen backbone's output is a deterministic function of a frame that
+                never changes across epochs (no RGB augmentation anywhere in this
+                pipeline - see wor_dataset.py), so it can be computed once, cached to
+                disk, and replayed here instead of re-run 50 times. Passing this skips
+                `self.encoder(rgb)` entirely; `rgb` is then unused and may be None. Not
+                used at all when None (the default), so every existing caller - and the
+                already-running live training processes, which hold this function in
+                memory and never re-read this file - is unaffected.
         Returns:
             Dict containing:
                 'q_map': (B, num_commands, H_grid, W_grid)
@@ -358,8 +283,8 @@ class WorldOnRailsPolicy(nn.Module):
                 'selected_waypoints': (B, 5, 2) based on active command
                 'selected_rail_q': (B, num_rails) based on active command
         """
-        # 1. Extract visual features
-        feats = self.encoder(rgb)
+        # 1. Extract visual features (or reuse them, see vision_features above)
+        feats = vision_features if vision_features is not None else self.encoder(rgb)
         if self.pool_vision:
             feats = F.adaptive_avg_pool2d(feats, (1, 1))
 
@@ -367,26 +292,40 @@ class WorldOnRailsPolicy(nn.Module):
         state_emb = self.embed_state(speed, command, route)
 
         # 3. Predict Q-maps and waypoints
-        q_map, rail_q, waypoints = self.q_head(feats, state_emb)
+        if self.use_ray_geometry:
+            feats = append_ray_geometry(feats, self.crop_bottom_frac)
+        q_map, rail_q, waypoints, fused_vec = self.q_head(feats, state_emb)
 
         # 4. Gather predictions corresponding to current command
-        B = rgb.shape[0]
+        # B and the device come from feats, not rgb: rgb is None on the cached-feature path.
+        B = feats.shape[0]
         if command.ndim > 1:
             cmd_idx = command.argmax(dim=-1).long()
         else:
             cmd_idx = command.long().clamp(0, self.num_commands - 1)
 
-        batch_indices = torch.arange(B, device=rgb.device)
+        batch_indices = torch.arange(B, device=feats.device)
         selected_waypoints = waypoints[batch_indices, cmd_idx]      # (B, 5, 2)
-        selected_rail_q = rail_q[batch_indices, cmd_idx]            # (B, num_rails)
+        selected_rail_q = (rail_q[batch_indices, cmd_idx]           # (B, num_rails)
+                           if rail_q is not None else None)
 
-        return {
-            "q_map": q_map,
-            "rail_q": rail_q,
+        out = {
             "waypoints": waypoints,
             "selected_waypoints": selected_waypoints,
-            "selected_rail_q": selected_rail_q
         }
+        # Omitted rather than zeroed when the rail heads are off - see the qwen arm.
+        if rail_q is not None:
+            out["q_map"] = q_map
+            out["rail_q"] = rail_q
+            out["selected_rail_q"] = selected_rail_q
+        # Longitudinal intent as an explicit output rather than something the PID infers from
+        # waypoint spacing. Spacing can express "slow" but only approaches "stopped" in the
+        # limit, so a policy that should brake hard instead creeps - and "stationary while
+        # steering", which is how PDM-Lite solves ParkingExit, is not expressible at all.
+        if self.target_speed_head is not None:
+            out["target_speed_logits"] = self.target_speed_head(
+                fused_vec if self.target_speed_input == "policy" else state_emb)
+        return out
 
     @torch.no_grad()
     def act(
@@ -399,6 +338,18 @@ class WorldOnRailsPolicy(nn.Module):
     ) -> Tuple[float, float, float]:
         """
         Generates (steer, throttle, brake) controls for direct CARLA execution.
+
+        `speed` is in **metres per second**. That is the unit PDM-Lite's measurement
+        files store and therefore the unit `speed_mlp` was trained on, so it is the
+        network's input verbatim. The PID is the only consumer that wants km/h and the
+        conversion happens here, at the one place that knows both.
+
+        This used to hand the same scalar to both, which cannot be right for both: the
+        two callers in the repo disagreed about which unit they were passing, so each
+        was feeding one consumer correctly and the other a value 3.6x off. Passing m/s
+        to the controller silently raises its effective target from 20 km/h to 72;
+        passing km/h to the network puts its input 3.6x outside the training
+        distribution. Neither raises an error.
 
         `route` is the ego-frame planned route, (route_points, 2). Omitting it feeds
         a zero route, which leaves the policy with no navigation intent and makes it
@@ -421,14 +372,14 @@ class WorldOnRailsPolicy(nn.Module):
         rgb_tensor = rgb_tensor.to(device)
 
         if isinstance(speed, (int, float)):
-            speed_tensor = torch.tensor([[speed]], device=device, dtype=torch.float32)
-            current_speed_kmh = float(speed)
+            speed_mps = float(speed)
         elif isinstance(speed, torch.Tensor):
-            speed_tensor = speed.to(device).view(-1, 1).float()
-            current_speed_kmh = float(speed_tensor.item())
+            speed_mps = float(speed.view(-1)[0].item())
         else:
-            speed_tensor = torch.tensor([[float(speed)]], device=device, dtype=torch.float32)
-            current_speed_kmh = float(speed)
+            speed_mps = float(speed)
+
+        speed_tensor = torch.tensor([[speed_mps]], device=device, dtype=torch.float32)
+        current_speed_kmh = speed_mps * 3.6
 
         cmd_tensor = torch.tensor([command], device=device, dtype=torch.long)
 
@@ -445,8 +396,26 @@ class WorldOnRailsPolicy(nn.Module):
         except Exception:
             wps = wps_tensor.tolist()
 
+        # Longitudinal intent, when the policy has a head for it. Without this the
+        # controller falls back to PIDController.target_speed - a CONSTANT 20 km/h that
+        # nothing in this repo ever writes to - so the waypoints steered and the car
+        # cruised at a fixed speed regardless of red lights, lead vehicles or turns.
+        # The head was trained but its output was discarded here.
+        target_speed_kmh = None
+        if self.target_speed_head is not None and "target_speed_logits" in out:
+            # expected_speed returns m/s (TARGET_SPEEDS is in m/s); the PID wants km/h,
+            # and this is the one place that knows both - same convention as speed above.
+            target_speed_kmh = 3.6 * float(
+                self.target_speed_head.expected_speed(
+                    out["target_speed_logits"])[0].item())
+            # Published so the eval HUD and telemetry report the live decision rather
+            # than the unchanging default (see eval_wor.py's target_speed_kmh read).
+            self.controller.target_speed = target_speed_kmh
+
         steer, throttle, brake = self.controller.control_from_waypoints(
             waypoints=wps,
-            current_speed_kmh=current_speed_kmh
+            current_speed_kmh=current_speed_kmh,
+            target_speed_kmh=target_speed_kmh
         )
+        throttle, brake = tfpp_brake_override(throttle, brake, speed_mps, target_speed_kmh)
         return steer, throttle, brake

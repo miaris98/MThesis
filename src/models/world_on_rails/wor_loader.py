@@ -10,6 +10,7 @@ import torch.nn as nn
 
 from src.models.world_on_rails.wor_policy import WorldOnRailsPolicy
 from src.models.world_on_rails.qwen_wor_policy import QwenWorldOnRailsPolicy
+from src.config.camera import DEFAULT_CROP_BOTTOM_FRAC
 
 
 # The actual pretrained-WoR checkpoints live in the MasoudJTehrani/PCLA HuggingFace
@@ -79,7 +80,8 @@ def load_wor_model(
     policy_arch: str = "cnn",
     route_points: int = 4,
     vision_grid: Optional[int] = None,
-    pool_vision: Optional[bool] = None
+    pool_vision: Optional[bool] = None,
+    use_target_speed: Optional[bool] = None
 ) -> Union[WorldOnRailsPolicy, QwenWorldOnRailsPolicy]:
     """
     Instantiates and loads a World on Rails policy model. `policy_arch` selects the
@@ -116,21 +118,63 @@ def load_wor_model(
             return stored
         return default
 
+    # A checkpoint trained with the target-speed head has extra tensors; building the model
+    # without it would drop them on load and quietly run a different architecture. Derived from
+    # the stored loss weight so older checkpoints (which have neither key) resolve to False.
+    stored_ts = ckpt_cfg.get("use_target_speed")
+    if stored_ts is None and ckpt_cfg.get("target_speed_loss_weight") is not None:
+        stored_ts = float(ckpt_cfg.get("target_speed_loss_weight") or 0.0) > 0
+    resolved_ts = bool(_resolve("use_target_speed", use_target_speed,
+                                bool(stored_ts) if stored_ts is not None else False))
+
+
+    # These three change tensor shapes, so a checkpoint must be rebuilt with the values it
+    # was trained under. The defaults are the pre-stamp behaviour, so older checkpoints -
+    # which carry none of these keys - still rebuild exactly as they always did.
+    # The checkpoint wins over the caller here, unlike the flags above. route_points sizes
+    # route_proj, and every evaluation entry point passes its own default (4) rather than the
+    # trained value - which is stamped but was never read - so a --route_points 20 checkpoint
+    # was rebuilt with Linear(8) and died on a size mismatch. There is no legitimate reason
+    # to evaluate a checkpoint at a route length it was not trained on.
+    resolved_route_points = int(_resolve("route_points", None, route_points))
+    if resolved_route_points != route_points:
+        print(f"--> route_points={resolved_route_points} from the checkpoint "
+              f"(caller asked for {route_points}); the route fed in must match.")
+    resolved_ts_input = str(_resolve("target_speed_input", None, "state"))
+    resolved_rail_q = bool(_resolve("use_rail_q", None, True))
+    resolved_ray_geo = bool(_resolve("use_ray_geometry", None, False))
+    resolved_crop = float(_resolve("crop_bottom_frac", None, DEFAULT_CROP_BOTTOM_FRAC))
+
     if policy_arch == "cnn":
         model = WorldOnRailsPolicy(
             backbone_name=backbone_name,
             pretrained=pretrained_backbone,
             freeze_backbone=freeze_backbone,
-            pool_vision=bool(_resolve("pool_vision", pool_vision, False))
+            route_points=resolved_route_points,
+            pool_vision=bool(_resolve("pool_vision", pool_vision, False)),
+            use_target_speed=resolved_ts,
+            target_speed_input=resolved_ts_input,
+            use_rail_q=resolved_rail_q,
+            use_ray_geometry=resolved_ray_geo,
+            crop_bottom_frac=resolved_crop
         )
     else:
         model = QwenWorldOnRailsPolicy(
             backbone_name=backbone_name,
             pretrained=pretrained_backbone,
             freeze_backbone=freeze_backbone,
-            route_points=route_points,
+            route_points=resolved_route_points,
             model_size=policy_arch.replace("qwen", ""),
-            vision_grid=int(_resolve("vision_grid", vision_grid, 8))
+            vision_grid=_resolve("vision_grid", vision_grid, 8),
+            use_target_speed=resolved_ts,
+            target_speed_input=resolved_ts_input,
+            use_rail_q=resolved_rail_q,
+            use_ray_geometry=resolved_ray_geo,
+            crop_bottom_frac=resolved_crop,
+            use_path_head=bool(_resolve("use_path_head", None, False)),
+            path_cascade=bool(_resolve("path_cascade", None, False)),
+            token_mode=str(_resolve("token_mode", None, "pool")),
+            s2d_patch=int(_resolve("s2d_patch", None, 3))
         )
 
     if checkpoint_path and os.path.exists(checkpoint_path):
@@ -157,12 +201,14 @@ def load_wor_model(
                 state_dict = {**frozen_sd, **state_dict}
                 print(f"✓ Merged {len(frozen_sd)} frozen backbone tensors from: {frozen_path}")
             else:
-                # Not fatal: the backbone falls back to whatever the model was built
-                # with (ImageNet, or --weights_path). Loud, because that silently
-                # changes which perception stack the policy heads sit on.
-                print(f"[Warning] Checkpoint is partial but {frozen_path} is missing - "
-                      f"the vision backbone will keep its freshly initialized weights, "
-                      f"which likely does NOT match what these heads were trained on.")
+                # Fatal. This used to be a warning, and the backbone kept its fresh init: random for
+                # regnety (built with pretrained=False), ImageNet for resnet. An eval box that received
+                # only model_epoch_*.pth scored 50-60 DS on a random backbone and those numbers had to
+                # be thrown away (S-072). There is no configuration in which these heads mean anything
+                # without the backbone they were trained on.
+                raise FileNotFoundError(
+                    f"{checkpoint_path} is a heads-only checkpoint but {frozen_path} is missing. "
+                    f"Copy frozen_backbone.pth from the training run's save_dir next to it.")
 
         clean_dict = {}
         for k, v in state_dict.items():

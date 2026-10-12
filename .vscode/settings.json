@@ -1,0 +1,10 @@
+{
+  "tinymist.preview.pinMain": "Thesis_typist/MIT-Thesis.typ",
+  "tinymist.exportPdf": "onSave",
+  "tinymist.formatterMode": "typstyle",
+  "[typst]": {
+    "editor.defaultFormatter": "myriad-dreamin.tinymist",
+    "editor.formatOnSave": true,
+    "editor.wordWrap": "on"
+  }
+}

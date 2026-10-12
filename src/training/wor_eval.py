@@ -17,7 +17,10 @@ def waypoint_losses(
     target_q: torch.Tensor,
     wp_loss_weight: float = 1.0,
     q_loss_weight: float = 0.0,
-    lateral_loss_weight: float = 3.0
+    lateral_loss_weight: float = 3.0,
+    heading_loss_weight: float = 0.0,
+    curvature_loss_weight: float = 0.0,
+    heading_min_step_m: float = 0.10
 ) -> Dict[str, torch.Tensor]:
     """Waypoint imitation loss, Q distillation loss, and interpretable trajectory error.
 
@@ -31,13 +34,80 @@ def waypoint_losses(
     Reporting them separately is equally deliberate: the combined `wp_loss` is
     `longitudinal + lateral_loss_weight * lateral`, so a change in it cannot be
     attributed to an axis without the split.
+
+    `heading` and `curvature` address what the axis split exposed but does not fix.
+    Measured on the four-town runs, `longitudinal + 3 * lateral` decomposes as 0.433 +
+    3*0.052 = 0.589, i.e. **73% of the gradient budget is spent on forward displacement
+    that the steering controller never reads** - and forward displacement is close to
+    the integral of the speed scalar the policy is already handed, so most of that
+    budget buys nothing at all.
+
+    Both new terms are scale-free in the axis that matters:
+
+      heading    1 - cos(angle) between predicted and expert segment directions, taken
+                 over unit vectors rather than atan2 differences. atan2 is ill-defined
+                 as a segment shrinks to zero (a stopped vehicle) and wraps at +-pi;
+                 the cosine form has neither problem. Segments whose *expert* step is
+                 below `heading_min_step_m` carry no defined direction and are masked
+                 out instead of contributing noise.
+      curvature  L1 between the second differences of the two paths. This is what
+                 penalises the point-to-point zig-zag that a per-waypoint L1 is
+                 indifferent to, and it is the derivative term of the PID that such
+                 zig-zag actually excites.
+
+    The ego origin is prepended before differencing, so the first segment is the one
+    from the vehicle to the first waypoint - the immediate heading the controller steers
+    on right now, which a difference over predicted points alone would skip.
+
+    Both default to 0.0: with the weights off this function is numerically identical to
+    the version the existing four-town results were measured with.
     """
     pred_wp = out["selected_waypoints"]
-    loss_q = F.mse_loss(out["selected_rail_q"], target_q)
+
+    # Defends against a corrupt/degenerate ground-truth record, not against the model:
+    # seen in practice on the qwen30m+geom 8-town run, where training reproducibly hit
+    # a non-finite loss at the exact same epoch and batch index across multiple restarts
+    # from a clean checkpoint - i.e. a specific data sample, not a random numerical
+    # fluke. clamp_min() elsewhere in this function only enforces a floor, so it does
+    # nothing against an outright inf/nan already present in a waypoint; one such value
+    # makes this function's scalar `total` nan, which poisons that whole batch's
+    # gradient for every sample in it, not just the bad one. nan_to_num neutralises that
+    # at the source, for both tensors, before anything downstream can propagate it.
+    target_wp = torch.nan_to_num(target_wp, nan=0.0, posinf=1e4, neginf=-1e4)
+    pred_wp = torch.nan_to_num(pred_wp, nan=0.0, posinf=1e4, neginf=-1e4)
+
+    # Absent when the policy was built without rail heads (use_rail_q=False): nothing
+    # trains them under this project's q_loss_weight=0, so they are not always built.
+    # Zero here is honest - the term genuinely contributes nothing - unlike a zero coming
+    # from an untrained head, which is what the reported q_loss used to be.
+    loss_q = (F.mse_loss(out["selected_rail_q"], target_q)
+              if "selected_rail_q" in out else pred_wp.sum() * 0.0)
     loss_wp_x = F.l1_loss(pred_wp[..., 0], target_wp[..., 0])
     loss_wp_y = F.l1_loss(pred_wp[..., 1], target_wp[..., 1])
     loss_wp = loss_wp_x + lateral_loss_weight * loss_wp_y
-    total = q_loss_weight * loss_q + wp_loss_weight * loss_wp
+
+    # Geometry in fp32 regardless of the ambient autocast: these terms normalise by a
+    # vector length, and a half-precision norm of a sub-metre segment is exactly where
+    # that goes wrong.
+    pred_f, tgt_f = pred_wp.float(), target_wp.float()
+    origin = torch.zeros_like(pred_f[:, :1])
+    pred_seg = torch.cat([origin, pred_f], dim=1).diff(dim=1)   # (B, 5, 2)
+    tgt_seg = torch.cat([origin, tgt_f], dim=1).diff(dim=1)
+
+    pred_len = pred_seg.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    tgt_len = tgt_seg.norm(dim=-1, keepdim=True)
+    cos_sim = (pred_seg * tgt_seg).sum(dim=-1, keepdim=True) / (pred_len * tgt_len.clamp_min(1e-6))
+    moving = (tgt_len > heading_min_step_m).float()
+    loss_heading = ((1.0 - cos_sim) * moving).sum() / moving.sum().clamp_min(1.0)
+
+    loss_curvature = (pred_seg.diff(dim=1) - tgt_seg.diff(dim=1)).abs().mean()
+
+    total = (
+        q_loss_weight * loss_q
+        + wp_loss_weight * loss_wp
+        + heading_loss_weight * loss_heading
+        + curvature_loss_weight * loss_curvature
+    )
 
     with torch.no_grad():
         per_point = torch.norm(pred_wp.float() - target_wp.float(), dim=-1)  # (B, 5)
@@ -48,6 +118,10 @@ def waypoint_losses(
         "wp": loss_wp,
         "lateral": loss_wp_y,
         "longitudinal": loss_wp_x,
+        # Always computed, never conditional on the weights: the point of these numbers
+        # is to be comparable across runs that did and did not train on them.
+        "heading": loss_heading,
+        "curvature": loss_curvature,
         "ade": per_point.mean(),
         "fde": per_point[:, -1].mean()
     }
@@ -71,6 +145,34 @@ def to_device_batch(batch: Dict[str, torch.Tensor], device: str):
     )
 
 
+def to_device_batch_with_features(batch: Dict[str, torch.Tensor], device: str):
+    """Like to_device_batch, but also surfaces a precomputed vision-encoder feature map when
+    the batch carries one instead of raw pixels (see WorldOnRailsDataset's feature_cache_tag).
+
+    A separate function rather than changing to_device_batch's signature: the latter's 6-tuple
+    return is a stable contract other callers (check_val_noise.py) already depend on, and this
+    project's own history is full of exactly this kind of quiet-shape-change bug (11.x).
+    """
+    vision_features = batch.get("vision_features")
+    if vision_features is not None:
+        # rgb is None on this path - forward() is told to skip the encoder entirely rather
+        # than being handed a zero image it would otherwise happily (and wrongly) encode.
+        rgb = None
+        vision_features = vision_features.to(device, non_blocking=True)
+    else:
+        rgb = batch["rgb"].to(device, non_blocking=True)
+        rgb = rgb.permute(0, 3, 1, 2).float().div_(255.0)
+    return (
+        rgb,
+        vision_features,
+        batch["speed"].to(device, non_blocking=True),
+        batch["command"].to(device, non_blocking=True),
+        batch["route"].to(device, non_blocking=True),
+        batch["target_q"].to(device, non_blocking=True),
+        batch["target_waypoints"].to(device, non_blocking=True)
+    )
+
+
 @torch.no_grad()
 def run_validation(
     model,
@@ -80,12 +182,30 @@ def run_validation(
     use_amp: bool,
     wp_loss_weight: float = 1.0,
     q_loss_weight: float = 0.0,
-    lateral_loss_weight: float = 3.0
+    lateral_loss_weight: float = 3.0,
+    max_batches: int = 0
 ) -> Dict[str, float]:
     """Evaluates the current weights on the held-out set.
 
     Returns an empty dict when there is no validation loader, which is what leaves the
     val_* telemetry columns blank rather than filling them with a misleading zero.
+
+    Note what is deliberately *not* passed through: `heading_loss_weight` and
+    `curvature_loss_weight` are left at their 0.0 defaults here even when the training
+    objective uses them. `val_loss` is both the `is_best` selection metric and the
+    number every earlier run is recorded against (the four-town comparison, the three
+    seeds, the size curve), so folding new terms into it would silently redefine the
+    quantity those results are stated in and make the whole series incomparable. A run
+    that trains with heading supervision therefore still has to prove itself on the
+    original held-out objective. The heading/curvature errors are reported alongside as
+    diagnostics, which also means they are measurable on runs that never trained on them.
+
+    `max_batches` caps the number of validation batches, mirroring the training loop's smoke-test
+    cap. Without it a capped "epoch" runs a handful of training batches and then the entire
+    held-out set - on the full PDM-Lite split that is ~100 train batches followed by ~2,070
+    validation ones, so the wall time a smoke test reports would be almost entirely validation
+    and would not estimate epoch cost at all. A capped val_loss is a timing artefact, not a
+    model-quality number, so callers that cap must not compare it against a full run's.
     """
     if val_loader is None:
         return {}
@@ -93,13 +213,17 @@ def run_validation(
     was_training = model.training
     model.eval()
     start = time.time()
-    acc = {"loss": 0.0, "ade": 0.0, "fde": 0.0, "lat": 0.0, "lon": 0.0}
+    acc = {"loss": 0.0, "ade": 0.0, "fde": 0.0, "lat": 0.0, "lon": 0.0,
+           "heading": 0.0, "curvature": 0.0}
     n = 0
 
-    for batch in val_loader:
-        rgb, speed, command, route, target_q, target_wp = to_device_batch(batch, device)
+    for batch_idx, batch in enumerate(val_loader):
+        if max_batches and batch_idx >= max_batches:
+            break
+        rgb, vision_features, speed, command, route, target_q, target_wp = \
+            to_device_batch_with_features(batch, device)
         with autocast_ctx(enabled=use_amp):
-            out = model(rgb, speed, command, route)
+            out = model(rgb, speed, command, route, vision_features=vision_features)
             losses = waypoint_losses(out, target_wp, target_q,
                                      wp_loss_weight, q_loss_weight, lateral_loss_weight)
         acc["loss"] += losses["total"].item()
@@ -107,6 +231,8 @@ def run_validation(
         acc["fde"] += losses["fde"].item()
         acc["lat"] += losses["lateral"].item()
         acc["lon"] += losses["longitudinal"].item()
+        acc["heading"] += losses["heading"].item()
+        acc["curvature"] += losses["curvature"].item()
         n += 1
 
     if was_training:
@@ -119,5 +245,7 @@ def run_validation(
         "val_wp_fde_m": acc["fde"] / d,
         "val_wp_lateral_error_m": acc["lat"] / d,
         "val_wp_longitudinal_error_m": acc["lon"] / d,
+        "val_wp_heading_err": acc["heading"] / d,
+        "val_wp_curvature_err": acc["curvature"] / d,
         "val_time_sec": time.time() - start
     }

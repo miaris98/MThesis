@@ -1,0 +1,26 @@
+# .remote.example — Copy to .remote at the repository root and fill in your box values.
+# .remote is git-ignored; never commit live IPs or ports.
+#
+# Usage:
+#   cp .remote.example .remote
+#   # Edit .remote with your actual Vast.ai / Lambda / RunPod instance details
+#
+# Alternatively, set environment variables instead (useful for CI):
+#   REMOTE_HOST, REMOTE_PORT, REMOTE_USER, REMOTE_WORKSPACE,
+#   REMOTE_VENV, REMOTE_VENV_CARLA, REMOTE_CORES_A/B/C
+
+[remote]
+# SSH connection
+host      = YOUR_IP_HERE
+port      = YOUR_PORT_HERE
+user      = root
+
+# Remote filesystem layout
+workspace = /workspace/MThesis
+venv      = /venv/main/bin
+venv_carla = /venv/carla_py38/bin
+
+# CPU core ranges for parallel Gate 2 training (taskset -c)
+cpu_cores_a = 16-20
+cpu_cores_b = 21-25
+cpu_cores_c = 26-31

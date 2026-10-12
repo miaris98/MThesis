@@ -1,0 +1,117 @@
+From 852832a59782e55290547c69797410316cd8b7f2 Mon Sep 17 00:00:00 2001
+From: dionushs <miaris54@gmail.com>
+Date: Tue, 15 Sep 2026 15:42:17 +0300
+Subject: [PATCH] debug(sensor_agent): verbose diagnostics for the safety-box
+ creep deadlock
+
+Local-only commit against the vendored autonomousvision/carla_garage clone
+(not pushed upstream). Adds, on top of the existing print() lines:
+  - lidar point count inside the safety box vs. raw buffer size, and the
+    box's near-boundary coordinates, on every "Creeping stopped" tick
+  - nearest tracked vehicle/walker actor + distance, to distinguish a real
+    traffic block from a self-hit/ground-clutter artifact
+  - edge-triggered stop-sign start/clear logging
+
+Used to diagnose why Tier 1's TF++ smoke test scored far below what a
+published SOTA model should on Town01: route r000 deadlocked permanently
+in this creep loop while no tracked actor was within 15m, pointing at a
+self-hit rather than a real blockage. Kept for future runs of the same
+kind rather than removed after use.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ team_code/sensor_agent.py | 50 ++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 49 insertions(+), 1 deletion(-)
+
+diff --git a/team_code/sensor_agent.py b/team_code/sensor_agent.py
+index 2dfb393..e81edbd 100644
+--- a/team_code/sensor_agent.py
++++ b/team_code/sensor_agent.py
+@@ -129,6 +129,7 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
+       # There can be max 1 stop sign affecting the ego
+       self.stop_sign_buffer = deque(maxlen=1)
+       self.clear_stop_sign = 0  # Counter if we recently cleared a stop sign
++      self._stop_sign_was_active = False  # 2026-09-15: edge-triggers the stop-sign log line below
+ 
+     # Load model files
+     self.nets = []
+@@ -640,6 +641,7 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
+       if self.config.backbone not in ('aim'):
+         # safety check
+         safety_box = deepcopy(self.lidar_buffer[-1])
++        raw_lidar_points = len(safety_box)
+ 
+         # z-axis
+         safety_box = safety_box[safety_box[..., 2] > self.config.safety_box_z_min]
+@@ -660,7 +662,15 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
+         brake = False
+         self.force_move -= 1
+       else:
+-        print('Creeping stopped by safety box. Step: ', self.step)
++        # 2026-09-15: the plain print here gave no way to tell a legitimate block (a real
++        # vehicle/walker sitting in the safety box) from a harness bug (spurious/ground-clutter
++        # LiDAR points). Only fires while stuck, so the extra actor query is cheap in aggregate.
++        nearest = self._nearest_actor_summary()
++        box_bounds = (safety_box.min(axis=0).tolist() if len(safety_box) else None)
++        print(f'Creeping stopped by safety box. Step: {self.step} | '
++              f'stuck_ticks={self.stuck_detector} lidar_in_box={len(safety_box)}/{raw_lidar_points} '
++              f'nearest_box_point_xyz={box_bounds} stop_for_stop_sign={stop_for_stop_sign} '
++              f'nearest_actor={nearest}', flush=True)
+         throttle = 0.0
+         brake = True
+         self.force_move = self.config.creep_duration
+@@ -694,6 +704,35 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
+ 
+     return control
+ 
++  def _nearest_actor_summary(self, radius=15.0):
++    """Diagnostic only (2026-09-15): reports the closest vehicle/walker ahead of the ego so a
++    safety-box stop can be read off the log as either legitimate (a real actor is there) or a
++    harness bug (nothing is, and the box is reacting to spurious/ground-clutter LiDAR points).
++    Never affects control - swallow any error so a debug query can't take down a route."""
++    try:
++      from srunner.scenariomanager.carla_data_provider import CarlaDataProvider  # pylint: disable=locally-disabled, import-outside-toplevel
++      hero = CarlaDataProvider.get_hero_actor()
++      if hero is None:
++        return 'no hero actor'
++      hero_loc = hero.get_location()
++      world = hero.get_world()
++      best = None
++      for actor in world.get_actors().filter('vehicle.*'):
++        if actor.id == hero.id:
++          continue
++        dist = actor.get_location().distance(hero_loc)
++        if dist <= radius and (best is None or dist < best[0]):
++          best = (dist, actor.type_id)
++      for actor in world.get_actors().filter('walker.*'):
++        dist = actor.get_location().distance(hero_loc)
++        if dist <= radius and (best is None or dist < best[0]):
++          best = (dist, actor.type_id)
++      if best is None:
++        return f'none within {radius}m'
++      return f'{best[1]} at {best[0]:.2f}m'
++    except Exception as e:  # pylint: disable=locally-disabled, broad-except
++      return f'lookup failed: {e}'
++
+   def stop_sign_controller_step(self, ego_speed):
+     """Checks whether the car is intersecting with one of the detected stop signs"""
+     if self.clear_stop_sign > 0:
+@@ -734,6 +773,15 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
+       if np.linalg.norm(self.stop_sign_buffer[0][:2]) > abs(self.config.max_x):
+         self.stop_sign_buffer.pop()
+ 
++    # 2026-09-15: edge-triggered so a long wait prints once, not every tick - lets a stopped
++    # route be read as "obeying a stop sign" vs. "stuck for some other reason" straight from the
++    # log, without cross-referencing against the safety-box prints below.
++    if stop_sign_stop_predicted and not self._stop_sign_was_active:
++      print(f'Stopping for stop sign. Step: {self.step}', flush=True)
++    elif self._stop_sign_was_active and not stop_sign_stop_predicted:
++      print(f'Stop sign cleared. Step: {self.step}', flush=True)
++    self._stop_sign_was_active = stop_sign_stop_predicted
++
+     return stop_sign_stop_predicted
+ 
+   def bb_detected_in_front_of_vehicle(self, ego_speed):
+-- 
+2.33.0.windows.2
+

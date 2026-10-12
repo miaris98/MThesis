@@ -31,11 +31,11 @@ def _per_cell_grad_ratio(policy, spatial: bool = True):
 
     if isinstance(policy, QwenWorldOnRailsPolicy):
         vis, spd, rt, ct, idx = policy._tokenize_state(feats, speed, cmd, route)
-        wp, _ = policy.trunk(vis, spd, rt, ct)
+        wp, _, _ = policy.trunk(vis, spd, rt, ct)
         sel = wp[torch.arange(B), idx]
     else:
         pooled = feats if spatial else torch.nn.functional.adaptive_avg_pool2d(feats, (1, 1))
-        _, _, wp = policy.q_head(pooled, policy.embed_state(speed, cmd, route))
+        _, _, wp, _ = policy.q_head(pooled, policy.embed_state(speed, cmd, route))
         sel = wp[torch.arange(B), cmd]
 
     grad = torch.autograd.grad(sel[..., 0].sum(), feats)[0].abs().mean(dim=(0, 1))
@@ -70,8 +70,8 @@ def test_qwen_trunk_distinguishes_token_roles():
         vis, spd, rt, ct, _ = policy._tokenize_state(
             feats, torch.rand(B, 1) * 30, torch.randint(0, 6, (B,)), torch.randn(B, 4, 2)
         )
-        correct, _ = policy.trunk(vis, spd, rt, ct)
-        swapped, _ = policy.trunk(vis, rt, spd, ct)  # speed and route roles exchanged
+        correct, _, _ = policy.trunk(vis, spd, rt, ct)
+        swapped, _, _ = policy.trunk(vis, rt, spd, ct)  # speed and route roles exchanged
 
     assert (correct - swapped).abs().max() > 1e-6
 

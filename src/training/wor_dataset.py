@@ -11,7 +11,7 @@ Supports two on-disk layouts:
     + `<route>/rgb/*.jpg`). It has no Q-values, so waypoints are derived from each
     frame's future `ego_matrix` poses and Q-value targets are left at zero.
 """
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple
 import gzip
 import json
 import os
@@ -19,9 +19,78 @@ import glob
 import numpy as np
 from PIL import Image
 import torch
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import Dataset
 
-from src.training.seeding import make_generator, make_worker_init_fn
+from src.config.camera import preprocess_rgb
+from src.training.swerve import anticipated_targets, brake_onset_flags, route_shift, swerve_flags
+
+
+def _camera_offset_matrix(translation_y: float, rotation_yaw_deg: float) -> np.ndarray:
+    """4x4 rigid transform mapping a point given in the *augmented* camera's own local
+    frame into the *true* ego's local frame - the same lateral+yaw offset
+    DataAgent.augment_camera (carla_garage/team_code/data_agent.py) applies when it mounts
+    the second camera that renders rgb_augmented/. translation_y is meters along the
+    ego's right axis, rotation_yaw_deg is degrees about the ego's up axis - both are
+    recorded per-frame as measurements['augmentation_translation']/['augmentation_rotation'].
+    Its inverse (a plain transpose+negate for a rigid transform) reprojects a point
+    recorded in the true frame - e.g. an already-computed waypoint or route point - into
+    what the augmented camera would have seen, which is the corrective label recovery
+    augmentation needs. See challenges/log_00_index.md S-020 for why the label cannot simply be
+    recomputed without this: the image really is a different render, so the target must be
+    re-expressed in that render's own frame, not left as the on-route target.
+    """
+    theta = np.radians(rotation_yaw_deg)
+    c, s = np.cos(theta), np.sin(theta)
+    m = np.eye(4)
+    m[0, 0] = c
+    m[0, 1] = -s
+    m[1, 0] = s
+    m[1, 1] = c
+    m[1, 3] = translation_y
+    return m
+
+
+def _reproject_points(points_xy, offset_matrix_inv: np.ndarray) -> list:
+    """Applies a rigid local-frame transform to a list of [x, y] points (z=0 assumed -
+    waypoints and route points are both stored as ground-plane offsets, never full poses)."""
+    out = []
+    for x, y in points_xy:
+        p = offset_matrix_inv @ np.array([x, y, 0.0, 1.0])
+        out.append([float(p[0]), float(p[1])])
+    return out
+
+
+def color_augment(rgb: np.ndarray, rng=np.random) -> np.ndarray:
+    """Photometric-only augmentation of one uint8 HWC frame, in the spirit of TransFuser++'s
+    training-time colour augmentation (TF++ improvement #4): brightness, contrast, a mild colour
+    cast, sensor noise and occasional grayscale. Geometry is untouched, so waypoint/route targets
+    stay valid. Not a copy of TF++'s imgaug pipeline - an approximation of the same idea without
+    the extra dependency. Relies on the DataLoader's per-worker numpy seeding."""
+    x = rgb.astype(np.float32)
+    x *= rng.uniform(0.6, 1.4)
+    mean = x.mean()
+    x = (x - mean) * rng.uniform(0.7, 1.3) + mean
+    x *= rng.uniform(0.9, 1.1, size=3).astype(np.float32)
+    if rng.rand() < 0.1:
+        x[:] = x.mean(axis=2, keepdims=True)
+    if rng.rand() < 0.3:
+        x += rng.normal(0.0, rng.uniform(2.0, 10.0), x.shape).astype(np.float32)
+    return np.clip(x, 0, 255).astype(np.uint8)
+
+
+def feature_cache_path(rgb_path: str, pixel_tag: str, feature_cache_tag: str) -> str:
+    """Sidecar path for one frame's cached frozen-backbone output.
+
+    A module-level function, not just a dataset method, so build_feature_cache.py can compute
+    the exact same path the dataset will later look for without having to construct a dataset
+    in "feature-loading" mode first (which would try to load features that do not exist yet).
+    Keyed on the pixel tag (resolution/crop/overlay - a shape change makes a cached map
+    meaningless) and the backbone identity (a feature cache built from one architecture's
+    weights would silently corrupt training under another's) - see WorldOnRailsDataset's
+    feature_cache_tag docstring for why a missing entry is a hard error rather than a silent
+    per-sample fallback.
+    """
+    return f"{rgb_path}.{pixel_tag}.{feature_cache_tag}.feat.npy"
 
 
 class WorldOnRailsDataset(Dataset):
@@ -37,11 +106,28 @@ class WorldOnRailsDataset(Dataset):
         is_train: bool = True,
         synthetic_samples: int = 0,
         cache_decoded: bool = True,
-        route_points: int = 4
+        route_points: int = 4,
+        crop_bottom_frac: float = 0.0,
+        route_overlay: bool = False,
+        overlay_kwargs: Optional[Dict] = None,
+        feature_cache_tag: Optional[str] = None,
+        use_augmented_camera: bool = False,
+        color_aug_prob: float = 0.0
     ):
         super().__init__()
         self.data_dir = data_dir
         self.img_size = img_size
+        # Fraction of image height to cut off the bottom before resizing. 0.25 on PDM-Lite's
+        # 1024x512 render reproduces TransFuser++'s 1024x384 crop, which removes the ego bonnet
+        # and is the geometry the CARLA-pretrained encoder was trained on. 0.0 keeps the legacy
+        # full-frame behaviour so old runs stay reproducible.
+        self.crop_bottom_frac = crop_bottom_frac
+        # Render the planned route into the image like a reversing camera's guide lines, so the
+        # route and the road share a spatial frame before the frozen encoder sees either. Must
+        # be set identically at evaluation or it becomes another 11.4 entry - the agent reads
+        # the same flag off the checkpoint's run_config.json.
+        self.route_overlay = route_overlay
+        self.overlay_kwargs = overlay_kwargs or {}
         self.num_rails = num_rails
         self.transform = transform
         self.is_train = is_train
@@ -54,6 +140,10 @@ class WorldOnRailsDataset(Dataset):
         # a sparse subsample keeps this closer to the Leaderboard's sparse-goal
         # convention, and this is a knob so the leakage can be ablated.
         self.route_points = route_points
+        # Which PDM-Lite route feeds the route points and the overlay (TODO A14, S-096). `route` is bent around
+        # obstacles by the expert (shift_route_around_actors), `route_original` is the plan the leaderboard hands the
+        # agent at test time. Set by train_wor.py --route_key via the environment so DataLoader workers inherit it.
+        self.route_key = os.environ.get("WOR_ROUTE_KEY", "route")
         # JPEG decode + resize is the same work every epoch for a frame that never
         # changes, and it's what capped throughput at ~280-340 samples/sec regardless
         # of batch size (batch size only changes how many already-decoded samples get
@@ -61,8 +151,38 @@ class WorldOnRailsDataset(Dataset):
         # decoded+resized frame as a raw .npy next to its source .jpg pays that cost
         # once instead of once per epoch; ~196KB/frame at 256x256x3 uint8.
         self.cache_decoded = cache_decoded
+        # When set, __getitem__ returns the frozen backbone's cached output for each frame
+        # instead of the raw pixels, and skips JPEG decode entirely. This is a bitwise-lossless
+        # optimization, not an approximation: the backbone is frozen and nothing upstream of it
+        # is randomized, so its output for a given frame is identical on every epoch of a run,
+        # and repeating that computation 50 times is pure waste. Requires the cache to already
+        # exist for every frame (build it with build_feature_cache.py first) - a missing entry
+        # raises rather than silently falling back to live rgb, because a per-sample fallback
+        # would mean some frames in a batch carry "vision_features" and others carry "rgb",
+        # which the default collate can't merge into one batch key.
+        self.feature_cache_tag = feature_cache_tag
+        # Recovery-data augmentation (challenges/log_00_index.md S-020/S-021's follow-up): PDM-Lite's
+        # DataAgent renders a second camera per frame at a random per-route lateral+yaw offset
+        # (measurements' augmentation_translation/augmentation_rotation), saved as
+        # rgb_augmented/. Behaviour cloning otherwise never sees an off-center state, since the
+        # expert's own trajectory is centered by construction - closed-loop evaluation showed
+        # this as outside_route_lanes + vehicle_blocked with no recovery (challenges_03 3.15).
+        # Train-only: mixing recovery views into validation would make the held-out metric
+        # measure something other than on-route driving, and stop it being comparable across
+        # runs that don't use this flag.
+        self.use_augmented_camera = bool(use_augmented_camera) and is_train
+        # Per-frame probability of color_augment(). Train-only for the same reason as above.
+        # Applied after the decoded-frame cache, so cached .npy files stay un-augmented.
+        self.color_aug_prob = float(color_aug_prob) if is_train else 0.0
+        # TODO A59: pooled-token cache (src/training/pooled_feature_cache.py), switched on by train_wor.py --pooled_cache through the environment
+        self._pooled = None
+        if os.environ.get("WOR_POOLED_CACHE") and synthetic_samples <= 0 and os.path.exists(data_dir):
+            from src.training.pooled_feature_cache import PooledFeatureCache, prefixes_from_env
+            self._pooled = PooledFeatureCache(prefixes_from_env(os.environ["WOR_POOLED_CACHE"]), self.pixel_cache_tag(), data_dir)
+            self.feature_cache_tag = "pooled"
 
         self.samples = []
+        self.missing_rgb = 0
         if synthetic_samples > 0:
             self.samples = list(range(synthetic_samples))
             self.is_synthetic = True
@@ -96,6 +216,9 @@ class WorldOnRailsDataset(Dataset):
             elif os.path.isdir(measurements_dir):
                 self._index_pdm_lite_route(r_dir, measurements_dir)
 
+        if self.missing_rgb:
+            print(f"[Warning] Skipped {self.missing_rgb} frames under {self.data_dir} that have "
+                  f"measurements but no rgb/ image - is the dataset still extracting?")
         if len(self.samples) == 0:
             print(f"[Warning] No frames found in {self.data_dir}. Falling back to synthetic mode.")
             self.is_synthetic = True
@@ -131,6 +254,13 @@ class WorldOnRailsDataset(Dataset):
         of the next `pred_len` frames, transformed into the current frame's
         coordinate system (same approach as PlanT's dataset.py). No Q-values are
         available here.
+
+        When self.use_augmented_camera is set, each frame that has a corresponding
+        rgb_augmented/ render also contributes a second sample: the same future
+        trajectory, re-expressed in the augmented camera's own (laterally/yaw offset)
+        frame instead of the true ego frame - a corrective "how to get back onto the
+        route" target, matched to an image that actually shows the off-center view.
+        See _camera_offset_matrix and challenges/log_00_index.md S-020.
         """
         meas_files = sorted(glob.glob(os.path.join(measurements_dir, "*.json.gz")))
         rgb_dir = os.path.join(route_dir, "rgb")
@@ -148,10 +278,33 @@ class WorldOnRailsDataset(Dataset):
                     "speed": float(meas.get("speed", 0.0)),
                     "command": self._PDM_LITE_COMMAND_MAP.get(raw_command, 3),
                     "ego_matrix": np.array(meas["ego_matrix"], dtype=np.float64),
-                    "route": self._subsample_route(meas.get("route"))
+                    # frames logged without route_original fall back to route (identical wherever nothing was shifted)
+                    "route": self._subsample_route(meas.get(self.route_key) or meas.get("route")),
+                    # The expert's *intended* speed, not its current one. This is the label for
+                    # the target-speed head: PDM-Lite decides a target and a controller chases
+                    # it, so `speed` lags the decision while `target_speed` is the decision.
+                    # Falling back to the measured speed keeps older dumps loadable.
+                    "target_speed": float(meas.get("target_speed", meas.get("speed", 0.0))),
+                    # Present on PDM-Lite DataAgent dumps that ship rgb_augmented/ (confirmed
+                    # against the released autonomousvision/PDM_Lite_Carla_LB2 archives - see
+                    # challenges/log_00_index.md S-020); absent, and harmlessly defaulted to no
+                    # offset, on the "wor" native format and any dump collected without
+                    # --augment.
+                    "augmentation_translation": float(meas.get("augmentation_translation", 0.0)),
+                    "augmentation_rotation": float(meas.get("augmentation_rotation", 0.0)),
+                    "route_shift": route_shift(meas.get("route"), meas.get("route_original")),
+                    # TODO A15: the path label = every second point of the expert's SHIFTED route (20 points at 1 m from x = 2.5 m): 10 points, ego frame
+                    "path": ([[float(q[0]), float(q[1])] for q in meas["route"][1::2][:10]] if meas.get("route") and len(meas["route"]) >= 20 else None),
                 }
             except Exception:
                 parsed[i] = None
+        # TODO A16 (arm K): only marked here; the train loader oversamples them when --swerve_frac > 0 (src/training/swerve.py)
+        swerve = swerve_flags([p and p["route_shift"] for p in parsed], int(os.environ.get("WOR_SWERVE_WINDOW", "8")))
+        # TODO A38: anticipatory speed labels (step 1, WOR_ANTICIPATE_S seconds) and brake-onset frames for the sampler (step 2, WOR_BRAKE_FRAC)
+        _ts = [p["target_speed"] if p else None for p in parsed]
+        _ant_k = int(round(float(os.environ.get("WOR_ANTICIPATE_S", "0") or 0) * 4))
+        _ant = anticipated_targets(_ts, _ant_k)
+        _onset = brake_onset_flags(_ts, int(os.environ.get("WOR_BRAKE_WINDOW", "8")))
 
         for i in range(5, num_frames - pred_len - 2):
             cur = parsed[i]
@@ -161,6 +314,12 @@ class WorldOnRailsDataset(Dataset):
             rgb_path = os.path.join(rgb_dir, f"{frame_id}.jpg")
             if not os.path.exists(rgb_path):
                 rgb_path = os.path.join(rgb_dir, f"{frame_id}.png")
+            if not os.path.exists(rgb_path):
+                # A frame with measurements but no image (an archive still extracting, a partial
+                # download) used to become an all-black training sample with a real label, and that
+                # black frame was then written to the decoded cache for good.
+                self.missing_rgb += 1
+                continue
 
             ref_inv = np.linalg.inv(cur["ego_matrix"])
             waypoints = []
@@ -178,13 +337,100 @@ class WorldOnRailsDataset(Dataset):
                 "speed": cur["speed"],
                 "command": cur["command"],
                 "route": cur["route"],
-                "waypoints": waypoints
+                "target_speed": _ant[i] if _ant_k > 0 else cur["target_speed"],
+                "waypoints": waypoints,
+                "swerve": bool(swerve[i]),
+                "brake_onset": bool(_onset[i]),
+                "path": cur["path"]
             })
+
+            # Recovery-augmentation sample: a second, genuinely re-rendered camera at this
+            # same instant, offset laterally/in yaw from the true ego pose (see
+            # _camera_offset_matrix's docstring and S-020). Only emitted where the frame
+            # actually exists - DataAgent only renders it "at the beginning of the route" per
+            # its own comment, so coverage is partial and checked per-frame, not assumed.
+            if self.use_augmented_camera:
+                aug_rgb_path = os.path.join(route_dir, "rgb_augmented", f"{frame_id}.jpg")
+                if not os.path.exists(aug_rgb_path):
+                    aug_rgb_path = os.path.join(route_dir, "rgb_augmented", f"{frame_id}.png")
+                if os.path.exists(aug_rgb_path):
+                    offset = _camera_offset_matrix(
+                        cur.get("augmentation_translation", 0.0),
+                        cur.get("augmentation_rotation", 0.0))
+                    offset_inv = np.linalg.inv(offset)
+                    aug_waypoints = _reproject_points(waypoints, offset_inv)
+                    aug_route = _reproject_points(cur["route"], offset_inv)
+                    self.samples.append({
+                        "format": "pdm_lite",
+                        "rgb_path": aug_rgb_path,
+                        "speed": cur["speed"],
+                        "command": cur["command"],
+                        "route": aug_route,
+                        "target_speed": _ant[i] if _ant_k > 0 else cur["target_speed"],
+                        "waypoints": aug_waypoints,
+                        "is_recovery_augmented": True,
+                        "swerve": bool(swerve[i]),
+                        "brake_onset": bool(_onset[i]),
+                        "path": _reproject_points(cur["path"], offset_inv) if cur["path"] else None
+                    })
 
     def __len__(self) -> int:
         return len(self.samples)
 
-    def _load_rgb(self, rgb_path: str) -> np.ndarray:
+    def pixel_cache_tag(self) -> str:
+        """The part of the cache key that identifies which pixel transform was applied -
+        shared between the decoded-pixel cache and the feature cache, since a feature cache
+        built from one img_size/crop/overlay combination is meaningless for another."""
+        h, w = self.img_size
+        # Every transform that changes the pixels has to be in the cache key, not just the
+        # size: 512x192 cropped, 512x192 squashed and 512x192 with a route drawn on it are three
+        # different images at identical dimensions, and serving one for another is exactly the
+        # kind of silent train/eval mismatch 11.4 is a catalogue of.
+        #
+        # That includes what the overlay draws: the route subsampled to `route_points`, and any
+        # overlay_kwargs. The key used to be a bare 'o', so a --route_points 4 run and a 20-point
+        # run on the same dataset directory shared one cache and the second trained on the first's
+        # lines. The crop is keyed by value too ('c' alone stays the canonical 0.25, so those
+        # caches keep their names).
+        crop = ""
+        if self.crop_bottom_frac:
+            crop = "c" if abs(self.crop_bottom_frac - 0.25) < 1e-9 else f"c{self.crop_bottom_frac:g}"
+        overlay = ""
+        if self.route_overlay:
+            overlay = f"o{self.route_points}"
+            if self.route_key != "route":  # the overlay draws a different line (S-096); default keys unchanged
+                overlay += "ro" if self.route_key == "route_original" else f"r{self.route_key}"
+            if self.overlay_kwargs:
+                import hashlib
+                spec = json.dumps(self.overlay_kwargs, sort_keys=True, default=str).encode()
+                overlay += "k" + hashlib.sha1(spec).hexdigest()[:6]
+        return f"{h}x{w}{crop}{overlay}"
+
+    def _feature_cache_path(self, rgb_path: str) -> Optional[str]:
+        """This instance's sidecar path for one frame, or None when feature caching is off."""
+        if not self.feature_cache_tag:
+            return None
+        return feature_cache_path(rgb_path, self.pixel_cache_tag(), self.feature_cache_tag)
+
+    def _load_features(self, rgb_path: str) -> np.ndarray:
+        """Loads the cached frozen-backbone output for one frame. Raises if it is missing -
+        see feature_cache_tag's docstring for why this cannot silently fall back to live
+        encoding per-sample."""
+        if self._pooled is not None:
+            from src.training.pooled_feature_cache import rel_key
+            return self._pooled.get(rel_key(rgb_path, self.data_dir))
+        cache_path = self._feature_cache_path(rgb_path)
+        try:
+            return np.load(cache_path)
+        except Exception as exc:
+            raise RuntimeError(
+                f"feature_cache_tag={self.feature_cache_tag!r} is set but no cached feature "
+                f"found at {cache_path}. Run build_feature_cache.py for this data_dir/img_size/"
+                f"crop_bottom_frac/route_overlay/backbone combination first - this dataset mode "
+                f"never computes features live, so a missing entry is a hard error rather than "
+                f"a silent slowdown or a silently mixed batch.") from exc
+
+    def _load_rgb(self, rgb_path: str, route_xy=None) -> np.ndarray:
         """Loads one RGB frame at self.img_size, transparently caching the
         decoded+resized array as a sibling .npy file so later epochs (or later runs
         entirely) skip JPEG decode. Cache filename is keyed by img_size so switching
@@ -193,7 +439,8 @@ class WorldOnRailsDataset(Dataset):
         cache entry for the next epoch to read.
         """
         h, w = self.img_size
-        cache_path = f"{rgb_path}.{h}x{w}.npy" if self.cache_decoded else None
+        tag = self.pixel_cache_tag()
+        cache_path = f"{rgb_path}.{tag}.npy" if self.cache_decoded else None
 
         if cache_path is not None and os.path.exists(cache_path):
             try:
@@ -202,11 +449,17 @@ class WorldOnRailsDataset(Dataset):
                 pass  # Fall through and re-decode if the cache file is corrupt.
 
         if os.path.exists(rgb_path):
-            img = Image.open(rgb_path).convert("RGB")
-            img = img.resize((w, h))
-            rgb = np.array(img, dtype=np.uint8)
+            # Deliberately the same function the agent calls at evaluation time, not an
+            # equivalent-looking copy of it. Crop removes PDM-Lite's constant bonnet strip;
+            # resizing a 1024x384 crop to a square would squash horizontal geometry ~2.7x
+            # relative to vertical. See src/config/camera.py for why both live in one place.
+            rgb = preprocess_rgb(Image.open(rgb_path).convert("RGB"),
+                                 img_size=(h, w), crop_bottom_frac=self.crop_bottom_frac,
+                                 route_xy=route_xy, overlay=self.route_overlay,
+                                 overlay_kwargs=self.overlay_kwargs)
         else:
-            rgb = np.zeros((h, w, 3), dtype=np.uint8)
+            # Never cached: a black frame written to the cache would outlive the image arriving.
+            return np.zeros((h, w, 3), dtype=np.uint8)
 
         if cache_path is not None:
             try:
@@ -223,11 +476,20 @@ class WorldOnRailsDataset(Dataset):
 
     def _load_pdm_lite_sample(self, item: Dict) -> Tuple[np.ndarray, float, int, np.ndarray]:
         """Loads one PDM-Lite-format frame's RGB image. speed/command/waypoints were
-        already parsed once at index time in `_index_pdm_lite_route`."""
-        rgb = self._load_rgb(item["rgb_path"])
+        already parsed once at index time in `_index_pdm_lite_route`.
+
+        The overlay is handed exactly the route the policy's own route MLP receives, not the
+        denser 20-point original. That keeps it a pure change of *representation*: the same
+        information, additionally presented in the image plane where the frozen encoder can
+        associate it with the road. Drawing the full route instead would hand the network more
+        of the answer than the ablation baseline gets (the 20-point route correlates ~0.84 with
+        the lateral target), and the comparison would no longer isolate the overlay.
+        """
+        rgb = self._load_rgb(item["rgb_path"], route_xy=item.get("route"))
         return rgb, item["speed"], item["command"], np.array(item["waypoints"], dtype=np.float32)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        features = None
         if self.is_synthetic:
             # Synthetic tensor generation for fast verification
             rgb = np.random.randint(0, 255, (self.img_size[0], self.img_size[1], 3), dtype=np.uint8)
@@ -237,13 +499,26 @@ class WorldOnRailsDataset(Dataset):
             target_waypoints = np.random.randn(5, 2).astype(np.float32) * 5.0
             route = np.random.randn(self.route_points, 2).astype(np.float32)
         elif self.samples[idx].get("format") == "pdm_lite":
-            rgb, speed, command, target_waypoints = self._load_pdm_lite_sample(self.samples[idx])
+            item = self.samples[idx]
+            if self.feature_cache_tag:
+                # Metadata only - the frozen backbone's output is read from disk below instead
+                # of being recomputed from pixels, so the JPEG is never even opened.
+                features = self._load_features(item["rgb_path"])
+                rgb = None
+                speed, command = item["speed"], item["command"]
+                target_waypoints = np.array(item["waypoints"], dtype=np.float32)
+            else:
+                rgb, speed, command, target_waypoints = self._load_pdm_lite_sample(item)
             target_q = np.zeros(self.num_rails, dtype=np.float32)
-            route = np.array(self.samples[idx]["route"], dtype=np.float32)
+            route = np.array(item["route"], dtype=np.float32)
         else:
             item = self.samples[idx]
             rgb_path = item.get("rgb_path", os.path.join(item.get("route_dir", ""), "rgbs", f"{idx:05d}.jpg"))
-            rgb = self._load_rgb(rgb_path)
+            if self.feature_cache_tag:
+                features = self._load_features(rgb_path)
+                rgb = None
+            else:
+                rgb = self._load_rgb(rgb_path)
 
             speed = float(item.get("speed", 0.0))
             command = int(item.get("command", item.get("cmd", 2)))
@@ -251,190 +526,64 @@ class WorldOnRailsDataset(Dataset):
             target_waypoints = np.array(item.get("waypoints", np.zeros((5, 2))), dtype=np.float32)
             route = np.array(item.get("route", np.zeros((self.route_points, 2))), dtype=np.float32)
 
+        if rgb is not None and self.color_aug_prob > 0 and np.random.rand() < self.color_aug_prob:
+            rgb = color_augment(rgb)
+
         # RGB stays uint8 HWC here: converting to float32 CHW in the worker would
         # quadruple both the CPU work and the bytes crossing PCIe (786KB vs 196KB per
         # frame). The trainer does the permute/scale on the GPU instead, where it's
         # nearly free - and HWC uint8 is already the channels_last layout the conv
         # kernels want, so the permute costs no copy.
         try:
-            rgb_tensor = torch.as_tensor(np.ascontiguousarray(rgb), dtype=torch.uint8)
             target_q_tensor = torch.as_tensor(target_q, dtype=torch.float32)
             target_waypoints_tensor = torch.as_tensor(target_waypoints, dtype=torch.float32)
         except Exception:
-            rgb_tensor = torch.tensor(rgb.tolist(), dtype=torch.uint8)
             target_q_tensor = torch.tensor(target_q.tolist(), dtype=torch.float32)
             target_waypoints_tensor = torch.tensor(target_waypoints.tolist(), dtype=torch.float32)
 
         speed_tensor = torch.tensor([speed], dtype=torch.float32)
         command_tensor = torch.tensor(command, dtype=torch.long)
 
-        return {
-            "rgb": rgb_tensor,
+        # Label for the target-speed head. Always emitted (it costs 4 bytes) so enabling the
+        # head never requires rebuilding the loader or invalidating a cache; AuxiliaryHeads
+        # skips any target whose head is disabled.
+        if self.is_synthetic:
+            tgt_speed = float(np.random.uniform(0.0, 20.0))
+        else:
+            tgt_speed = float(self.samples[idx].get("target_speed", speed))
+
+        # TODO A15: path label (10 x 2, ego frame of this camera) and its validity; zeros + 0 where a frame carries no 20-point route
+        _path = None if self.is_synthetic else self.samples[idx].get("path")
+        sample = {
+            "target_path": torch.as_tensor(np.array(_path if _path else np.zeros((10, 2)), dtype=np.float32), dtype=torch.float32),
+            "path_valid": torch.tensor(1.0 if _path else 0.0, dtype=torch.float32),
             "speed": speed_tensor,
             "command": command_tensor,
             "route": torch.as_tensor(route, dtype=torch.float32),
             "target_q": target_q_tensor,
-            "target_waypoints": target_waypoints_tensor
+            "target_waypoints": target_waypoints_tensor,
+            "target_speed": torch.tensor(tgt_speed, dtype=torch.float32)
         }
-
-
-def _wrap_loader(dataset, batch_size: int, num_workers: int, is_train: bool,
-                 seed: Optional[int] = None) -> DataLoader:
-    kwargs = dict(
-        batch_size=batch_size,
-        shuffle=is_train,
-        num_workers=num_workers,
-        pin_memory=True,
-        drop_last=is_train,
-        persistent_workers=num_workers > 0
-    )
-    # Sample order and per-worker RNG are seeded so two runs of the same config differ
-    # only by what is being ablated. See src/training/seeding.py for why NumPy needs
-    # explicit per-worker seeding where Torch does not.
-    if seed is not None:
-        if is_train:
-            kwargs["generator"] = make_generator(seed)
-        if num_workers > 0:
-            kwargs["worker_init_fn"] = make_worker_init_fn(seed)
-    # Only pass prefetch_factor in the multiprocessing case. Torch accepted an
-    # explicit None here from 2.0 onward, but older versions reject it outright
-    # ("prefetch_factor option could only be specified in multiprocessing"), which
-    # made num_workers=0 - the default on Windows, and what the tests use - fail
-    # before a single batch was read.
-    if num_workers > 0:
-        kwargs["prefetch_factor"] = 4
-    return DataLoader(dataset, **kwargs)
-
-
-def create_wor_dataloader(
-    data_dir: str,
-    batch_size: int = 32,
-    num_workers: int = 4,
-    is_train: bool = True,
-    synthetic_samples: int = 0,
-    cache_decoded: bool = True,
-    route_points: int = 4
-) -> DataLoader:
-    """Creates a DataLoader for World on Rails training/validation."""
-    dataset = WorldOnRailsDataset(
-        data_dir=data_dir,
-        is_train=is_train,
-        synthetic_samples=synthetic_samples,
-        cache_decoded=cache_decoded,
-        route_points=route_points
-    )
-    return _wrap_loader(dataset, batch_size, num_workers, is_train)
+        # Exactly one of "rgb"/"vision_features" is present, never both and never neither -
+        # every sample in a batch takes the same branch above (feature_cache_tag is dataset-wide),
+        # so the collated batch always has a consistent key set.
+        if features is not None:
+            sample["vision_features"] = torch.as_tensor(np.ascontiguousarray(features), dtype=torch.float32)
+        else:
+            try:
+                sample["rgb"] = torch.as_tensor(np.ascontiguousarray(rgb), dtype=torch.uint8)
+            except Exception:
+                sample["rgb"] = torch.tensor(rgb.tolist(), dtype=torch.uint8)
+        return sample
 
 
 
-def route_group_split(
-    dataset, val_split: float, split_seed: int, fold: int = 0, num_folds: int = 1
-) -> Tuple[List[int], List[int], Dict[str, List[int]], List[str]]:
-    """Partitions `dataset` into train/val indices on route boundaries.
 
-    Extracted so that anything scoring a trained checkpoint can reconstruct the exact
-    partition that checkpoint was trained under. A second, separately-maintained copy
-    of this logic would be worse than none: an evaluation that re-derives the split
-    slightly differently silently grades the model on frames it was trained on, and
-    reports an optimistic number with no error to indicate it.
-
-    Returns `(train_idx, val_idx, groups, shuffled_keys)`. `groups` maps each route key
-    to its frame indices, which is what lets a caller resample at route granularity
-    rather than frame granularity.
-    """
-    groups: Dict[str, List[int]] = {}
-    for i, s in enumerate(dataset.samples):
-        key = ""
-        if isinstance(s, dict):
-            key = os.path.dirname(os.path.dirname(s.get("rgb_path", ""))) or s.get("route_dir", "")
-        groups.setdefault(key or str(i), []).append(i)
-
-    rng = np.random.RandomState(split_seed)
-    keys = sorted(groups)
-    rng.shuffle(keys)
-
-    if num_folds and num_folds > 1:
-        # K-fold over routes: the shuffled route list is cut into num_folds contiguous
-        # blocks and block `fold` is held out. Across all folds every route is held out
-        # exactly once, so a model scored fold-by-fold is scored on the whole dataset
-        # rather than on one 15% draw. That is the entire point: sampling error falls
-        # with the square root of the number of independent held-out routes, and with
-        # 129 routes against 17 that is a factor of 2.8 on every interval.
-        #
-        # Contiguous blocks of the *shuffled* list, not a modulo stride, so the folds
-        # stay disjoint and reproducible from (split_seed, num_folds) alone.
-        fold = int(fold) % int(num_folds)
-        bounds = [round(len(keys) * f / num_folds) for f in range(num_folds + 1)]
-        val_keys = keys[bounds[fold]:bounds[fold + 1]]
-        val_idx = [i for k in val_keys for i in groups[k]]
-    else:
-        target = int(round(len(dataset) * val_split))
-        val_idx = []
-        for k in keys:
-            if len(val_idx) >= target:
-                break
-            val_idx.extend(groups[k])
-
-    val_set = set(val_idx)
-    train_idx = [i for i in range(len(dataset)) if i not in val_set]
-    return train_idx, val_idx, groups, keys
-
-
-def create_wor_train_val_dataloaders(
-    data_dir: str,
-    batch_size: int = 32,
-    num_workers: int = 4,
-    synthetic_samples: int = 0,
-    cache_decoded: bool = True,
-    route_points: int = 4,
-    val_data_dir: Optional[str] = None,
-    val_split: float = 0.0,
-    split_seed: int = 0,
-    seed: Optional[int] = None,
-    fold: int = 0,
-    num_folds: int = 1
-) -> Tuple[DataLoader, Optional[DataLoader]]:
-    """Creates the training loader and, when asked for, a held-out validation loader.
-
-    A separate `val_data_dir` is preferred when one exists, because a random split of
-    `data_dir` divides *frames*, not routes - consecutive frames of the same route are
-    near-duplicates, so a frame-level split leaks and reports an optimistic number.
-    The split is offered anyway because no validation at all is strictly worse: the
-    trainer previously selected its "best" checkpoint on training loss, which cannot
-    distinguish a model that generalises from one that has memorised.
-
-    Routes are kept intact where the layout exposes them (PDM-Lite samples carry their
-    source `rgb_path`, whose parent directory identifies the route), so the split falls
-    on route boundaries rather than frame boundaries whenever that information exists.
-    """
-    train_ds = WorldOnRailsDataset(
-        data_dir=data_dir, is_train=True, synthetic_samples=synthetic_samples,
-        cache_decoded=cache_decoded, route_points=route_points
-    )
-
-    if val_data_dir:
-        val_ds = WorldOnRailsDataset(
-            data_dir=val_data_dir, is_train=False, synthetic_samples=0,
-            cache_decoded=cache_decoded, route_points=route_points
-        )
-        return (_wrap_loader(train_ds, batch_size, num_workers, True, seed),
-                _wrap_loader(val_ds, batch_size, num_workers, False, seed))
-
-    n = len(train_ds)
-    if (val_split <= 0.0 and num_folds <= 1) or n < 4:
-        return _wrap_loader(train_ds, batch_size, num_workers, True, seed), None
-
-    train_idx, val_idx, groups, keys = route_group_split(
-        train_ds, val_split, split_seed, fold=fold, num_folds=num_folds)
-
-    if not val_idx or not train_idx:
-        return _wrap_loader(train_ds, batch_size, num_workers, True, seed), None
-
-    fold_note = f", fold {fold}/{num_folds}" if num_folds > 1 else ""
-    print(f"--> Validation split: {len(train_idx)} train / {len(val_idx)} val frames "
-          f"across {len(keys)} route group(s), seed {split_seed}{fold_note}."
-          + ("" if len(keys) > 1 else "  [Warning] Only one group found - this is a"
-             " frame-level split and will read optimistically."))
-
-    return (_wrap_loader(Subset(train_ds, train_idx), batch_size, num_workers, True, seed),
-            _wrap_loader(Subset(train_ds, val_idx), batch_size, num_workers, False, seed))
+# Re-exported so every existing `from src.training.wor_dataset import create_wor_dataloader`
+# (and the other three) keeps working. The implementations moved to wor_dataloaders.py when this
+# module outgrew the 500-line limit; see that module's docstring for the seam. The import sits
+# at the bottom, not the top, because wor_dataloaders imports WorldOnRailsDataset from here -
+# putting it above the class definition would be a circular import.
+from src.training.wor_dataloaders import (  # noqa: E402,F401
+    _wrap_loader, create_wor_dataloader, route_group_split,
+    create_wor_train_val_dataloaders)

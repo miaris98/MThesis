@@ -14,12 +14,19 @@ controls, same WorldOnRailsTrainer/WorldOnRailsDataset training pipeline - with 
 the CNN+MLP head swapped for a Qwen transformer trunk.
 """
 from typing import Dict, Optional, Tuple, Union
+import os
+
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-from src.models.world_on_rails.wor_policy import PretrainedVisionEncoder, PIDController
+from src.models.world_on_rails.wor_policy import (
+    PretrainedVisionEncoder, PIDController, build_vision_encoder, tfpp_brake_override)
 from src.models.transformer.layers import RMSNorm, QwenTransformerBlock
+from src.models.world_on_rails.ray_geometry import (
+    RAY_GEOMETRY_CHANNELS, append_ray_geometry)
+from src.config.camera import DEFAULT_CROP_BOTTOM_FRAC
 
 # Trunk sizes. The 10m/30m entries exist because the offline dataset is ~9,600 frames:
 # at 100m the trunk carries roughly 11,000 trainable parameters per training sample and
@@ -48,8 +55,10 @@ class QwenWaypointTransformer(nn.Module):
     """
 
     def __init__(self, embed_dim: int, depth: int, num_heads: int, ffn_dim: int,
-                 num_commands: int = 6, num_rails: int = 9, num_vision_tokens: int = 64):
+                 num_commands: int = 6, num_rails: int = 9, num_vision_tokens: int = 64,
+                 use_rail_q: bool = True):
         super().__init__()
+        self.use_rail_q = use_rail_q
         self.num_commands = num_commands
         self.num_rails = num_rails
         self.num_vision_tokens = num_vision_tokens
@@ -76,17 +85,22 @@ class QwenWaypointTransformer(nn.Module):
             nn.GELU(),
             nn.Linear(256, num_commands * 5 * 2)
         )
+        # Built only when something trains it. With --q_loss_weight 0 (this project's
+        # default) and PDM-Lite's all-zero target_q, this head receives no gradient at all
+        # and act() never reads its output - dead weight feeding a `Q Loss` column that
+        # nothing optimises.
         self.rail_head = nn.Sequential(
             nn.Linear(embed_dim, 128),
             nn.GELU(),
             nn.Linear(128, num_commands * num_rails)
-        )
+        ) if use_rail_q else None
         nn.init.trunc_normal_(self.policy_token, std=0.02)
         nn.init.trunc_normal_(self.vision_pos, std=0.02)
         nn.init.trunc_normal_(self.type_embed, std=0.02)
 
     def forward(self, vision_tok: torch.Tensor, speed_tok: torch.Tensor,
-                route_tok: torch.Tensor, cmd_tok: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+                route_tok: torch.Tensor, cmd_tok: torch.Tensor
+                ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         """`vision_tok` is (B, N, D) with N >= 1 - one token per retained feature-map
         cell, or a single token in the legacy globally-pooled configuration."""
         B, N, _ = vision_tok.shape
@@ -115,9 +129,13 @@ class QwenWaypointTransformer(nn.Module):
         policy_repr = tokens[:, 0]
 
         waypoints = self.waypoint_head(policy_repr).float().view(B, self.num_commands, 5, 2)
-        rail_q = self.rail_head(policy_repr).float().view(B, self.num_commands, self.num_rails)
+        rail_q = (self.rail_head(policy_repr).float().view(B, self.num_commands, self.num_rails)
+                  if self.rail_head is not None else None)
 
-        return waypoints, rail_q
+        # policy_repr is returned rather than discarded: it is the only tensor here that has
+        # attended over the vision tokens, and the target-speed head needs exactly that.
+        # See QwenWorldOnRailsPolicy.__init__'s target_speed_input.
+        return waypoints, rail_q, policy_repr
 
 
 class QwenWorldOnRailsPolicy(nn.Module):
@@ -137,7 +155,18 @@ class QwenWorldOnRailsPolicy(nn.Module):
         num_rails: int = 9,
         route_points: int = 4,
         model_size: str = "100m",
-        vision_grid: int = 8
+        vision_grid: int = 8,
+        use_target_speed: bool = False,
+        target_speed_input: str = "policy",
+        use_rail_q: bool = True,
+        use_ray_geometry: bool = False,
+        crop_bottom_frac: float = DEFAULT_CROP_BOTTOM_FRAC,
+        use_path_head: bool = False,
+        path_cascade: bool = False,
+        path_points: int = 10,
+        token_mode: str = "pool",
+        s2d_patch: int = 3,
+        token_mask: float = 0.0
     ):
         super().__init__()
         self.num_commands = num_commands
@@ -152,12 +181,13 @@ class QwenWorldOnRailsPolicy(nn.Module):
         # trunk is exactly blind to where anything is in the frame, while the CNN's
         # SpatialQHead convolves state into all 64 cells before pooling. It is kept
         # only so the ablation can be run.
-        self.vision_grid = int(vision_grid)
+        self.vision_grid = int(vision_grid[0]) if isinstance(vision_grid, (tuple, list)) \
+            else int(vision_grid)
 
         # Same frozen pretrained vision encoder as WorldOnRailsPolicy - training a
         # vision model stays out of scope, and --weights_path (e.g. the CARLA-domain
         # PCLA WoR checkpoint) plugs in identically here.
-        self.encoder = PretrainedVisionEncoder(
+        self.encoder = build_vision_encoder(
             backbone_name=backbone_name,
             pretrained=pretrained,
             freeze_backbone=freeze_backbone,
@@ -169,11 +199,39 @@ class QwenWorldOnRailsPolicy(nn.Module):
 
         # vision_grid=0 keeps the legacy 1x1 global average; any other value pools the
         # encoder map to that side length (a no-op when it already matches).
-        self.num_vision_tokens = 1 if self.vision_grid <= 0 else self.vision_grid ** 2
+        #
+        # A square grid is only correct for a square input. Once the image is the source's own
+        # 8:3 aspect (a 192x512 crop gives a 6x16 feature map), pooling to NxN squeezes 16
+        # columns into 8 and stretches 6 rows into 8 - re-imposing in feature space exactly the
+        # horizontal squash that cropping to the true aspect ratio was meant to remove. So the
+        # grid is carried as (H, W): pass a single int for the legacy square behaviour, or an
+        # (H, W) pair to keep the encoder's native rectangular layout.
+        if isinstance(vision_grid, (tuple, list)):
+            gh, gw = int(vision_grid[0]), int(vision_grid[1])
+        else:
+            gh = gw = self.vision_grid
+        self.vision_grid_hw = (gh, gw)
+        self.num_vision_tokens = 1 if min(gh, gw) <= 0 else gh * gw
         self.vision_pool = nn.AdaptiveAvgPool2d(
-            (1, 1) if self.vision_grid <= 0 else (self.vision_grid, self.vision_grid)
+            (1, 1) if min(gh, gw) <= 0 else (gh, gw)
         )
-        self.vision_proj = nn.Linear(self.encoder.out_channels, self.embed_dim)
+        # Ray geometry rides in as extra channels on each vision token rather than as extra
+        # tokens, so the sequence length - and the attention cost - is unchanged. Both arms
+        # take it the same way, which is what keeps the head-to-head about the trunk.
+        self.use_rail_q = bool(use_rail_q)
+        self.use_ray_geometry = bool(use_ray_geometry)
+        self.crop_bottom_frac = float(crop_bottom_frac)
+        geo_ch = RAY_GEOMETRY_CHANNELS if self.use_ray_geometry else 0
+        # TODO A54 (BevAD): token_mode "s2d" feeds the stride-16 pyramid level through a pixel-unshuffle (space-to-depth, patch p) instead of average-pooling the stride-32 map
+        # to a 4x4 grid: nothing is averaged away (a lead car at brake onset is 0.4-0.55 of one stride-32 cell), each token carries p*p x 576 channels, and `token_mask` zeroes
+        # that fraction of the lateral token columns in training (BevAD: the unmasked model attends to distant / irrelevant cells). Pass vision_grid = (H/16/p, W/16/p),
+        # e.g. 6x16 for 288x768 at p = 3. Live encoder only: the pooled cache holds the stride-32 map.
+        self.token_mode, self.s2d_patch, self.token_mask = str(token_mode), int(s2d_patch), float(token_mask)
+        vis_ch = self.encoder.out_channels
+        if self.token_mode == "s2d":
+            assert hasattr(self.encoder, "forward_pyramid") and self.encoder.feature_reductions[-2] == 16, "token_mode s2d needs the CARLA timm encoder (stride-16 level)"
+            vis_ch = self.encoder.feature_channels[-2] * self.s2d_patch ** 2
+        self.vision_proj = nn.Linear(vis_ch + geo_ch, self.embed_dim)
         self.speed_proj = nn.Linear(1, self.embed_dim)
         self.cmd_embed = nn.Embedding(num_commands, self.embed_dim)
         self.route_proj = nn.Linear(route_points * 2, self.embed_dim)
@@ -181,10 +239,38 @@ class QwenWorldOnRailsPolicy(nn.Module):
         self.trunk = QwenWaypointTransformer(
             embed_dim=self.embed_dim, depth=cfg["depth"], num_heads=cfg["num_heads"],
             ffn_dim=cfg["ffn_dim"], num_commands=num_commands, num_rails=num_rails,
-            num_vision_tokens=self.num_vision_tokens
+            num_vision_tokens=self.num_vision_tokens, use_rail_q=bool(use_rail_q)
         )
 
         self.controller = PIDController()
+
+        # "policy" feeds the trunk's post-attention policy token, which has attended over
+        # the vision tokens. "state" is the original speed+route+command concatenation, kept
+        # so earlier runs stay reproducible - but under "state" this head is structurally
+        # unable to see a red light or a lead vehicle, so it can only regress target speed
+        # from route curvature, while its gradient still pulls on the shared projections.
+        self.target_speed_input = str(target_speed_input).lower()
+        if use_target_speed:
+            from src.models.world_on_rails.aux_heads import TargetSpeedHead
+            ts_dim = (self.embed_dim if self.target_speed_input == "policy"
+                      else self.embed_dim * 3)
+            self.target_speed_head = TargetSpeedHead(ts_dim)
+        else:
+            self.target_speed_head = None
+
+        # TODO A15: a space-indexed path head next to the time-indexed waypoints (TF++ path checkpoints, CarLLaVA / SimLingo / BevAD): `path_points` points of the expert's
+        # shifted route in the ego frame, read from the policy token. With `path_cascade` the speed head is conditioned on the predicted path (AlignDrive): path_embed
+        # is zero-initialised, so a cascade arm starts exactly as the plain head and learns the coupling.
+        self.use_path_head, self.path_cascade, self.path_points = bool(use_path_head), bool(path_cascade and use_path_head), int(path_points)
+        if self.use_path_head:
+            self.path_head = nn.Sequential(nn.Linear(self.embed_dim, 256), nn.GELU(), nn.Linear(256, self.path_points * 2))
+            nn.init.zeros_(self.path_head[-1].weight)
+            with torch.no_grad():  # zero weights + the nominal straight path as bias: the head starts at 'drive straight' (x = 3.5, 5.5, .. 21.5 m, y = 0), not at the ego origin
+                self.path_head[-1].bias.copy_(torch.tensor([[3.5 + 2.0 * k, 0.0] for k in range(self.path_points)]).reshape(-1))
+            if self.path_cascade:
+                self.path_embed = nn.Linear(self.path_points * 2, self.embed_dim)
+                nn.init.zeros_(self.path_embed.weight)
+                nn.init.zeros_(self.path_embed.bias)
 
         trunk_params = sum(p.numel() for p in self.trunk.parameters())
         seq_len = self.num_vision_tokens + 4
@@ -201,7 +287,12 @@ class QwenWorldOnRailsPolicy(nn.Module):
         # (B, C, H, W) -> (B, N, C) -> (B, N, embed_dim), one token per retained cell.
         # N is 1 in the legacy globally-pooled configuration, so the rest of the
         # pipeline is shape-identical either way.
-        vis = self.vision_pool(feats).flatten(2).transpose(1, 2)
+        pooled = self.vision_pool(feats)
+        if self.use_ray_geometry:
+            # After pooling, not before: the geometry has to describe the grid the trunk
+            # actually receives, which is vision_grid_hw and not necessarily the encoder's.
+            pooled = append_ray_geometry(pooled, self.crop_bottom_frac)
+        vis = pooled.flatten(2).transpose(1, 2)
         vision_tok = self.vision_proj(vis)
 
         speed_tok = self.speed_proj(speed.view(-1, 1).float()).unsqueeze(1)
@@ -219,27 +310,61 @@ class QwenWorldOnRailsPolicy(nn.Module):
 
     def forward(
         self,
-        rgb: torch.Tensor,
+        rgb: Optional[torch.Tensor],
         speed: torch.Tensor,
         command: torch.Tensor,
-        route: Optional[torch.Tensor] = None
+        route: Optional[torch.Tensor] = None,
+        vision_features: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
-        feats = self.encoder(rgb)
+        """`vision_features`, when given, replaces `self.encoder(rgb)` (rgb may then be
+        None). See WorldOnRailsPolicy.forward's docstring - same cached-feature contract,
+        same reasoning: the frozen backbone's output for an unaugmented frame never
+        changes across epochs, so it need not be recomputed 50 times."""
+        if self.token_mode == "s2d":
+            if vision_features is not None:
+                raise ValueError("token_mode s2d reads the stride-16 level: it cannot use the pooled stride-32 cache (--pooled_cache); train with the live encoder")
+            feats = F.pixel_unshuffle(self.encoder.forward_pyramid(rgb)[-2], self.s2d_patch)
+        else:
+            feats = vision_features if vision_features is not None else self.encoder(rgb)
         vision_tok, speed_tok, route_tok, cmd_tok, cmd_idx = self._tokenize_state(feats, speed, command, route)
+        if self.training and self.token_mask > 0 and self.vision_grid_hw[0] > 0:
+            gh, gw = self.vision_grid_hw
+            cols = (torch.rand(feats.shape[0], 1, gw, device=feats.device) >= self.token_mask).to(vision_tok.dtype)       # per sample: keep a lateral column or not
+            vision_tok = vision_tok * cols.expand(-1, gh, -1).reshape(feats.shape[0], gh * gw, 1)
 
-        waypoints, rail_q = self.trunk(vision_tok, speed_tok, route_tok, cmd_tok)
+        waypoints, rail_q, policy_repr = self.trunk(vision_tok, speed_tok, route_tok, cmd_tok)
 
-        B = rgb.shape[0]
-        batch_indices = torch.arange(B, device=rgb.device)
+        # B and the device come from feats, not rgb: rgb is None on the cached-feature path.
+        B = feats.shape[0]
+        batch_indices = torch.arange(B, device=feats.device)
         selected_waypoints = waypoints[batch_indices, cmd_idx]
-        selected_rail_q = rail_q[batch_indices, cmd_idx]
 
-        return {
+        out = {
             "waypoints": waypoints,
-            "rail_q": rail_q,
             "selected_waypoints": selected_waypoints,
-            "selected_rail_q": selected_rail_q
         }
+        # Omitted entirely rather than emitted as zeros when the rail head is off: a
+        # missing key is caught by the one consumer (waypoint_losses), whereas a zero
+        # tensor would silently report a meaningless q_loss of 0.0 forever.
+        if rail_q is not None:
+            out["rail_q"] = rail_q
+            out["selected_rail_q"] = rail_q[batch_indices, cmd_idx]
+        # Same head, same reasoning as the CNN arm (wor_policy.py). It is fed the concatenated
+        # state tokens rather than a fused vector because that is what this trunk has - keeping
+        # the two arms' target-speed inputs as close as their architectures allow, so the
+        # comparison stays about the trunk and not about what the speed head could see.
+        if self.use_path_head:
+            out["path"] = self.path_head(policy_repr).view(B, self.path_points, 2)
+        if self.target_speed_head is not None:
+            if self.target_speed_input == "policy":
+                ts_in = policy_repr
+                if self.path_cascade:
+                    ts_in = ts_in + self.path_embed(out["path"].reshape(B, -1))
+            else:
+                ts_in = torch.cat(
+                    [speed_tok.squeeze(1), route_tok.squeeze(1), cmd_tok.squeeze(1)], dim=-1)
+            out["target_speed_logits"] = self.target_speed_head(ts_in)
+        return out
 
     @torch.no_grad()
     def act(
@@ -251,7 +376,13 @@ class QwenWorldOnRailsPolicy(nn.Module):
         route: Optional[Union[np.ndarray, torch.Tensor]] = None
     ) -> Tuple[float, float, float]:
         """Mirrors WorldOnRailsPolicy.act() exactly, including the "no route -> no
-        navigation intent" caveat: same PID conversion, same input handling."""
+        navigation intent" caveat: same PID conversion, same input handling.
+
+        `speed` is in metres per second (the unit the dataset stores and the network
+        trained on); the km/h conversion for the PID happens here. See the note in
+        WorldOnRailsPolicy.act - this copy mirrored that method's units bug as
+        faithfully as everything else, which is the recurring cost of a method whose
+        contract is "identical to the other one" rather than a shared implementation."""
         self.eval()
         if isinstance(rgb, torch.Tensor):
             rgb_tensor = rgb
@@ -268,14 +399,14 @@ class QwenWorldOnRailsPolicy(nn.Module):
         rgb_tensor = rgb_tensor.to(device)
 
         if isinstance(speed, (int, float)):
-            speed_tensor = torch.tensor([[speed]], device=device, dtype=torch.float32)
-            current_speed_kmh = float(speed)
+            speed_mps = float(speed)
         elif isinstance(speed, torch.Tensor):
-            speed_tensor = speed.to(device).view(-1, 1).float()
-            current_speed_kmh = float(speed_tensor.item())
+            speed_mps = float(speed.view(-1)[0].item())
         else:
-            speed_tensor = torch.tensor([[float(speed)]], device=device, dtype=torch.float32)
-            current_speed_kmh = float(speed)
+            speed_mps = float(speed)
+
+        speed_tensor = torch.tensor([[speed_mps]], device=device, dtype=torch.float32)
+        current_speed_kmh = speed_mps * 3.6
 
         cmd_tensor = torch.tensor([command], device=device, dtype=torch.long)
 
@@ -292,8 +423,51 @@ class QwenWorldOnRailsPolicy(nn.Module):
         except Exception:
             wps = wps_tensor.tolist()
 
+        # Longitudinal intent, when the policy has a head for it. Without this the
+        # controller falls back to PIDController.target_speed - a CONSTANT 20 km/h that
+        # nothing in this repo ever writes to - so the waypoints steered and the car
+        # cruised at a fixed speed regardless of red lights, lead vehicles or turns.
+        # The head was trained but its output was discarded here.
+        target_speed_kmh = None
+        if self.target_speed_head is not None and "target_speed_logits" in out:
+            # expected_speed returns m/s (TARGET_SPEEDS is in m/s); the PID wants km/h,
+            # and this is the one place that knows both - same convention as speed above.
+            target_speed_kmh = 3.6 * float(
+                self.target_speed_head.expected_speed(
+                    out["target_speed_logits"])[0].item())
+            # TODO A50 / A57 / A52: optional eval-time decision layer over the speed posterior (src/agents/safety_layer.py, env-switched;
+            # None = this exact plain decode). last_debug feeds the A44 clip recorder.
+            if not getattr(self, "_safety_ready", False):
+                from src.agents.safety_layer import SafetyLayer
+                self._safety, self._safety_ready, self._last_brake = SafetyLayer.from_env(), True, 0.0
+            probs = out["target_speed_logits"][0].float().softmax(-1).cpu().numpy()
+            if self._safety is not None:
+                tgt_mps, force_brake = self._safety.update(speed_mps, probs, self.target_speed_head.bins.cpu().numpy(), target_speed_kmh / 3.6,
+                                                         self._last_brake, getattr(self, "_last_throttle", 0.0))
+                target_speed_kmh = 3.6 * tgt_mps
+            self.last_debug = {"probs": probs, "waypoints": wps, "target_kmh": target_speed_kmh, "force_brake": bool(self._safety is not None and force_brake)}
+            # Published so the eval HUD and telemetry report the live decision rather
+            # than the unchanging default (see eval_wor.py's target_speed_kmh read).
+            self.controller.target_speed = target_speed_kmh
+
+        if getattr(self, "use_path_head", False) and "path" in out and os.environ.get("WOR_PATH_STEER") == "1":
+            # TODO A15 eval switch: the lateral coordinate of every waypoint comes from the predicted path (np.interp at the waypoint's forward position, clamped at the
+            # ends); the longitudinal spacing (speed) stays with the waypoint / speed heads. Logged once so a lane's log proves it ran.
+            p_ = out["path"][0].float().cpu().numpy()
+            o_ = np.argsort(p_[:, 0])
+            wps = np.array(wps, dtype=np.float32, copy=True)
+            wps[:, 1] = np.interp(wps[:, 0], p_[o_, 0], p_[o_, 1])
+            if not getattr(self, "_path_steer_logged", False):
+                print("[A15] steering from the predicted path (WOR_PATH_STEER=1)", flush=True)
+                self._path_steer_logged = True
+
         steer, throttle, brake = self.controller.control_from_waypoints(
             waypoints=wps,
-            current_speed_kmh=current_speed_kmh
+            current_speed_kmh=current_speed_kmh,
+            target_speed_kmh=target_speed_kmh
         )
+        throttle, brake = tfpp_brake_override(throttle, brake, speed_mps, target_speed_kmh)
+        if getattr(self, "last_debug", None) is not None and self.last_debug["force_brake"]:
+            throttle, brake = 0.0, 1.0                                   # A50 contact reflex hold
+        self._last_brake, self._last_throttle = float(brake), float(throttle)
         return steer, throttle, brake
