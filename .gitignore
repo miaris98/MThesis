@@ -84,3 +84,12 @@ graphify-out/
 /scripts/sync/sync_box_*.py
 offers.csv
 route_dur.json
+
+# Everything under docs/ (working notes, ops logs, TODOs) stays local
+/docs/
+
+# Local tool state (.antigravity): not committed
+/.antigravity/
+
+# Local agent definitions (.agents/agents): not committed
+/.agents/agents/
