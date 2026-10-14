@@ -1,5 +1,7 @@
 # Active TODO (created 2026-09-25, rewritten 2026-09-27)
 
+> **Next (2026-10-12):** verify the 2026-10-11 claims first, then rerun. See [TODO_2026-10-12_verify_then_rerun.md](TODO_2026-10-12_verify_then_rerun.md). The fleet is down (Vast balance $0); the credit top-up and the seed-0 choice are the first blockers.
+
 The short list of what is worth doing next. Older items are ticked in their own files with the reason
 under each; fully closed TODO files are in `docs/archive/`. Before adding anything here, check
 `challenges/tried_and_ruled_out.md`: if it is there, it has been done.
@@ -33,6 +35,103 @@ Results: `E:\MThesis_EXP\live_20261005_box{2_4x3090_atari, 3_4090_carla, 4_2xA40
 `live_20261004_box3_4x3090_atari\MThesis\results\100k_benchmark\S058_ezv2_match\S058k_*\checkpoints\`; restore with `gzip -dc replay_latest.npz.gz > replay_latest.npz` and `--resume-from`. s2 is finished; s0 and s1
 need ~1 h, s3 ~2.5 h, the out-init runs 3-4 h. **Not saved:** seed 1's env20000 checkpoint (truncated by an interrupted copy, renamed `.CORRUPT_truncated`; its eval and diagnostics JSONs are fine) and out-init seed 1's
 env15000 checkpoint. Ops lessons are in S-119, S-127 and `scripts/ops/README.md`.
+
+## Results of 2026-10-14 (4-box 5090 fleet, then 2 boxes; details `docs/ops/2026-10-13_new_tests_on_5090_fleet.md`, section "2026-10-14"; files `E:\MThesis_EXP\live_20261013_new_tests\`)
+
+Rendering policy (user, 2026-10-14): **Low by default, Epic only for routes that segfault at Low**, run as a separate `CKE ...:CARLA_QUALITY=Epic` job for every compared arm. Earlier notes that say "Epic" for the 10-13 lanes were wrong: those lanes ran at Low (corrected below and in CLAUDE.md).
+
+- **A65 done, go (offline probe, 69 held-out routes, 6,219 frames, 256 PCA dims, SimLingo vs regnety_032, 95% bootstrap):** expert target speed MAE 2.23 vs 2.93 (0.69 lower [0.60, 0.78]); slow-down AUROC 0.813 vs 0.743 (+0.070 [+0.029, +0.116]); object-ahead AUROC 0.935 vs 0.903 (+0.033 [+0.017, +0.051]); object distance MAE 5.37 vs 6.54 (1.17 lower [0.96, 1.38]). File `a65_probe/a65_result.json`.
+- **A66 seed 0 (closed loop, Low, 106 lead + obstacle routes, quarter-data heads, 40 epochs, no overlay, no speed switches, paired by route):** SimLingo arm 61.8 vs control (regnety, same recipe) 58.3 on 103 routes: **+3.5 [-2.0, +8.8]**, below the +5 go threshold and not significant. Epic on the 5 crash routes: SimLingo arm 31.6, control 62.0 (5 routes only, points the other way). Reference only (different recipe): E15 x0.8 + newsvendor 68.8 on the same routes; SimLingo arm -7.1 [-12.0, -2.3], control -11.5 [-17.4, -5.7]. Head-seed noise is ~8 DS, so seeds 1 and 2 (running, same routes, same recipe) decide A66; A67 only on a gain of >= 5 DS.
+- **E15 x0.8 + newsvendor, run 1 at Low (215-route split, 201 routes with a driving record; runs 2-3 cancelled for the A66 screens):** mean 69.0. Paired vs plain E15 official (2026-09-28) n=174: **+1.8 [-2.3, +5.9]**; vs plain E15 repeat (e15r) n=96: +3.5 [-0.9, +8.1]; vs x0.9 alone n=199: +1.7 [-1.5, +5.1]; vs x0.8 alone n=98: +0.1 [-3.6, +3.6]; vs newsvendor alone n=98: +1.1 [-2.8, +5.2]. No combination is significant; one run only (seed noise ~4 DS).
+- **B37 retry (AdamW mixer, lr <= 3e-5, 20k updates, one seed, deterministic eval, 10 games, protocol: no sticky actions):** the mixer now trains (|mixer W| 90-143 vs ~0 before), but no setting reaches B36 SGD (52-98 at 20k). lr 1e-5: 0 / 13.2 / 19.8 / 37.2 / **42.0** at 5k / 10k / 15k / 18,004 upd / final; lr 3e-5: 0 / 14.0 / 27.6 / 0.0 / 23.2; lr 1e-5 open gates: 0 / 4.6 / 16.6 / 28.4 / 0.0. A 0.0 means no game ended in 27,000 steps (stuck policy), ~4 distinct games per checkpoint, so do not rank the settings. Files `atari_b37/atari/b37_retry_2026-10-14/b37_save.tar` (E: and HF `atari/b37_retry_2026-10-14/`, sha256 4dfce901...cfe3).
+- **Ops lessons:** a repo refresh over a patched box silently reverted `train_wor.py` (re-push patched files after any tarball refresh); E: dropped large writes for ~2 h (reconnect, then re-verify); lanes need rebalancing when some finish early (a lane list is fixed at launch); OOM at 5 lanes with SimLingo on 32 GB.
+
+## Results of 2026-10-13 (new tests on a 3-box 5090 fleet; details `docs/ops/2026-10-13_new_tests_on_5090_fleet.md`, files `E:\MThesis_EXP\live_20261013_new_tests\`)
+
+User priority: new tests, not verification. Eval-only on E15 and seed 5; no trainer change.
+- **Atari seed 5 finished** (resumed at update 35,000): env-100,000 snapshot (update 98,004) 368.2 +/- 10.1 (training protocol, 10 games); **final update 120,000 = 328.5 under the paper protocol (60 games, 16 sims; real SE ~36)**, training protocol 321.2. Four-seed mean (seeds 1, 3, 4, 5) 363.1 vs the 400.1 target; seed 5 is the lowest. Final and snapshot flip again (-40).
+- **B43 step 1 (done on one snapshot; closes the "never finished" item):** depth caps of 5 and 8 are identical to unlimited at 16 sims; without sticky actions every config is inside the noise (4 distinct games, SE ~36: 4 sims 331, 8: 370, 16: 340, 32: 366, 64: 382). Sticky p=0.25 (60 games, 53-59 distinct games, SE ~13-18) is complete: **16 sims (the training budget) is the peak** (4: 163, 8: 235, 16: 265, 32: 229, 64: 206; depth 3: 243, depth 5: 259, depth 8: 265): fewer and more simulations both hurt, no depth cap helps, i.e. deeper test-time search hurts on this checkpoint (B24 repeated; the no-sticky ranking was an artefact of ~4 distinct games). **Next:** screen other checkpoints with the same grid (the seed-5 learning curve under sticky actions is running), then B38 (pessimistic / model-consistency search) is the natural fix to build.
+- **B50 (stop-rule screening tool built and used):** `scripts/ops/atari_stoprule_eval.py`, 8 games in 164 s, 30 games in 2-25 min; stop rule "no score for 2,000 steps" (labelled screen protocol, never a paper number). Use it for B38 / B43 / B53 style screens; the paper number still needs the 27k-step eval.
+- **A52 / A57 follow-up on the 106 lead + obstacle routes (E15, one run each):** speed x0.9 + newsvendor 67.8 (+4.2 [-1.3, +9.6] over plain E15, **no stacking**); **speed x0.8 + newsvendor 70.9 (+7.5 [+2.5, +12.8] over the official plain run, +5.5 [+1.0, +10.3] over the repeat; vs x0.8 alone +1.8 n.s.)** = best E15 variant so far, driven by the slowdown; x0.7 + newsvendor (final, 94 routes) 70.5 = +6.1 [+0.9, +11.3] over the official plain run but +0.4 vs x0.8 alone: no further gain; **creep clamp alone (A50 half) 54.4 = -10.6 [-18.1, -3.8], 16 "Agent got blocked": harmful, drop**. Arm J x0.8 + newsvendor (99 routes, partial, box destroyed 17:30): 65.4 = +7.0 [+0.5, +13.7] over plain J but -3.7 [-8.8, +1.3] vs J x0.8 alone: does not stack on J either; Atari sims check: the 80k "16 sims is best" did NOT replicate on five checkpoints (8 vs 16 sims mean 219.7 vs 231.5; 64 sims collapses to 44.4 on the 98k snapshot, 4 sims scores 0). **Next (needs a go because it costs ~$6-10):** 220-route, 3-run confirmation of x0.8 + newsvendor vs plain E15 and the TF++ baseline; until then it is a lead, not a claim.
+- **A63 done:** lanes per 32 GB at LOW rendering (not Epic, corrected 2026-10-14): ~6 GB per lane, 4 lanes fastest on a 24-core host (20 routes 1,031 s; 3: 1,155; 5: 1,385; 6: 1,801 with an agent crash at 32.1 GB). CPU, not VRAM, limits a 24-core host.
+- **A60 gets a requirement:** detect hung lanes by record progress (an evaluator survived its 601 s watchdog and idled 26 min); kill leftover CarlaUE4 servers when a lane ends; lane lists LF-only; label-scoped guardian logs.
+- **Crash routes:** 23658 and 23708 complete alone (load-dependent); 26393 and 26456 crash CARLA alone at LOW rendering on these hosts (Epic untested) (try another host before calling them broken). Routes 1773 and 1792 had infra failures (rerun open).
+- **Rental ops:** 5 of 9 rentals were duds (key refused, never booted); `success: false` still creates the instance. See memory `vast-rental-and-queue-pitfalls-2026-10-13`.
+
+## New CARLA items, 2026-10-13: A65-A67 (a large pretrained driving encoder under our action head) - Next, top CARLA bet
+
+Why (user, 2026-10-13, "lets give it a shot"): we are the best *small-head, no-LLM, one-camera* model we verified (63.4 official, ahead of TCP 40.7), but SimLingo-Base / CarLLaVA reaches 85.94 on one front camera because it fine-tunes a billion-parameter vision-language model end to end. Our policy barely uses the image (random backbone still 50-60 DS), so the perception stage is the most direct lever. Keep our action side (transformer head -> 5 waypoints per command + target speed -> PID, plus the x0.8 / newsvendor switches); swap only the frozen encoder.
+Sensors of the Bench2Drive methods were checked on the web 2026-10-13 (ThinkTwice / DriveAdapter = 6 cameras, no LiDAR; ORION, HiP-AD, DriveTransformer multi-view cameras only; TF++ camera + LiDAR; TCP front camera; SimLingo one front camera, tiled), see the answer in the session log; DriveTransformer-Large 63.46 ties our 63.4.
+
+**Facts found (step 0 started 2026-10-13, no box):** HF `RenzKa/simlingo` (9.68 GB, Apache-2.0 on the model page; the GitHub README states no weights licence and ships a separate `LICENCE_Dataset`): `simlingo/checkpoints/epoch=013.ckpt/pytorch_model.pt` 2.57 GB (pickle scan "safe", only torch storage imports) plus DeepSpeed shards (`mp_rank_00_model_states.pt` 3.18 GB, 8 optimizer shards of 0.49 GB that we do not need) and `.hydra/config.yaml`. Config: vision = **OpenGVLab/InternVL2-1B vision tower, `freeze: false`** (fine-tuned on CARLA driving), language = InternVL2-1B LLM with LoRA r 32, 8 GPUs, 15 epochs (this is epoch 13), `cut_bottom_quarter: true`, `hist_len: 1`, 20 route points, image shift / colour augmentation. It is the **full SimLingo, not SimLingo-Base**; whether a Base checkpoint is released is unknown. The model repo showed "1 file scanned as suspicious": treat the download as untrusted (own folder `E:\MThesis_EXP\external\simlingo_epoch013_hf\`, `torch.load(weights_only=True)`, `python -I`, no code from the repo executed on the PC).
+**Rule check:** the encoder is web-pretrained (InternVL2) and then trained on CARLA driving, the same caveat you accepted for TF++'s ImageNet-initialised regnety_032; a generic web-pretrained VLM encoder (InternVL2 / LLaVA as released) is *not* covered by the CARLA-pretrained-only rule and needs your explicit go.
+**Licence:** the SimLingo-Data licence (non-commercial, A56) still needs the supervisor's sign-off before the thesis relies on weights trained on that data.
+
+- **A65. Step 0-1: get the encoder and probe it (no box, then ~1 box-hour) - Next.** (a) Weights downloaded and hashed on E: (started 2026-10-13); load the vision tower on the PC with `weights_only=True` and list the key names; (b) find the exact preprocessing (448x448 tiles, image size, bottom-quarter crop) from the repo's `simlingo_training` encoder code, reading it as text only; (c) extract pooled features for ~2,000 cached frames of our data with the SimLingo vision tower and with `regnety_032` (4x4 grid); (d) linear / small-MLP probes for lead-vehicle distance, lead-vehicle speed, obstacle-in-lane and the expert target speed on held-out frames, same split for both encoders. **Go if** the SimLingo features are clearly better on the lead-vehicle and obstacle probes (held-out error at least 10% lower); stop otherwise.
+- **A66. Step 2: arm S = our head on the SimLingo encoder - Next (after A65 says go).** Same data, recipe and epochs as arm E (`qwen30m`, `route_key route_original`, 20 epochs, wp / lateral / speed loss weights), vision tokens from the new encoder through one linear adapter to the head's width, encoder frozen, features cached (A59 applies only if nothing random sits upstream: keep the image augmentation off the cache or cache per augmentation draw). Screen on the 106 lead + obstacle routes at Epic, one run each, paired bootstrap against plain E15 (official and repeat) and against E15 x0.8 + newsvendor; then arm S with x0.8 + newsvendor. **Go if** arm S gains at least 5 DS over plain E15 (the screen resolves ~5); otherwise report the result and stop.
+- **A67. Step 3: confirm and, only if A66 gains, partial fine-tune - Later.** 220 routes, 3 runs, paired against E15 and TF++ (80.3 on our 19 routes, 84.21 published, camera + LiDAR); optionally LoRA on the last vision blocks (budget check first: SimLingo trained on 8 GPUs; training the vision model is otherwise out of scope, so this needs your go).
+- **Costs / risks:** ~$10-20 and 1-2 days to the A66 screen. The encoder is ~0.3-1 B parameters, so evaluation fits fewer lanes per 32 GB card than the 6 GB / lane of today's A63 (measure first, A63 method); the probe and the cache are the cheap part. Leakage caveat: SimLingo trained on the same towns Bench2Drive uses (the benchmark is described as a training benchmark in the literature), so a gain over E15 is real for us only if E15's own encoder had the same exposure (it did: TF++'s backbone was trained on PDM-Lite in these towns).
+
+## Speed items, 2026-10-12: A63-A64 (CARLA) and B47-B60 (Atari) - need repo changes or uploads, so not started (B58 done, scratch-only; A63 done 2026-10-13)
+
+Evidence and numbers: `docs/ops/2026-10-12_speed_profiling_and_gemini_reproduction.md` (copy on E: in `live_20261012_speed_and_carla\`).
+Today's tests ran only scratch benches (no repo change); these are the follow-ups that change repo code or need checkpoints uploaded.
+
+- **B47. Exact speed flags in the trainer - Next.** Add `--skip-dead-mixer` (the bench's `nomixer`) and `--no-priority-sync` (`nosync`) to
+  `train_ez_offpolicy.py`. Bench: 678 -> 320 ms/update on a 3090 + EPYC, 180 -> 107 on a 5090, targets and losses bit-identical on the
+  seed-2 state. Caveat: `nomixer` is exact only once the mixer has decayed (~38k updates); from step 0 it trains a model without the
+  mixer, so either switch it on at 40k or A/B the score. Check: a 3,000-step real-trainer run, base vs flags, end-to-end minutes per 1,000 steps.
+- **B48. CUDA-graph the whole training step - Next.** Forward + backward + SGD captured once (`torch.cuda.graph` with static buffers) or
+  `torch.compile(mode="reduce-overhead")`; the update phase is 33% of the step and ~7,500 kernel launches per update on the 3090.
+  Must stay bit-identical (dump compare) or get a score A/B; `torch.compile` default mode was 18% faster but changed 98% of policy targets.
+- **B49. Search cache per target version - Later (score A/B first).** Reanalysis search is 47-58% of the update; with ~100k replay states
+  and 1,536 roots per update most draws repeat within a 200-update target interval. Hit rate and speed measured on the bench (queue 4);
+  not exact (a cached root keeps its first Gumbel draw). Related: B10, B30.
+- **B50. Faster paper-protocol evaluation - Next (diagnostic first).** On the 5090 all 30 episodes of seed 2 ran to the 27,000-step cap and
+  scored only 4 distinct values: eval time is the cap. Measure each game's last score change; evaluate only distinct start states if the
+  scores match exactly; consider a documented no-score-change stop as a separate, labelled protocol. Related: B44.
+- **B51. Asynchronous reanalysis (EfficientZero / MuZero-Reanalyze style) - Later.** Compute targets for batch t+1 (search + target passes,
+  64% of the step) on a second stream / process while batch t trains.
+- **B52. Several seeds per GPU (CUDA MPS) - Next (test on the bench first).** One run uses 7-10 GB of a 32 GB 5090; 1/2/3 concurrent runs
+  measured in queue 4; MPS if the container allows the daemon. Related: B23 step 2.
+- **Approximate or learn the expensive operations (2026-10-12).** After B47/B48 the step on a 3090 is ~240 ms: reanalysis search ~50%,
+  online update ~27%, target passes ~12% (profiler, `docs/ops/2026-10-12_speed_profiling_and_gemini_reproduction.md`). Every item below
+  changes training targets, so each needs a full 100k score A/B (no early signal predicts the 100k score: Atari screening evidence of 2026-10-11);
+  B58 decides which are worth that.
+  - **B30 (existing), search gate:** search only roots where search changes the target; elsewhere use the prior / value. B58 step 1-3 sizes it.
+  - **B53. Fewer reanalysis simulations - Later.** 16 -> 4-8 for reanalysis only (acting and evaluation unchanged); Gumbel MuZero improves
+    the policy with 2-4 simulations. Bounded by B58 step 2.
+  - **B54. Distilled search head - Later (novel, higher risk).** A small head trained to predict the search's improved policy and value,
+    used instead of search for old replay data (amortised search).
+  - **B55. Stored acting-time values instead of the bootstrap target pass - Later.** Removes ~half of the target passes; `skipboot` (4.5%
+    of value targets change) is a partial version already benched.
+  - **B56. Lighter dynamics network - Later (architecture).** The dynamics net runs 16x per root: fewer residual blocks / channels,
+    depthwise-separable convs, or an MLP on the 6x6 latent; distil from the current one. B58 step 4 gives the per-block cost.
+  - **B57. Quantised inference path for search only - Later.** int8 / FP8 target network for reanalysis (TensorRT or torch AO), training
+    stays bf16; ~1.5-2x on search kernels; not exact.
+  - (B47 already covers removing the dead mixer; B49 the search cache.)
+  - **Results of 2026-10-12 evening (5090; details in the ops doc, section 4b):** B30 gate prototype -7% at 30% of roots searched, value
+    targets drift far above the noise floor -> **B30 demoted to Later**; B53 8 sims -19% per update (policy TV 0.094 vs 16 sims, 32-vs-16
+    TV 0.057) -> **the best non-exact search lever, A/B candidate**; B56 a simulation's network is 0.97 ms of a 3 ms search step without the
+    mixer -> **little room, Later**; B52 **CUDA MPS 1.31x (2 runs) / 1.42x (3 runs)** aggregate -> use it for multi-seed runs (no repo change);
+    B50 **stop rule measured** (longest gap between scoring events 65-78 steps, last point before step 1,814; "no score for 2,000 steps"
+    gives identical scores on 4 checkpoints, ~7-13x faster; protocol change, screens only) and **start-state de-duplication ruled out**
+    (identical RAM + frames still diverge).
+  - **B59. Fuse the search's tree bookkeeping - Next (engineering).** After the exact set the graphed search is ~49 ms per update of which
+    ~16 ms is network: the rest is selection / backup / halving tensor ops. Per-node graph trace first (`nsys --cuda-graph-trace=node`),
+    then fused (Triton / custom) kernels for the hot tree ops. Exact if the maths is unchanged.
+  - **B60. Remove the hidden GPU->CPU syncs in the update - Next (small, exact).** ~18 per update: build value / policy targets on the GPU
+    instead of numpy, draw the Gumbel noise on the device (`gumbel_mcts.py:276`), keep replay indices on the device (`train_ez_offpolicy.py:169-170`),
+    read search results back once. Check with `torch.cuda.set_sync_debug_mode("warn")` (bench `--sync-debug`).
+  - **B58. Offline headroom diagnostics for B30 / B53 / B56 - Done 2026-10-12 (results above).** On restored replay
+    states and the seed-2 checkpoint: (1) search vs prior agreement (chosen action, KL of improved policy, value change) per root;
+    (2) targets at 2 / 4 / 8 sims vs 16 on the same roots (policy KL, value difference, action agreement); (3) can prior entropy, value
+    spread or Q disagreement predict which roots search changes (AUROC); (4) per-block time of the dynamics network per simulation.
+    Reading: if most roots barely change, B30 has headroom; if 4-8 sims stay close to 16, B53 is cheap to try.
+- **A63. CARLA eval lanes per 32 GB at Epic - Next.** Routes per hour with 3/4/5/6 lanes on a fixed 20-route set on a 5090 (lanes <= VRAM /
+  5.5 GB on 24 GB cards); needs an agent checkpoint (E15 or J) uploaded from E: and the eval harness. Eval is the largest CARLA cost.
+- **A64. Pooled-cache strict parity on identical frames - Next.** `bench_pooled_cache.py` on 128 frames with a trained head (A59 measured
+  16x end to end on real data: 292 -> 4,703 samples/s; losses agree but parity on identical frames was not rerun on the full-data cache).
 
 ## New algorithm ideas, 2026-10-04 (S-117, S-118, S-120, S-122, S-123): A36-A58 (CARLA, one front camera) and B37-B46 (Atari)
 

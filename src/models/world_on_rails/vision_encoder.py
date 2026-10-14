@@ -180,6 +180,11 @@ def build_vision_encoder(
     training on ImageNet features while the run config claims CARLA ones is precisely the class
     of undetectable mismatch that produced the worst bugs in this project.
     """
+    if backbone_name.lower() == "simlingo":
+        # TODO A65-A66: SimLingo's CARLA-fine-tuned InternVL2 vision tower; weights_path = SimLingo's pytorch_model.pt while training, None when evaluating
+        # (the run's frozen_backbone.pth carries the tower, as for regnety). Takes the raw 1024x512 frame.
+        from src.models.world_on_rails.simlingo_encoder import SimLingoEncoder
+        return SimLingoEncoder(weights_path=weights_path, freeze_backbone=freeze_backbone)
     if backbone_name.lower().startswith("regnet"):
         from src.models.world_on_rails.carla_encoder import CarlaPretrainedEncoder
         # Without weights_path this is the evaluation path, where the encoder weights come from

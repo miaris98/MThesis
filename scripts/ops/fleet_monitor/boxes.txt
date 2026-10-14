@@ -1,0 +1,4 @@
+# name|kind|port|host|label   (2026-10-13; destroyed as unreachable: 55688275, 55689357, 55689326, 55691716)
+atari1|atari|17436|61.32.91.194|S058h_gtrxl_100k_s5_uniform
+carla2|carla|52338|216.155.220.136|jx08nv
+carla5|carla|40070|82.39.46.148|e15x07nv
