@@ -65,6 +65,7 @@ def main():
     p.add_argument("--backbone", default="regnety_032")
     p.add_argument("--weights_path", default=None, help="the TF++ release checkpoint (model_0030_0.pth) the encoder was extracted from")
     p.add_argument("--frozen_backbone", default=None, help="alternative to --weights_path: the training run's own frozen_backbone.pth (the exact encoder weights of that run)")
+    p.add_argument("--random_init", action="store_true", help="image-use control: randomly initialised encoder instead of pretrained weights (2026-10-15)")
     p.add_argument("--img_size", default="288x768")
     p.add_argument("--crop_bottom_frac", type=float, default=0.0)
     p.add_argument("--route_overlay", type=int, default=1)
@@ -97,9 +98,11 @@ def main():
     tag = ds.pixel_cache_tag()
     prefix = os.path.join(a.out_dir, f"{os.path.basename(os.path.normpath(a.data_dir))}_{tag}_{a.backbone}_g{gh}x{gw}")
 
-    assert a.weights_path or a.frozen_backbone, "give --weights_path or --frozen_backbone"
-    encoder = build_vision_encoder(backbone_name=a.backbone, pretrained=a.frozen_backbone is None, freeze_backbone=True,
-                                   weights_path=None if a.frozen_backbone else a.weights_path)
+    # --random_init: the image-use control (2026-10-15). A randomly initialised encoder replaces the pretrained one, so the head
+    # can only learn from features that carry no driving-specific content. Recorded in the cache meta; never used for a claim on its own.
+    assert a.random_init or a.weights_path or a.frozen_backbone, "give --weights_path or --frozen_backbone (or --random_init for the image-use control)"
+    encoder = build_vision_encoder(backbone_name=a.backbone, pretrained=(a.frozen_backbone is None and not a.random_init), freeze_backbone=True,
+                                   weights_path=None if (a.frozen_backbone or a.random_init) else a.weights_path)
     if a.frozen_backbone:  # keys of the policy state dict: 'encoder.<name>'
         sd = torch.load(a.frozen_backbone, map_location="cpu")
         sd = sd.get("model", sd)
