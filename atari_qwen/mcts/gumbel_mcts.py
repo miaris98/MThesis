@@ -47,6 +47,10 @@ class GumbelMCTS:
         # TODO B43 step 1: max_depth = D caps the imagined depth: a simulation that reaches a node at depth D does not expand it, it backs up that
         # node's own value-head output again (the training unroll is K = 5, the 64-simulation tree reaches depth 17). None = the original search.
         self.max_depth = max_depth
+        # TODO B38 step 0 (2026-10-16): pessimistic leaf values from two networks. Set `target` (a second EZV2Model) and
+        # `pess_lambda` after construction; None = the original search. Eager path only (GraphedSearch is not wired for it).
+        self.target = None
+        self.pess_lambda = None
         self.A = num_actions
         self.S = num_simulations
         self.m = min(num_top_actions, num_actions)
@@ -115,6 +119,11 @@ class GumbelMCTS:
         hid = model.init_hidden(B, dev)
         hid_h = torch.zeros((N,) + tuple(hid[0].shape[1:]), device=dev, dtype=hid[0].dtype)
         hid_c = torch.zeros_like(hid_h)
+        use_t = self.target is not None and self.pess_lambda is not None   # B38 step 0
+        if use_t:
+            states_t = torch.zeros_like(states)
+            states_t[0] = root_states
+            hid_t_h, hid_t_c = torch.zeros_like(hid_h), torch.zeros_like(hid_c)
 
         self.raw_v = torch.zeros(B, N, **f32)       # each node's own value-head output (B43 depth cap)
         self.raw_v[:, 0] = root_values.float()
@@ -183,6 +192,17 @@ class GumbelMCTS:
             link = ~capped                                                                # a capped row's new node stays unlinked (never reachable)
             self.child[b, leaf_parent, leaf_action] = torch.where(link, torch.full_like(leaf_action, new), self.child[b, leaf_parent, leaf_action])
             self.raw_v[:, new] = v
+            v_back = v
+            if use_t:
+                # B38 step 0: the target network rolls its own latent along the same action; the backed-up leaf value is the
+                # pessimistic mix  mean(v_on, v_tg) - lambda * |v_on - v_tg| / 2  (raw_v and the reward stay the online network's).
+                t_in = (hid_t_h[leaf_parent, b].unsqueeze(0).contiguous(), hid_t_c[leaf_parent, b].unsqueeze(0).contiguous())
+                s2_t, _, v_t_logits, _, h_t = self.target.recurrent_inference(states_t[leaf_parent, b], leaf_action, t_in)
+                v_t = self.support.vector_to_scalar(v_t_logits)
+                states_t[new] = s2_t.to(states_t.dtype)
+                hid_t_h[new] = torch.where(reset_here.unsqueeze(-1), torch.zeros_like(h_t[0][0]), h_t[0][0])
+                hid_t_c[new] = torch.where(reset_here.unsqueeze(-1), torch.zeros_like(h_t[1][0]), h_t[1][0])
+                v_back = 0.5 * (v + v_t) - self.pess_lambda * (v - v_t).abs() / 2
             self.parent[:, new] = torch.where(link, leaf_parent, torch.full_like(leaf_parent, -1))
             self.depth[:, new] = d_new
             self.logits[:, new] = p_logits.float()
@@ -192,7 +212,7 @@ class GumbelMCTS:
 
             # ---- backup ------------------------------------------------------------------------
             node = torch.where(capped, stop_node, torch.full((B,), new, device=dev, dtype=torch.long))
-            value = torch.where(capped, self.raw_v[b, stop_node], v)
+            value = torch.where(capped, self.raw_v[b, stop_node], v_back)
             alive = torch.ones(B, device=dev, dtype=torch.bool)
             levels = 0
             while (levels <= depth_bound) if fixed else bool(alive.any()):  # fixed: bounded, no sync; default: until done

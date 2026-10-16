@@ -90,13 +90,22 @@ def main():
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--stagnation", type=int, default=0, help="B44 step 1 protocol row: random actions after this many reward-free steps (0 = off)")
     ap.add_argument("--sticky", type=float, default=0.0, help="B2 robustness row: ALE sticky-action probability (0.25 = B2's protocol)")
+    ap.add_argument("--pess-lambda", type=float, default=None,
+                    help="B38 step 0: pessimistic leaf values with the checkpoint's target network (lambda in {0, 0.5, 1}); omit = control")
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     for ck_path in args.ckpts:
         ck, a, model, mcts = load_model(ck_path, device, sims=args.sims)
+        if args.pess_lambda is not None:  # B38 step 0: the target network sits next to the online one in the checkpoint
+            import copy
+            target = copy.deepcopy(model)
+            target.load_state_dict(ck["target"])
+            target.eval()
+            mcts.target, mcts.pess_lambda = target, args.pess_lambda
         label = (f"{ck_path.parent.parent.name}_{ck_path.stem}" + (f"_stag{args.stagnation}" if args.stagnation else "")
-                 + (f"_sticky{int(args.sticky * 100):02d}" if args.sticky else ""))
+                 + (f"_sticky{int(args.sticky * 100):02d}" if args.sticky else "")
+                 + (f"_pess{args.pess_lambda:g}_sims{args.sims}" if args.pess_lambda is not None else ""))
         print(f"== {label}: {args.episodes} games, {args.sims} sims, cap {args.max_steps}, stagnation {args.stagnation or 'off'}, "
               f"sticky {args.sticky:g}", flush=True)
         g = game_stats(model, mcts, a.env_id, device, args.episodes, a.frame_size, a.seed, args.max_steps, args.stagnation, args.sticky)
