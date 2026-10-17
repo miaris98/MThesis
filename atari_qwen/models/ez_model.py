@@ -115,11 +115,27 @@ class TokenMixer(nn.Module):
     Learned 2-D position embedding; GRU-gated residuals with a closed gate at init (bg_init=2 ->
     ~88% skip), so the mixer starts near identity on top of the conv state."""
     def __init__(self, channels: int, hw: int, dim: int = 128, depth: int = 2, heads: int = 4,
-                 bg_init: float = 2.0, out_init_std: float = 0.0):
+                 bg_init: float = 2.0, out_init_std: float = 0.0, pos_mode: str = "abs"):
         super().__init__()
+        assert pos_mode in ("abs", "sym"), pos_mode
+        self.pos_mode, self.heads = pos_mode, heads
         self.inp = nn.Linear(channels, dim)
-        self.pos = nn.Parameter(torch.zeros(1, hw, dim))
-        nn.init.trunc_normal_(self.pos, std=0.02)
+        if pos_mode == "abs":
+            self.pos = nn.Parameter(torch.zeros(1, hw, dim))
+            nn.init.trunc_normal_(self.pos, std=0.02)
+        else:
+            # TODO B20: attention bias that depends only on the token offset (|dx|, dy), per head. On an s x s grid that is
+            # s * (2s - 1) values (66 for s = 6). |dx| makes it mirror-symmetric; dy keeps the sign (rows are not mirrored).
+            # Initialised local (conv-like): -0.5 * (|dx| + |dy|), as ConViT's gated positional attention starts local.
+            s = int(round(hw ** 0.5))
+            assert s * s == hw, "symbias needs a square token grid"
+            rows, cols = torch.arange(hw) // s, torch.arange(hw) % s
+            dx = (cols[:, None] - cols[None, :]).abs()          # (HW, HW), mirror-invariant
+            dy = rows[:, None] - rows[None, :]                  # (HW, HW), -(s-1)..(s-1)
+            self.register_buffer("rel_idx", (dx * (2 * s - 1) + (dy + s - 1)).long(), persistent=False)
+            ii, dd = torch.arange(s)[:, None].repeat(1, 2 * s - 1), torch.arange(-(s - 1), s)[None, :].repeat(s, 1)
+            init = -0.5 * (ii.float() + dd.abs().float()).reshape(-1)     # (s * (2s - 1),)
+            self.rel_table = nn.Parameter(init[None, :].repeat(heads, 1))  # (heads, 66) for s = 6
         self.blocks = nn.ModuleList([GTrXLBlock(dim=dim, num_heads=heads, ffn_dim=4 * dim, bg_init=bg_init)
                                      for _ in range(depth)])
         self.out = nn.Linear(dim, channels)
@@ -134,9 +150,12 @@ class TokenMixer(nn.Module):
     def forward(self, x):
         B, C, H, W = x.shape
         t = x.flatten(2).transpose(1, 2)            # (B, HW, C)
-        h = self.inp(t) + self.pos
+        if self.pos_mode == "abs":
+            h, bias = self.inp(t) + self.pos, None
+        else:
+            h, bias = self.inp(t), self.rel_table[:, self.rel_idx]   # (heads, HW, HW) additive attention bias
         for blk in self.blocks:
-            h = blk(h)
+            h = blk(h, bias)
         t = t + self.out(h)                           # zero-init output: exact identity at init
         return t.transpose(1, 2).reshape(B, C, H, W)
 
@@ -167,7 +186,8 @@ class EZV2Model(nn.Module):
                  lstm_hidden: int = 512, proj_hidden: int = 1024, proj_out: int = 1024,
                  head_hidden: int = 256, action_embed_dim: int = 16, support: Optional[DiscreteSupport] = None,
                  trunk: str = "resnet", mixer_dim: int = 128, mixer_depth: int = 2, norm: str = "batch",
-                 mixer_out_init_std: float = 0.0, mixer_bg_init: float = 2.0, simnorm: int = 0):
+                 mixer_out_init_std: float = 0.0, mixer_bg_init: float = 2.0, simnorm: int = 0,
+                 mixer_pos: str = "abs"):
         super().__init__()
         assert trunk in ("resnet", "gtrxl")
         self.action_dim, self.C, self.hw, self.trunk = action_dim, num_channels, state_hw, trunk
@@ -210,8 +230,10 @@ class EZV2Model(nn.Module):
         # thesis variant: transformer token mixing in representation and dynamics
         if trunk == "gtrxl":
             hw2 = state_hw * state_hw
-            self.repr_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth, bg_init=mixer_bg_init, out_init_std=mixer_out_init_std)
-            self.dyn_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth, bg_init=mixer_bg_init, out_init_std=mixer_out_init_std)
+            self.repr_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth, bg_init=mixer_bg_init, out_init_std=mixer_out_init_std,
+                                         pos_mode=mixer_pos)
+            self.dyn_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth, bg_init=mixer_bg_init, out_init_std=mixer_out_init_std,
+                                        pos_mode=mixer_pos)
         self.lstm_hidden = lstm_hidden
         # norm: "batch" = EZ-V2; "heads" = LayerNorm in reward/value/policy heads; "all" = LayerNorm
         # everywhere except the SimSiam projection (its BatchNorm is what prevents collapse).

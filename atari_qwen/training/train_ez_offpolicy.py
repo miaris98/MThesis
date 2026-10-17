@@ -403,7 +403,7 @@ def train(args):
     model = EZV2Model(A, obs_channels=3 * 4, support=support, trunk=args.trunk, norm=args.norm,
                       state_hw=int(np.ceil(args.frame_size / 16)),
                       mixer_out_init_std=args.mixer_out_init_std, mixer_bg_init=args.mixer_bg_init,
-                      simnorm=args.simnorm).to(device)
+                      simnorm=args.simnorm, mixer_pos=args.mixer_pos).to(device)
     target = copy.deepcopy(model).eval()
     # bf16 autocast only where the GPU has native bf16 (Ampere+). is_bf16_supported() also returns True for
     # emulated bf16, which ran ~4.5x slower than fp16 on a 2080 Ti (S-099); there is no GradScaler for fp16,
@@ -775,6 +775,8 @@ def parse_args(argv=None):
     ap.add_argument("--mixer-grad-clip", type=float, default=1.0, help="mixer-only gradient-norm clip (adamw mode)")
     ap.add_argument("--mixer-bg-init", type=float, default=2.0, help="GRU gate bias init of the mixer blocks (2 = closed, ~88%% skip; 0 = open)")
     ap.add_argument("--simnorm", type=int, default=0, help="TODO B22: SimNorm group size on the latent (0 = off; 8 = TD-MPC2)")
+    ap.add_argument("--mixer-pos", default="abs", choices=["abs", "sym"],
+                    help="TODO B20: GTrXL position encoding: abs = learned table (default), sym = symmetric offset bias (translation + mirror)")
     ap.add_argument("--audit-every", type=int, default=0, help="TODO B37: log the mixer's per-category relative weight change and gradient norm every N updates (0 = off)")
     ap.add_argument("--mixer-weight-decay", type=float, default=None,
                     help="weight decay of the GTrXL token mixer's parameters (default: --weight-decay). With SGD lr 0.2, "

@@ -86,19 +86,24 @@ class GTrXLBlock(nn.Module):
         if use_gru_gating:
             self.gate2 = GRUGating(dim, bg_init=bg_init)
 
-    def _attention(self, x: torch.Tensor) -> torch.Tensor:
+    def _attention(self, x: torch.Tensor, attn_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # attn_bias: additive logits bias, (heads, N, N) or (B, heads, N, N). TODO B20 uses it for the symmetric offset bias.
         B, N, C = x.shape
         q = self.q_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        if attn_bias is not None:
+            attn_bias = attn_bias.to(q.dtype)
 
         if hasattr(F, "scaled_dot_product_attention"):
             attn_out = F.scaled_dot_product_attention(
-                q, k, v,
+                q, k, v, attn_mask=attn_bias,
                 dropout_p=self.dropout.p if self.training else 0.0
             )
         else:
             scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+            if attn_bias is not None:
+                scores = scores + attn_bias
             attn_weights = F.softmax(scores, dim=-1)
             if self.training and self.dropout.p > 0:
                 attn_weights = self.dropout(attn_weights)
@@ -110,9 +115,9 @@ class GTrXLBlock(nn.Module):
     def _ffn(self, x: torch.Tensor) -> torch.Tensor:
         return self.w_down(F.silu(self.w_gate(x)) * self.w_up(x))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, attn_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         # Pre-LN + Attention + (GRU Gating or plain residual)
-        attn_out = self._attention(self.norm1(x))
+        attn_out = self._attention(self.norm1(x), attn_bias)
         x = self.gate1(x, attn_out) if self.use_gru_gating else x + attn_out
 
         # Pre-LN + FFN + (GRU Gating or plain residual)

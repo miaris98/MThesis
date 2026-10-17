@@ -53,7 +53,8 @@ def load_model(ck_path: Path, device, sims=None, max_depth=None):
     probe.close()
     support = DiscreteSupport()
     model = EZV2Model(A, obs_channels=3 * 4, support=support, trunk=a.trunk, norm=a.norm,
-                      state_hw=int(np.ceil(a.frame_size / 16)), simnorm=getattr(a, "simnorm", 0)).to(device)
+                      state_hw=int(np.ceil(a.frame_size / 16)), simnorm=getattr(a, "simnorm", 0),
+                      mixer_pos=getattr(a, "mixer_pos", "abs")).to(device)
     model.load_state_dict(ck["model"])
     mcts = GumbelMCTS(A, support, num_simulations=sims or a.num_simulations, discount=a.discount ** 4,
                       lstm_horizon=a.lstm_horizon, max_depth=max_depth)
