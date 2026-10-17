@@ -167,10 +167,13 @@ class EZV2Model(nn.Module):
                  lstm_hidden: int = 512, proj_hidden: int = 1024, proj_out: int = 1024,
                  head_hidden: int = 256, action_embed_dim: int = 16, support: Optional[DiscreteSupport] = None,
                  trunk: str = "resnet", mixer_dim: int = 128, mixer_depth: int = 2, norm: str = "batch",
-                 mixer_out_init_std: float = 0.0, mixer_bg_init: float = 2.0):
+                 mixer_out_init_std: float = 0.0, mixer_bg_init: float = 2.0, simnorm: int = 0):
         super().__init__()
         assert trunk in ("resnet", "gtrxl")
         self.action_dim, self.C, self.hw, self.trunk = action_dim, num_channels, state_hw, trunk
+        # TODO B22: SimNorm group size on the latent (0 = off, the EZ-V2 default). 8 = TD-MPC2's value.
+        self.simnorm = simnorm
+        assert simnorm == 0 or (num_channels * state_hw * state_hw) % simnorm == 0
         self.support = support or DiscreteSupport()
         S = self.support.size
         flat = reduced_channels * state_hw * state_hw
@@ -225,11 +228,18 @@ class EZV2Model(nn.Module):
             swap_batchnorm(self, skip=("proj", "proj_head"))
 
     # --- components ---------------------------------------------------------------------------
+    def simnorm_latent(self, s: torch.Tensor) -> torch.Tensor:
+        """B22: softmax within groups of `self.simnorm` features (TD-MPC2 SimNorm). Identity when off."""
+        if self.simnorm == 0:
+            return s
+        shape = s.shape
+        return F.softmax(s.reshape(shape[0], -1, self.simnorm), dim=-1).reshape(shape)
+
     def representation(self, obs: torch.Tensor) -> torch.Tensor:
         s = self.repr_res(self.down(obs))
         if self.trunk == "gtrxl":
             s = self.repr_mixer(s)
-        return s
+        return self.simnorm_latent(s)
 
     def dynamics(self, s: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
         plane = (a.float() / self.action_dim).view(-1, 1, 1, 1).expand(-1, 1, self.hw, self.hw)
@@ -238,7 +248,7 @@ class EZV2Model(nn.Module):
         x = self.dyn_res(F.relu(x + s))
         if self.trunk == "gtrxl":
             x = self.dyn_mixer(x)
-        return x
+        return self.simnorm_latent(x)
 
     def value_prefix(self, s: torch.Tensor, hidden):
         x = F.relu(self.rew_bn(self.rew_conv(s))).flatten(1).unsqueeze(0)
