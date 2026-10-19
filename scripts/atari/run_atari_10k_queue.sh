@@ -8,6 +8,7 @@
 # Scoring = eval_loop_stats.py: 30 games, 16 sims, raw reward, cap 27,000 steps, mean + per-game loop statistics.
 # usage: run_atari_10k_queue.sh GPU "JOB" ["JOB" ...]      (quote every job)
 # Layout: /workspace/q/out/<label>/ training, /workspace/q/eval/*_loops.json scores, /workspace/q/logs/, /workspace/q/done/<label> marker.
+# SCORE_STICKY=0.25 in the environment makes the scoring after a training job use ALE sticky actions (about 30 distinct games, 3-4 minutes) instead of the deterministic 4-game protocol.
 # Labels: Q_<trunk>_10k_s<seed>_sn<simnorm>_pos<pos> (Q_gtrxl_10k_s0_sn0_posabs = the B22_gtrxl_10k_s0_sn0 runs of 2026-10-17).
 cd /workspace/MThesis
 GPU=$1; shift
@@ -39,7 +40,7 @@ train() {  # TRUNK SEED SIMNORM POS
     [ $rc -eq 0 ] && break; sleep 30
   done
   ck=$Q/out/$label/checkpoints/checkpoint_env10000_upd10000.pt
-  if [ -f $ck ]; then score $label $ck 0; echo "$(date -u) ok" > $Q/done/$label
+  if [ -f $ck ]; then score $label $ck 0 "" 16 ${SCORE_STICKY:-}; echo "$(date -u) ok" > $Q/done/$label
   else echo "$(date -u) FAILED no final checkpoint" > $Q/done/$label.FAILED; fi
 }
 
