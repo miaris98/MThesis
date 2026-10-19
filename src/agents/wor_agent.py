@@ -13,6 +13,26 @@ from src.models.world_on_rails.wor_loader import load_wor_model, download_pretra
 from src.config.camera import (
     camera_sensor_spec, preprocess_rgb, DEFAULT_IMG_SIZE, DEFAULT_CROP_BOTTOM_FRAC)
 
+# TODO A0 (S-072): how much of the driving score comes from the image? WOR_BLANK_IMAGE replaces every camera frame
+# before preprocessing, so an overlay checkpoint still gets its route painted on top, and route, speed and command reach
+# the policy unchanged:
+#   mean    the ImageNet mean colour, which the CARLA encoder's normalisation (carla_encoder.py) maps to exactly zero:
+#           no visual signal at all;
+#   black   all zeros;
+#   freeze  the route's first frame for the whole route: real pixels that say nothing about the present (the
+#           in-distribution control for `mean`).
+# Unset = the camera as recorded, bit-identical to every earlier run. The A44 clips (B2D_CLIPS_DIR) keep the real frame.
+BLANK_IMAGE_MODES = ("mean", "black", "freeze")
+IMAGENET_MEAN_RGB = (124, 116, 104)  # round(255 * (0.485, 0.456, 0.406))
+
+
+def blank_image_mode_from_env() -> Optional[str]:
+    """WOR_BLANK_IMAGE, validated: an unknown value raises instead of silently driving on the real camera."""
+    mode = os.environ.get("WOR_BLANK_IMAGE", "").strip().lower() or None
+    if mode is not None and mode not in BLANK_IMAGE_MODES:
+        raise ValueError(f"WOR_BLANK_IMAGE={mode!r}: expected one of {', '.join(BLANK_IMAGE_MODES)} (or unset)")
+    return mode
+
 
 class WorldOnRailsAgent:
     """
@@ -30,6 +50,8 @@ class WorldOnRailsAgent:
     backbone_name: str = "resnet34"
     use_target_speed: bool = False
     route_points: int = 4
+    blank_image: Optional[str] = None
+    _frozen_rgb: Optional[np.ndarray] = None
 
     def __init__(
         self,
@@ -57,6 +79,10 @@ class WorldOnRailsAgent:
         self.backbone_name = backbone_name
         self.use_target_speed = False
         self.route_points = route_points
+        self.blank_image = blank_image_mode_from_env()
+        self._frozen_rgb = None
+        if self.blank_image is not None:
+            print(f"[A0] camera image replaced: WOR_BLANK_IMAGE={self.blank_image} (route, speed and command unchanged)", flush=True)
         if checkpoint_path:
             # Deliberately before the model is built: this can change the backbone family, and
             # constructing the wrong one first would only be detectable as a partial weight load.
@@ -192,6 +218,8 @@ class WorldOnRailsAgent:
         else:
             # Fallback dummy RGB
             rgb_img = np.zeros((*self.img_size, 3), dtype=np.uint8)
+        if self.blank_image is not None:
+            rgb_img = self._blanked(rgb_img)
 
         # 2. Extract Speed (metres per second)
         #
@@ -262,6 +290,18 @@ class WorldOnRailsAgent:
                 "brake": float(brake)
             }
 
+    def _blanked(self, rgb_img: np.ndarray) -> np.ndarray:
+        """The A0 replacement frame (WOR_BLANK_IMAGE), same shape and dtype as the camera's."""
+        if self.blank_image == "freeze":
+            if self._frozen_rgb is None:
+                self._frozen_rgb = np.array(rgb_img, dtype=np.uint8, copy=True)
+            return self._frozen_rgb.copy()
+        out = np.zeros(np.shape(rgb_img), dtype=np.uint8)
+        if self.blank_image == "mean":
+            out[...] = IMAGENET_MEAN_RGB
+        return out
+
     def destroy(self):
         """Cleans up resources upon episode completion."""
+        self._frozen_rgb = None  # A0 `freeze`: a harness that reuses the agent must not carry one route's frame into the next
         self.net.controller.reset()
