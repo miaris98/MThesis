@@ -53,8 +53,21 @@ for _lab in ("j_a50", "j_a57", "j_a52_08", "j_a52_09", "e15_a50", "e15_a57", "m2
     ARMS.append((rf"^{_lab}_n", _lab.upper()))
 
 
-def arm_of(name: str):
-    for pat, arm in ARMS:
+def parse_arm_specs(specs):
+    """`--arm NAME=REGEX` options -> [(REGEX, NAME)]: arms for labels the built-in table does not know (any new run), matched
+    before it. Keep Low and Epic apart in the regex (e.g. `^c19v4_220(?!.*epic)`): runs that differ in a simulator flag never pool."""
+    out = []
+    for spec in specs or []:
+        name, sep, pat = spec.partition("=")
+        if not sep or not name or not pat:
+            raise SystemExit(f"--arm needs NAME=REGEX, got {spec!r}")
+        re.compile(pat)
+        out.append((pat, name))
+    return out
+
+
+def arm_of(name: str, extra=()):
+    for pat, arm in list(extra) + ARMS:
         m = re.match(pat, name)
         if m:
             if arm is not None:
@@ -80,9 +93,10 @@ def route_table() -> dict:
     return routes
 
 
-def collect(roots):
+def collect(roots, extra_arms=()):
     """Driving records per arm and route from every *_x.json under the roots (globs allowed), de-duplicated across the
-    live_* mirrors; harness failures are left out of the records and returned separately as {arm: {route ids}}."""
+    live_* mirrors; harness failures are left out of the records and returned separately as {arm: {route ids}}.
+    `extra_arms` = parse_arm_specs(...) output, matched before the built-in table."""
     records = collections.defaultdict(lambda: collections.defaultdict(list))  # arm -> route -> [record]
     infra = collections.defaultdict(set)
     seen = set()
@@ -90,7 +104,7 @@ def collect(roots):
         for d in glob.glob(root):
             for f in glob.glob(os.path.join(d, "**", "*_x.json"), recursive=True):
                 name = os.path.basename(f)
-                arm = arm_of(name)
+                arm = arm_of(name, extra_arms)
                 if arm is None or "abandoned" in f:
                     continue
                 try:
@@ -119,10 +133,12 @@ def main() -> int:
                     help="add an arm whose per-route DS is the mean over these arms (several seeds of one recipe); "
                          "only routes all of them drove (repeatable)")
     ap.add_argument("--arms", default=None, help="comma list: only report these arms (default: all)")
+    ap.add_argument("--arm", action="append", default=[], metavar="NAME=REGEX",
+                    help="an arm for result-file labels the built-in table does not know, e.g. A57_220='^c19v4_220(?!.*epic)' (repeatable)")
     a = ap.parse_args()
 
     routes = route_table()
-    records, infra = collect(a.roots)
+    records, infra = collect(a.roots, parse_arm_specs(a.arm))
     drives = {arm: {r: [float(x["scores"]["score_composed"]) for x in v] for r, v in rr.items()} for arm, rr in records.items()}
     ds = {arm: {r: statistics.fmean(v) for r, v in rr.items()} for arm, rr in drives.items()}
     for spec in a.pool:
