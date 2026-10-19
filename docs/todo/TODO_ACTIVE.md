@@ -44,6 +44,9 @@ Rendering policy (user, 2026-10-14): **Low by default, Epic only for routes that
 - **A66 seed 0 (closed loop, Low, 106 lead + obstacle routes, quarter-data heads, 40 epochs, no overlay, no speed switches, paired by route):** SimLingo arm 61.8 vs control (regnety, same recipe) 58.3 on 103 routes: **+3.5 [-2.0, +8.8]**, below the +5 go threshold and not significant. Epic on the 5 crash routes: SimLingo arm 31.6, control 62.0 (5 routes only, points the other way). Reference only (different recipe): E15 x0.8 + newsvendor 68.8 on the same routes; SimLingo arm -7.1 [-12.0, -2.3], control -11.5 [-17.4, -5.7]. Head-seed noise is ~8 DS, so seeds 1 and 2 (running, same routes, same recipe) decide A66; A67 only on a gain of >= 5 DS.
 - **E15 x0.8 + newsvendor, run 1 at Low (215-route split, 201 routes with a driving record; runs 2-3 cancelled for the A66 screens):** mean 69.0. Paired vs plain E15 official (2026-09-28) n=174: **+1.8 [-2.3, +5.9]**; vs plain E15 repeat (e15r) n=96: +3.5 [-0.9, +8.1]; vs x0.9 alone n=199: +1.7 [-1.5, +5.1]; vs x0.8 alone n=98: +0.1 [-3.6, +3.6]; vs newsvendor alone n=98: +1.1 [-2.8, +5.2]. No combination is significant; one run only (seed noise ~4 DS).
 - **B37 retry (AdamW mixer, lr <= 3e-5, 20k updates, one seed, deterministic eval, 10 games, protocol: no sticky actions):** the mixer now trains (|mixer W| 90-143 vs ~0 before), but no setting reaches B36 SGD (52-98 at 20k). lr 1e-5: 0 / 13.2 / 19.8 / 37.2 / **42.0** at 5k / 10k / 15k / 18,004 upd / final; lr 3e-5: 0 / 14.0 / 27.6 / 0.0 / 23.2; lr 1e-5 open gates: 0 / 4.6 / 16.6 / 28.4 / 0.0. A 0.0 means no game ended in 27,000 steps (stuck policy), ~4 distinct games per checkpoint, so do not rank the settings. Files `atari_b37/atari/b37_retry_2026-10-14/b37_save.tar` (E: and HF `atari/b37_retry_2026-10-14/`, sha256 4dfce901...cfe3).
+- **Head test, 2026-10-15 (completed, one seed each, same 264-route held-out set):** SimLingo head held-out ADE 0.386 / 0.370 / 0.319 m at 380 / 745 / 1,466 training routes vs regnety 0.484-0.488 / 0.442 / 0.366 m. SimLingo ahead at every size; offline, not closed loop. Saved on E: (`test_box_20261015/`) and HF (`carla/live_20261015_simlingo_head_test`). 8x8 grid test not run; the test box was destroyed 11:37 Athens.
+- **Test result (2026-10-14, final):** control (regnety) learning curve on the 264-route held-out set: quarter 0.484-0.488 m ADE, all data 0.366 m (val loss 0.506); half-data run lost to a duplicate-chain collision; SimLingo curve and grid test not run (test box destroyed 19:00 Athens, E: copy in test_box_20261014/).
+- **Planned for 2026-10-15 (user, 2026-10-14):** A18 offline stage first (latent next-frame loss on the E15 head, regnety cache with next-frame targets; ~3 box-hours, ~$3); closed-loop screens only if the held-out error drops (A18 ~$3.5 per arm-seed trio, A19 ~$4.5; a 2-3 DS gain needs the 220-route x3 protocol, ~$6.5 per arm). Full online EZ-V2 in CARLA is not planned. Also running tonight on box 55926839: SimLingo-head learning curve (quarter / half / all data, 40 vs 80 epochs) and a 4x4 vs 8x8 pooling test (script `t_driver.sh`, status in `/workspace/t/status`).
 - **Ops lessons:** a repo refresh over a patched box silently reverted `train_wor.py` (re-push patched files after any tarball refresh); E: dropped large writes for ~2 h (reconnect, then re-verify); lanes need rebalancing when some finish early (a lane list is fixed at launch); OOM at 5 lanes with SimLingo on 32 GB.
 
 ## Results of 2026-10-13 (new tests on a 3-box 5090 fleet; details `docs/ops/2026-10-13_new_tests_on_5090_fleet.md`, files `E:\MThesis_EXP\live_20261013_new_tests\`)
@@ -599,8 +602,19 @@ within each route (design-based inference), so the CI depends on `sigma_run`, no
 
   WoR barely collides, so it has no lottery. Every collision fix therefore raises the mean *and* shrinks the CI.
 
-### A3. Automatic per-route failure classification - **Next** (tooling)
-`scripts/eval/classify_failures.py` does not exist. Build it from the eval JSONs' `infractions`
+### A3. Automatic per-route failure classification - **Done 2026-10-19** (tooling)
+**Status 2026-10-19: done** in `scripts/analysis/a3_failure_classes.py`, the 2026-10-04 first version, which this entry's `classify_failures.py` refers to (tests: `tests/test_a3_failure_classes.py`).
+- **Additions:**
+  - a failure class per route-run (the cause that cost the most points; the 4,000-tick cap is `time_cap`);
+  - the paired table (reference class -> arm class) against any `--reference`, ranked by points moved;
+  - `--arm NAME=REGEX` for labels a9_merge.py does not know (also in a9_merge.py);
+  - `--clips`: the A44 taxonomy, using the first contact per run and actor.
+- **Check:** it reproduces S-117's points split exactly (E15 37.9, J 36.9, WoR 45.0).
+- **Outputs:** `E:\MThesis_EXP\analysis_20261019\a3_*`.
+- **First readings:**
+  - E15 - WoR is +13.7 on 200 routes. Its largest single loss is the 23 routes WoR drives clean where E15 hits a vehicle: -42.8 each, -984 points in total (about -4.9 DS).
+  - A57 on 220 at Low (c19v4_220) - E15 is +5.2. Lead-vehicle routes give +12.9 [+5.6, +20.1]; obstacle +3.5 and other +2.0 are n.s. This compares different hosts and dates, so the same-host control is still open.
+- Original spec (2026-10-04): `scripts/eval/classify_failures.py` does not exist. Build it from the eval JSONs' `infractions`
 (collision type, red light, stop, timeout, blocked, route deviation) and print one table per arm plus
 a paired per-route comparison against WoR (the S-090 numbers came from a scratch script; fold that
 in, with the paired bootstrap from A8). Feeds A11. Was C51; also decides whether C4/C50 (weather) or
@@ -620,7 +634,17 @@ and reaches state-of-the-art diffusion policies on RoboMimic with <33% of the da
 
 Not found applied to end-to-end driving in this scan.
 
-### A0. How much of the DS comes from vision? - **Next** (eval-only)
+### A0. How much of the DS comes from vision? - **Next** (eval-only; code done 2026-10-19)
+**Code 2026-10-19:** `WOR_BLANK_IMAGE` in `src/agents/wor_agent.py` (tests: `tests/test_blank_image.py`). It replaces the camera frame before the route overlay is drawn, so the policy keeps its route, speed and command.
+- **Modes:**
+  - `mean`: the ImageNet mean colour, which the CARLA encoder normalises to exactly 0, so no visual signal;
+  - `black`;
+  - `freeze`: the route's first frame for the whole route, an in-distribution control.
+- An unknown value stops the agent at set-up instead of driving on the real camera.
+- **Run as:** `CKE:<label>:<ckpt>:<routes>:WOR_BLANK_IMAGE=mean`.
+- **Check after launch:** the log line `[A0] camera image replaced: WOR_BLANK_IMAGE=mean`.
+- The A44 clips keep the real frame.
+
 With a random backbone the policy still scored 50-60 DS (S-072). Run A e15 with the real backbone
 vs a deliberately blanked image (route overlay only) on the 19 routes, to know how much the vision
 input actually contributes on this route set.
@@ -856,6 +880,11 @@ collision lottery (S-101), and 47% of runs collide.
 - **Single camera:** yes (test-time views are of the same frame). **Cost:** eval-only.
 
 ### A44. Collision-clip recorder in every eval, then failure-conditioned fine-tuning - **Next** (infrastructure first; enables A37, A38, A40) (S-117)
+**Status 2026-10-19: on in every eval.**
+- Every `queue_A9c.sh` job records clips into `$B2D_OUT/clips/<label>`. `B2D_CLIPS=0` turns them off; an explicit `B2D_CLIPS_DIR` takes precedence.
+- `fleet_monitor/sync_boxes.sh` pulls the clips and the result snapshots to E:, but not to HF. `live_sync_loop.sh` already copies all of `bench2drive_out`.
+- Use 1 (the taxonomy) is built: `a3_failure_classes.py --clips`.
+- S-126's 48 test clips reduce to 2 impacts (39 repeat contacts while pushing). Both are rear-ends into a parked car at 9-10 m/s with P(stop) < 0.02 and a target of 36-37 km/h.
 **Status 2026-10-05 (S-126): code done** (`src/eval/clip_recorder.py` + agent glue behind `B2D_CLIPS_DIR`, wrapped so a recorder error cannot cost a route; unit-tested without CARLA; **run in CARLA on 4 test routes (S-126)**: clips of ~250 KB (`<route>_<kind>_t<NNN>.npz`) with the first taxonomy entry (rear-end into a stationary vehicle at ~10 m/s with the speed head asking for speed); not yet used in a screen). Use it through `CKE` lane jobs.
 J has a vehicle collision in 47% of its runs, and we still cannot say who hit whom at what speed or what the speed head predicted (A11 is open, the evals store only JSON).
 - **Recorder (`bench2drive_agent.py`, flag `B2D_CLIPS_DIR`):** a ring buffer of the last 6 s at 4 Hz: the downsized frame (JPEG), waypoints, speed posterior, target speed, ego speed and
@@ -1025,6 +1054,18 @@ measures the sensitivity to the shift; the repository ships the PDM-Lite expert 
 - **Expected gain (a projection, measure first):** epoch 17.6 -> ~2-4 min; a 5-epoch fine-tune ~15 min instead of 1.5 h; 3 trained seeds per finalist ~45 min (A52: 26% of a run's variance is the training seed). **Kill criterion:** < 3x faster. **Single camera:** yes.
 
 ### A60. Persistent lane queue for the CARLA evaluation harness - **Next** (Tier 0; 1-1.5 days of code + a 40-route parity check) (S-125)
+**Status 2026-10-19: harness changes done; box smoke test open.**
+- **New `scripts/eval/lane_plan.py`** (tests: `tests/test_lane_plan.py`), called by `queue_A9c.sh`. It fixes the two incidents of 2026-10-19:
+  - every route list runs in ascending order, the evaluator's own order, so crash continuations name the right route;
+  - a label is never relaunched on a changed list. The routes not yet driven run as `<label>d<k>`, and a repeated restart resumes that label.
+- **In `queue_A9c.sh`:**
+  - the result file is copied to `$B2D_OUT/snapshots/` before every launch;
+  - hand-over is shorter: poll 60 -> 15 s, settle after launch 120 -> 30 s;
+  - `launch_b2d20.sh` no longer waits 20 s after the last arm.
+- **Already in place:** `gen_lanes.py` (S-126) sizes lanes by VRAM / 5.5 GB and CPUs / 5 and balances jobs of 8 or more routes by wall time.
+- **Testing:** unit tests plus a stubbed `eval_job` run of 5 restart scenarios. The bash runs only with stubs here (no pgrep or CARLA on the PC).
+- **First box use:** one short CKL job, then check the `start` / `attach` lines and the result file.
+- **Deploy** only to boxes with no running lanes, because bash re-reads a running script.
 **Revised 2026-10-05 (S-126): not a persistent evaluator.** The Bench2Drive fork starts its own CARLA per launch and the vanilla evaluator would break comparability with every earlier number. The measured waste is start-up (78 s) + hand-over (43 s) per *job*; jobs of 8-9 routes (`scripts/ops/gen_lanes_a36.py`) cut it to ~13 s per route against ~45 s at 2.7 routes per job. Do: >= 8 routes per (arm, lane) job, trim `sleep 120` / the 60 s guardian poll (not while lanes run: bash re-reads a running script), balance by route wall time, **lanes <= VRAM / 5.5 GB** (S-126: 8 lanes on 24 GB = OOM). The gap between routes is 86 s median (teardown + world load + scenario + agent set-up); its split is still unknown (an OOM-free single lane with timestamps would give it).
 **Why (measured, `box_rates.py`):** over 601 lane jobs / 1,606 routes / 186 lane-hours on the six boxes of 10-01..10-04 a lane spends **47% on the route itself, 29% on per-route overhead, 9% on job start-up (median 78 s: CARLA cold start + agent import) and 14% on hand-over (median 43 s: `sleep 120`, guardian polling, port clearing in `queue_A9c.sh`)**; a job carries 2.7 routes
 (a chunk per arm per lane, plus retry jobs). A lane spends 417 s per route-run, 197 s of it the route: 12 always-busy lanes give 104 runs/h, which is what the boxes measured (65-128).
