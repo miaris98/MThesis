@@ -76,7 +76,9 @@ run)
   # a box provisioned before the patch existed gets it here; idempotent, and several lanes per GPU need it
   python3 "$MTHESIS_ROOT/scripts/setup/patch_bench2drive.py" "$GARAGE" || exit 1
   mkdir -p "$B2D_OUT"
+  NARMS=$(wc -w <<<"$ARMS"); IARM=0
   for spec in $ARMS; do
+    IARM=$((IARM + 1))
     IFS=: read -r arm PORT TM SUBSET <<<"$spec"
     N=$(awk -F, '{print NF}' <<<"$SUBSET")
     ARM_LABEL="${LABEL}_${arm}"
@@ -86,7 +88,9 @@ run)
         "$ROUTES" "$PORT" "$TM" "$GPU" "$SUBSET" \
       > "$WORKSPACE/guardian_${ARM_LABEL}.out" 2>&1 &
     echo "launched guardian for $ARM_LABEL ($N routes, port $PORT, GPU $GPU) pid $!"
-    sleep 20  # stagger CARLA boots so the servers do not race for the same Vulkan init
+    # stagger CARLA boots so the servers do not race for the same Vulkan init; not after the last arm (a queue_A9c.sh job has one
+    # arm, so this was 20 s of hand-over per job, TODO A60)
+    if [ "$IARM" -lt "$NARMS" ]; then sleep 20; fi
   done
   ;;
 *) echo "unknown phase $PHASE"; exit 2 ;;
