@@ -101,8 +101,11 @@ All artifacts, checkpoints, and evaluation results must follow a strict two-stag
 1. **Stage 1 — External Archive First (`E:\MThesis_EXP`)**:
    - Sync all logs, telemetry CSVs, model weights, and MLflow runs to `E:\MThesis_EXP` first using `scripts/sync/sync_experiments.py` or direct export.
    - Update the external knowledge graph and catalog via `python scripts/sync/build_external_graph.py`.
-2. **Stage 2 — Hugging Face Second**:
-   - Push verified champion checkpoints, evaluation summaries, and gameplay/rollout videos to Hugging Face using credentials in the local `.env` file (`HF_TOKEN`) via existing sync scripts (`scripts/sync/hf_push_checkpoints.py` or `atari_qwen/training/hf_sync.py`).
+2. **Stage 2 — Google Drive Second (replaces Hugging Face, user 2026-10-19)**:
+   - Push verified champion checkpoints, evaluation summaries, resumable pairs and gameplay/rollout videos to Google Drive (`MThesis_backups/`) with rclone, from the boxes, via `scripts/sync/gdrive_push_dir.sh DIR SUB` (checksum-verified, prints `PUSH_VERIFY`). Full guide: `docs/ops/google_drive_sync.md`.
+   - Credential: `.gdrive_rclone.conf` (repo root, gitignored; holds the OAuth refresh token). Ship it to the boxes with `scripts/ops/push_gdrive_token_to_boxes.sh` (lands in `/dev/shm/gdrive_rclone.conf`, RAM only). Never put it in a command line, a log or the chat.
+   - Migration status 2026-10-19 (evening): `fleet_monitor/sync_boxes.sh` and `finisher.sh` push to Drive by default (`STAGE2=hf` / `FIN_TARGET=hf` for the old relay); `live_sync_loop.sh` is stage 1 only. Not yet run on a Vast.ai box. Do not claim a backup is on Drive until a box-side `PUSH_VERIFY ... bad 0 errors 0` line has been seen.
+   - Hugging Face scripts stay for restoring old runs; do not delete them.
 
 ### 3. Compute Utilization & Parallelism (GPU & CPU Co-Utilization)
 Before triggering any training or evaluation run:
@@ -123,6 +126,10 @@ Before triggering any training or evaluation run:
   - If you need any information regarding them, ask the user directly.
 - **Daily Key Rotation Reminder**:
   - Prompt the user to reroll/rotate API keys (Vast.ai, Hugging Face, etc.) every day / at the start of each daily session.
+- **Google Drive token (`.gdrive_rclone.conf`)**:
+  - It is a dotfile: never read it, cat it, grep it or print `rclone config show` / `rclone config dump` output. Test it only through commands that print no token (`rclone lsd`, `rclone check`, the scripts).
+  - Rotation = `bash scripts/ops/rotate_gdrive_token.sh` (new token, ship to every running box, then revoke the old one; needs one browser click). Optional daily task: `scripts/ops/schedule_gdrive_rotation.ps1`. Check `.gdrive_rotation.log` at the start of each session and tell the user if the last rotation failed or did not run.
+  - After any new box is rented, or one is lost or reused, run `bash scripts/ops/push_gdrive_token_to_boxes.sh` (or rotate). Never leave the token on a box that is being given up: it is in `/dev/shm` and dies with the box, but a box that is kept alive and abandoned should be revoked via a rotation.
 
 ## Vast.ai Platform Integration & Autonomous Access
 

@@ -13,6 +13,7 @@ __pycache__/
 .env*
 .remote
 .vast*
+.gdrive*
 
 # ---------------------------------------------------------------------------
 # External checkouts and reference material, vendored beside the repo rather
