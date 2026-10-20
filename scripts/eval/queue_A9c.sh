@@ -31,7 +31,7 @@ R19="2050,2143,2286,2509,2664,3373,3457,3717,3936,23687,24340,24784,24795,25318,
 C=$CHECKPOINTS
 PCLA_ROOT=${PCLA_ROOT:-$WORKSPACE/PCLA}
 WOR_CFG=$PCLA_ROOT/pcla_agents/wor_pretrained/leaderboard_weights/config_leaderboard.yaml
-OUT=$B2D_OUT
+OUT=$B2D_OUT; mkdir -p "$OUT"   # a fresh box has no result directory: the first job's route-list file was not written (2026-10-20)
 EXCL=$WORKSPACE/a9_exclude.txt
 CRASH_ATTEMPTS=${CRASH_ATTEMPTS:-4}   # launch attempts at the same progress before a route counts as a crash route
 
