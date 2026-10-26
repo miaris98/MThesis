@@ -151,6 +151,7 @@ def parse_args():
     parser.add_argument("--path_head", type=int, default=0, help="TODO A15: add a space-indexed path head (10 points of the expert's shifted route, ego frame) next to the waypoints (qwen heads only)")
     parser.add_argument("--path_loss_weight", type=float, default=1.0, help="TODO A15: weight of the path L1 when --path_head 1")
     parser.add_argument("--path_cascade", type=int, default=0, help="TODO A15: condition the speed head on the predicted path (AlignDrive-style aligned cascade; zero-initialised coupling); needs --path_head 1")
+    parser.add_argument("--qk_norm", type=int, default=0, help="TODO B67: Qwen3-style per-head RMSNorm on queries and keys in every trunk block (bounds the attention logits; the same block option as the Atari --mixer-qk-norm). Qwen policies only; stamped in the checkpoint config")
     parser.add_argument("--speed_lambda_over", type=float, default=0.0, help="TODO A39: weight of the expected squared OVERSHOOT of the speed posterior against the expert's speed (a collision costs x0.6) next to the two-hot CE; 0 = plain CE")
     parser.add_argument("--speed_lambda_under", type=float, default=0.0, help="TODO A39: weight of the expected squared undershoot (slowness is cheap until the time cap); use 2-4x less than --speed_lambda_over")
     parser.add_argument("--compile_model", type=int, default=0, help="Wrap the policy in torch.compile - trades a one-off compilation on the first epoch for faster steps afterwards, so it only pays off over a long run (1=True, 0=False)")
@@ -234,7 +235,8 @@ def main():
                                            freeze_backbone=bool(args.freeze_backbone),
                                            route_points=args.route_points,
                                            model_size=args.policy_arch.replace("qwen", ""),
-                                           vision_grid=_parse_vision_grid(args.vision_grid))
+                                           vision_grid=_parse_vision_grid(args.vision_grid),
+                                           qk_norm=bool(args.qk_norm))
 
         def _optimizer_factory(m):
             return torch.optim.AdamW(m.parameters(), lr=args.lr_heads, weight_decay=1e-4)
@@ -330,7 +332,8 @@ def main():
             path_cascade=bool(args.path_cascade),
             token_mode=args.token_mode,
             s2d_patch=args.s2d_patch,
-            token_mask=args.token_mask
+            token_mask=args.token_mask,
+            qk_norm=bool(args.qk_norm)
         )
 
     # 2. Initialize Trainer

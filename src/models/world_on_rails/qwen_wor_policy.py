@@ -56,7 +56,7 @@ class QwenWaypointTransformer(nn.Module):
 
     def __init__(self, embed_dim: int, depth: int, num_heads: int, ffn_dim: int,
                  num_commands: int = 6, num_rails: int = 9, num_vision_tokens: int = 64,
-                 use_rail_q: bool = True):
+                 use_rail_q: bool = True, qk_norm: bool = False):
         super().__init__()
         self.use_rail_q = use_rail_q
         self.num_commands = num_commands
@@ -75,7 +75,7 @@ class QwenWaypointTransformer(nn.Module):
         self.type_embed = nn.Parameter(torch.zeros(1, 4, embed_dim))  # policy, speed, route, cmd
 
         self.blocks = nn.ModuleList([
-            QwenTransformerBlock(dim=embed_dim, num_heads=num_heads, ffn_dim=ffn_dim)
+            QwenTransformerBlock(dim=embed_dim, num_heads=num_heads, ffn_dim=ffn_dim, qk_norm=qk_norm)
             for _ in range(depth)
         ])
         self.final_norm = RMSNorm(embed_dim)
@@ -166,10 +166,14 @@ class QwenWorldOnRailsPolicy(nn.Module):
         path_points: int = 10,
         token_mode: str = "pool",
         s2d_patch: int = 3,
-        token_mask: float = 0.0
+        token_mask: float = 0.0,
+        qk_norm: bool = False
     ):
         super().__init__()
         self.num_commands = num_commands
+        # TODO B67: Qwen3-style QK-norm in every trunk block (see QwenAttentionWithSkip). It adds tensors, so it is stamped in the
+        # checkpoint config and rebuilt by load_wor_model; off by default, which keeps every existing checkpoint (E15 included) exact.
+        self.qk_norm = bool(qk_norm)
         self.num_rails = num_rails
         self.route_points = route_points
         # Side length of the vision token grid. The encoder emits a (B, C, 8, 8) map
@@ -239,7 +243,7 @@ class QwenWorldOnRailsPolicy(nn.Module):
         self.trunk = QwenWaypointTransformer(
             embed_dim=self.embed_dim, depth=cfg["depth"], num_heads=cfg["num_heads"],
             ffn_dim=cfg["ffn_dim"], num_commands=num_commands, num_rails=num_rails,
-            num_vision_tokens=self.num_vision_tokens, use_rail_q=bool(use_rail_q)
+            num_vision_tokens=self.num_vision_tokens, use_rail_q=bool(use_rail_q), qk_norm=self.qk_norm
         )
 
         self.controller = PIDController()
@@ -277,7 +281,8 @@ class QwenWorldOnRailsPolicy(nn.Module):
         print(f"✓ Qwen-{str(model_size).upper()} WoR Decision Transformer initialized! "
               f"Trainable trunk parameters: {trunk_params:,} ({trunk_params / 1e6:.1f}M) | "
               f"sequence: {self.num_vision_tokens} vision + 4 state = {seq_len} tokens"
-              f"{' (GLOBALLY POOLED - spatially blind ablation)' if self.vision_grid <= 0 else ''}")
+              f"{' (GLOBALLY POOLED - spatially blind ablation)' if self.vision_grid <= 0 else ''}"
+              f"{' | QK-norm: on (TODO B67)' if self.qk_norm else ''}")
 
     def _tokenize_state(
         self, feats: torch.Tensor, speed: torch.Tensor, command: torch.Tensor, route: Optional[torch.Tensor]

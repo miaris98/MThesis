@@ -267,6 +267,10 @@ class GraphedSearch:
         self.mcts, self.model, self.amp_dtype = mcts, model, amp_dtype
         self.depth = depth_bound or self.DEPTHS.get(mcts.S, min(mcts.S, int(0.3 * mcts.S) + 3))
         self.entries, self.fallbacks, self.calls = {}, 0, 0
+        # TODO B68: one memory pool for all batch sizes. The reanalysis cache searches its misses in a few padded sizes; separate pools
+        # would hold ~1.3 GB each for the 30m mixer. Sharing is safe here: __call__ copies each graph's outputs to the host right
+        # after its replay, before any other graph of this pool can run.
+        self.pool = None
 
     def _capture(self, states, values, logits):
         B, A = states.shape[0], self.mcts.A
@@ -281,20 +285,24 @@ class GraphedSearch:
                 self.mcts.search(self.model, e["s"], e["v"], e["l"], g=e["g"], depth_bound=self.depth)
         torch.cuda.current_stream().wait_stream(stream)
         e["graph"] = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(e["graph"]), amp:
+        if self.pool is None:
+            self.pool = torch.cuda.graph_pool_handle()
+        with torch.cuda.graph(e["graph"], pool=self.pool), amp:
             e["out"] = self.mcts.search(self.model, e["s"], e["v"], e["l"], g=e["g"], depth_bound=self.depth)
         return e
 
     @torch.no_grad()
-    def __call__(self, root_states, root_values, root_logits, add_noise: bool = True):
+    def __call__(self, root_states, root_values, root_logits, add_noise: bool = True, g: torch.Tensor = None):
+        """g: the Gumbel noise (B, A) to use (TODO B68: hashed per replay position and target window); None samples it."""
         self.calls += 1
         key = (tuple(root_states.shape), root_states.dtype, self.mcts.S)
         if key not in self.entries:
             self.entries[key] = self._capture(root_states, root_values, root_logits)
         e = self.entries[key]
         B, A = root_states.shape[0], self.mcts.A
-        g = (torch.distributions.Gumbel(0.0, 1.0).sample((B, A)).to(root_states.device) if add_noise
-             else torch.zeros(B, A, device=root_states.device))
+        if g is None:
+            g = (torch.distributions.Gumbel(0.0, 1.0).sample((B, A)).to(root_states.device) if add_noise
+                 else torch.zeros(B, A, device=root_states.device))
         e["s"].copy_(root_states); e["v"].copy_(root_values.float()); e["l"].copy_(root_logits.float()); e["g"].copy_(g)
         e["graph"].replay()
         value, policy, best, overflow = e["out"]

@@ -26,6 +26,8 @@ def category(name: str) -> str:
         return "attn_out"
     if any(t in name for t in ("w_gate", "w_up", "w_down")):
         return "ffn"
+    if ".alpha_" in name:  # B61: the Qwen blocks' residual gates
+        return "gate_w"
     if ".gate" in name and name.endswith("weight"):
         return "gate_w"
     if name.endswith(".bg"):

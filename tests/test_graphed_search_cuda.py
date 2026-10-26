@@ -43,7 +43,7 @@ def _same(a, b):
     return all(np.array_equal(x, y) for x, y in zip(a, b))
 
 
-@pytest.mark.parametrize("trunk", ["resnet", "gtrxl"])
+@pytest.mark.parametrize("trunk", ["resnet", "gtrxl", "qwen"])
 def test_acting_graph_follows_optimizer_steps(trunk):
     model = _model(trunk)
     mcts, gs = _mcts(model.support), GraphedSearch(_mcts(model.support), model)
@@ -59,7 +59,7 @@ def test_acting_graph_follows_optimizer_steps(trunk):
 
 @pytest.mark.skipif(not torch.cuda.is_available() or not torch.cuda.is_bf16_supported(including_emulation=False),
                     reason="needs native bf16")
-@pytest.mark.parametrize("trunk", ["resnet", "gtrxl"])
+@pytest.mark.parametrize("trunk", ["resnet", "gtrxl", "qwen"])
 def test_reanalyze_graph_under_bf16_follows_target_updates(trunk):
     model = _model(trunk)
     target = copy.deepcopy(model).eval()

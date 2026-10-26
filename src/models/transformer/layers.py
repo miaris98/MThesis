@@ -39,8 +39,14 @@ class SwiGLU(nn.Module):
 
 
 class QwenAttentionWithSkip(nn.Module):
-    """Multi-Head Self-Attention with Trainable Residual Skip Vector (Alpha)."""
-    def __init__(self, dim: int, num_heads: int = 16, dropout: float = 0.0):
+    """Multi-Head Self-Attention with Trainable Residual Skip Vector (Alpha).
+
+    `qk_norm` (TODO B67, 2026-10-26) adds Qwen3's per-head RMSNorm on the queries and keys before the dot product. Without it, AdamW at
+    3e-4 grows the q/k weights until the attention logits reach ~9,000 and every token attends to a single token (Atari B66, update 8,004;
+    attention-logit growth, Wortsman et al. 2023). With it the logits are bounded by the norm gains, whatever the size of the q/k weights.
+    Off by default: no extra parameters, and the forward pass is the original one, so every existing checkpoint (E15 included) loads
+    and computes exactly as before."""
+    def __init__(self, dim: int, num_heads: int = 16, dropout: float = 0.0, qk_norm: bool = False):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -51,12 +57,16 @@ class QwenAttentionWithSkip(nn.Module):
         self.v_proj = nn.Linear(dim, dim, bias=False)
         self.out_proj = nn.Linear(dim, dim, bias=False)
         self.dropout = nn.Dropout(dropout)
+        self.q_norm = RMSNorm(self.head_dim) if qk_norm else None
+        self.k_norm = RMSNorm(self.head_dim) if qk_norm else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
         q = self.q_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        if self.q_norm is not None:  # RMSNorm's fp32 gain promotes a bf16 input to fp32; SDPA needs q, k and v in one dtype
+            q, k = self.q_norm(q).to(v.dtype), self.k_norm(k).to(v.dtype)
 
         if hasattr(F, 'scaled_dot_product_attention'):
             attn_out = F.scaled_dot_product_attention(
@@ -76,10 +86,10 @@ class QwenAttentionWithSkip(nn.Module):
 
 class QwenTransformerBlock(nn.Module):
     """Qwen-style Transformer Block with Trainable Attention Skip Connection (Qwen Alpha Gating)."""
-    def __init__(self, dim: int, num_heads: int = 16, ffn_dim: int = 4096, dropout: float = 0.0):
+    def __init__(self, dim: int, num_heads: int = 16, ffn_dim: int = 4096, dropout: float = 0.0, qk_norm: bool = False):
         super().__init__()
         self.norm1 = RMSNorm(dim)
-        self.attn = QwenAttentionWithSkip(dim, num_heads=num_heads, dropout=dropout)
+        self.attn = QwenAttentionWithSkip(dim, num_heads=num_heads, dropout=dropout, qk_norm=qk_norm)
         self.alpha_attn = nn.Parameter(0.1 * torch.ones(dim))
 
         self.norm2 = RMSNorm(dim)

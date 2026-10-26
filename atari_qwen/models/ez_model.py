@@ -9,6 +9,10 @@ reduction, value-prefix LSTM reward head, 601-bin categorical supports, SimSiam 
 mixer (GTrXL blocks over the 36 spatial tokens) after the representation and after each dynamics
 step. The gate bias starts closed (GRU gate ~ identity), so at init it behaves like the resnet trunk
 and has to earn its contribution - the comparison isolates the transformer, nothing else.
+
+`trunk="qwen"` (TODO B61) puts our Qwen blocks (RMSNorm, attention, SwiGLU, alpha-gated residuals;
+src/models/transformer/layers.py) in the same mixer slot. `mixer_size` picks the width: "small" matches
+the GTrXL mixer (128 wide, 2 blocks, 4 heads), "30m" is the CARLA head's qwen30m shape (512, 8, 8).
 """
 import math
 from typing import Optional, Tuple
@@ -18,6 +22,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from atari_qwen.models.gtrxl_layers import GTrXLBlock
+from src.models.transformer.layers import QwenTransformerBlock, RMSNorm
+
+# TODO B61: (dim, depth, heads, ffn_dim) of the token mixer; "30m" = qwen30m in qwen_wor_policy._MODEL_SIZES
+MIXER_SIZES = {"small": (128, 2, 4, 512), "30m": (512, 8, 8, 1536)}
 
 
 # ------------------------------------------------------------------------------------------------
@@ -110,15 +118,20 @@ class DownSample(nn.Module):
 
 
 class TokenMixer(nn.Module):
-    """GTrXL blocks over the HxW spatial tokens of a (B, C, H, W) state; returns the same shape.
+    """GTrXL (or Qwen, B61) blocks over the HxW spatial tokens of a (B, C, H, W) state; returns the same shape.
 
     Learned 2-D position embedding; GRU-gated residuals with a closed gate at init (bg_init=2 ->
-    ~88% skip), so the mixer starts near identity on top of the conv state."""
+    ~88% skip), so the mixer starts near identity on top of the conv state. Qwen blocks start with
+    alpha 0.1 on both residual branches and end in an RMSNorm before the output projection."""
     def __init__(self, channels: int, hw: int, dim: int = 128, depth: int = 2, heads: int = 4,
-                 bg_init: float = 2.0, out_init_std: float = 0.0, pos_mode: str = "abs"):
+                 bg_init: float = 2.0, out_init_std: float = 0.0, pos_mode: str = "abs",
+                 block: str = "gtrxl", ffn_dim: Optional[int] = None, qk_norm: bool = False):
         super().__init__()
         assert pos_mode in ("abs", "sym"), pos_mode
-        self.pos_mode, self.heads = pos_mode, heads
+        assert block in ("gtrxl", "qwen"), block
+        assert block == "gtrxl" or pos_mode == "abs", "the Qwen block takes no attention bias"
+        assert block == "qwen" or not qk_norm, "TODO B67: QK-norm is an option of the Qwen block only"
+        self.pos_mode, self.heads, self.block = pos_mode, heads, block
         self.inp = nn.Linear(channels, dim)
         if pos_mode == "abs":
             self.pos = nn.Parameter(torch.zeros(1, hw, dim))
@@ -136,8 +149,13 @@ class TokenMixer(nn.Module):
             ii, dd = torch.arange(s)[:, None].repeat(1, 2 * s - 1), torch.arange(-(s - 1), s)[None, :].repeat(s, 1)
             init = -0.5 * (ii.float() + dd.abs().float()).reshape(-1)     # (s * (2s - 1),)
             self.rel_table = nn.Parameter(init[None, :].repeat(heads, 1))  # (heads, 66) for s = 6
-        self.blocks = nn.ModuleList([GTrXLBlock(dim=dim, num_heads=heads, ffn_dim=4 * dim, bg_init=bg_init)
-                                     for _ in range(depth)])
+        ffn_dim = ffn_dim or 4 * dim
+        if block == "gtrxl":
+            self.blocks = nn.ModuleList([GTrXLBlock(dim=dim, num_heads=heads, ffn_dim=ffn_dim, bg_init=bg_init)
+                                         for _ in range(depth)])
+        else:
+            self.blocks = nn.ModuleList([QwenTransformerBlock(dim, num_heads=heads, ffn_dim=ffn_dim, qk_norm=qk_norm) for _ in range(depth)])
+            self.norm_out = RMSNorm(dim)
         self.out = nn.Linear(dim, channels)
         # 0 = exact identity at init (the original). With SGD and weight decay the blocks behind a zero output projection
         # got no gradient and decayed to 0 (S-116); out_init_std > 0 lets gradient reach them from the first update (TODO B36).
@@ -154,8 +172,13 @@ class TokenMixer(nn.Module):
             h, bias = self.inp(t) + self.pos, None
         else:
             h, bias = self.inp(t), self.rel_table[:, self.rel_idx]   # (heads, HW, HW) additive attention bias
-        for blk in self.blocks:
-            h = blk(h, bias)
+        if self.block == "gtrxl":
+            for blk in self.blocks:
+                h = blk(h, bias)
+        else:
+            for blk in self.blocks:
+                h = blk(h)
+            h = self.norm_out(h)
         t = t + self.out(h)                           # zero-init output: exact identity at init
         return t.transpose(1, 2).reshape(B, C, H, W)
 
@@ -187,9 +210,9 @@ class EZV2Model(nn.Module):
                  head_hidden: int = 256, action_embed_dim: int = 16, support: Optional[DiscreteSupport] = None,
                  trunk: str = "resnet", mixer_dim: int = 128, mixer_depth: int = 2, norm: str = "batch",
                  mixer_out_init_std: float = 0.0, mixer_bg_init: float = 2.0, simnorm: int = 0,
-                 mixer_pos: str = "abs"):
+                 mixer_pos: str = "abs", mixer_size: Optional[str] = None, mixer_qk_norm: bool = False):
         super().__init__()
-        assert trunk in ("resnet", "gtrxl")
+        assert trunk in ("resnet", "gtrxl", "qwen")
         self.action_dim, self.C, self.hw, self.trunk = action_dim, num_channels, state_hw, trunk
         # TODO B22: SimNorm group size on the latent (0 = off, the EZ-V2 default). 8 = TD-MPC2's value.
         self.simnorm = simnorm
@@ -228,12 +251,15 @@ class EZV2Model(nn.Module):
             nn.Linear(proj_out, head_hidden), nn.BatchNorm1d(head_hidden), nn.ReLU(),
             nn.Linear(head_hidden, proj_out))
         # thesis variant: transformer token mixing in representation and dynamics
-        if trunk == "gtrxl":
+        if trunk != "resnet":
             hw2 = state_hw * state_hw
-            self.repr_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth, bg_init=mixer_bg_init, out_init_std=mixer_out_init_std,
-                                         pos_mode=mixer_pos)
-            self.dyn_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth, bg_init=mixer_bg_init, out_init_std=mixer_out_init_std,
-                                        pos_mode=mixer_pos)
+            heads, ffn = 4, None
+            if mixer_size is not None:  # B61: a named size overrides mixer_dim / mixer_depth
+                mixer_dim, mixer_depth, heads, ffn = MIXER_SIZES[mixer_size]
+            kw = dict(heads=heads, bg_init=mixer_bg_init, out_init_std=mixer_out_init_std, pos_mode=mixer_pos, block=trunk, ffn_dim=ffn,
+                      qk_norm=mixer_qk_norm)
+            self.repr_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth, **kw)
+            self.dyn_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth, **kw)
         self.lstm_hidden = lstm_hidden
         # norm: "batch" = EZ-V2; "heads" = LayerNorm in reward/value/policy heads; "all" = LayerNorm
         # everywhere except the SimSiam projection (its BatchNorm is what prevents collapse).
@@ -259,7 +285,7 @@ class EZV2Model(nn.Module):
 
     def representation(self, obs: torch.Tensor) -> torch.Tensor:
         s = self.repr_res(self.down(obs))
-        if self.trunk == "gtrxl":
+        if self.trunk != "resnet":
             s = self.repr_mixer(s)
         return self.simnorm_latent(s)
 
@@ -268,7 +294,7 @@ class EZV2Model(nn.Module):
         plane = F.relu(self.act_ln(self.act_conv(plane)))
         x = self.dyn_bn(self.dyn_conv(torch.cat([s, plane], dim=1)))
         x = self.dyn_res(F.relu(x + s))
-        if self.trunk == "gtrxl":
+        if self.trunk != "resnet":
             x = self.dyn_mixer(x)
         return self.simnorm_latent(x)
 

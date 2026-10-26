@@ -203,6 +203,7 @@ class WorldOnRailsTrainer:
             "s2d_patch": getattr(model, "s2d_patch", 3),
             "use_path_head": bool(getattr(model, "use_path_head", False)),
             "path_cascade": bool(getattr(model, "path_cascade", False)),
+            "qk_norm": bool(getattr(model, "qk_norm", False)),  # TODO B67: adds q_norm / k_norm tensors to every trunk block
             "target_speed_input": getattr(model, "target_speed_input", None),
             "use_rail_q": getattr(model, "use_rail_q", None),
             "use_ray_geometry": getattr(model, "use_ray_geometry", None),

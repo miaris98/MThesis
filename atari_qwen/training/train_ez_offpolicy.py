@@ -16,6 +16,7 @@ interleaved at a fixed update ratio instead of Ray workers), and `--trunk gtrxl`
 """
 import argparse
 import copy
+import math
 import os
 import queue
 import random
@@ -47,6 +48,7 @@ except ImportError:
 from atari_qwen.envs.atari_wrappers import make_vector_atari_envs
 from atari_qwen.models.ez_model import EZV2Model, DiscreteSupport
 from atari_qwen.mcts.gumbel_mcts import GumbelMCTS, GraphedSearch
+from atari_qwen.training.reanalysis_cache import ReanalysisCache
 from atari_qwen.eval.evaluate import compute_hns
 from atari_qwen.training import mixer_audit
 
@@ -234,6 +236,36 @@ def augment(x: torch.Tensor, pad: int = 4) -> torch.Tensor:
     return out * noise
 
 
+def mixer_param_groups(model: nn.Module, weight_decay: float):
+    """TODO B66: AdamW groups of the mixer as CARLA builds them for the same Qwen network (src/training/wor_optim.py,
+    decay_gates_and_norms=0): weight decay on matrices, none on biases, RMSNorm gains, alpha gates and positional tables."""
+    decay, no_decay = [], []
+    for n, q in model.named_parameters():
+        if "mixer" in n:
+            (no_decay if q.ndim <= 1 or n.endswith((".pos", ".rel_table")) else decay).append(q)
+    return [{"params": decay, "weight_decay": weight_decay}, {"params": no_decay, "weight_decay": 0.0}]
+
+
+def carla_lr(updates: int, total_updates: int, peak: float, warmup_frac: float, eta_min: float = 1e-6) -> float:
+    """TODO B66: CARLA's per-step schedule (wor_optim.build_warmup_cosine_scheduler) on the update clock: linear warm-up over
+    warmup_frac of the run, then cosine decay from peak to eta_min."""
+    total = max(1, total_updates)
+    warm = int(warmup_frac * total)
+    if warm > 0 and updates < warm:
+        return peak * (updates + 1) / warm
+    progress = min(1.0, max(0.0, (updates - warm) / max(1, total - warm)))
+    ratio = eta_min / peak
+    return peak * (ratio + (1.0 - ratio) * 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+
+def optim_state_cpu(opt: torch.optim.Optimizer) -> dict:
+    """Deep CPU copy of an optimizer state_dict: the async saver writes it while training goes on."""
+    sd = opt.state_dict()
+    return {"state": {k: {n: (t.detach().cpu().clone() if torch.is_tensor(t) else t) for n, t in v.items()}
+                      for k, v in sd["state"].items()},
+            "param_groups": copy.deepcopy(sd["param_groups"])}
+
+
 def to_input(stacks_u8: np.ndarray, device) -> torch.Tensor:
     return torch.from_numpy(stacks_u8).to(device, non_blocking=True).float().div_(255.0)
 
@@ -403,7 +435,10 @@ def train(args):
     model = EZV2Model(A, obs_channels=3 * 4, support=support, trunk=args.trunk, norm=args.norm,
                       state_hw=int(np.ceil(args.frame_size / 16)),
                       mixer_out_init_std=args.mixer_out_init_std, mixer_bg_init=args.mixer_bg_init,
-                      simnorm=args.simnorm, mixer_pos=args.mixer_pos).to(device)
+                      simnorm=args.simnorm, mixer_pos=args.mixer_pos, mixer_size=args.mixer_size,
+                      mixer_qk_norm=args.mixer_qk_norm).to(device)
+    if args.mixer_qk_norm:
+        print("--> mixer: QK-norm on (per-head RMSNorm on queries and keys, TODO B67)", flush=True)
     target = copy.deepcopy(model).eval()
     # bf16 autocast only where the GPU has native bf16 (Ampere+). is_bf16_supported() also returns True for
     # emulated bf16, which ran ~4.5x slower than fp16 on a 2080 Ti (S-099); there is no GradScaler for fp16,
@@ -417,14 +452,21 @@ def train(args):
         target = target.to(memory_format=torch.channels_last)
     mix_params = [q for n, q in model.named_parameters() if "mixer" in n]
     opt_mix = None
-    if args.mixer_optimizer == "adamw":
+    if args.mixer_optimizer in ("adamw", "adamw_carla"):
         # TODO B37: scale-invariant optimiser for the GTrXL mixer only (SGD moved its q/k/v by lr x a gradient orders of magnitude below the rest of
         # the net: |Wq| stayed at init); conv trunk and heads keep EZ-V2's SGD recipe.
-        assert mix_params, "--mixer-optimizer adamw needs --trunk gtrxl"
+        assert mix_params, "--mixer-optimizer adamw needs --trunk gtrxl or qwen"
         rest_params = [q for n, q in model.named_parameters() if "mixer" not in n]
         opt = torch.optim.SGD(rest_params, lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
-        mwd = 0.05 if args.mixer_weight_decay is None else args.mixer_weight_decay
-        opt_mix = torch.optim.AdamW(mix_params, lr=args.mixer_lr, betas=(0.9, 0.95), weight_decay=mwd)
+        if args.mixer_optimizer == "adamw":
+            mwd = 0.05 if args.mixer_weight_decay is None else args.mixer_weight_decay
+            opt_mix = torch.optim.AdamW(mix_params, lr=args.mixer_lr, betas=(0.9, 0.95), weight_decay=mwd)
+        else:
+            # TODO B66: the recipe the same Qwen network trains with on CARLA (AdamW, default betas, CARLA's decay groups,
+            # warm-up + cosine via carla_lr). Under EZ-V2's SGD (lr 0.2, momentum 0.9) the Qwen mixer's output reached 2x the
+            # conv state within 8k updates and the policy prior stayed ~0.3 nats flatter than the ResNet runs' (B66 diagnosis).
+            mwd = 1e-4 if args.mixer_weight_decay is None else args.mixer_weight_decay
+            opt_mix = torch.optim.AdamW(mixer_param_groups(model, mwd), lr=args.mixer_lr)
     elif args.mixer_weight_decay is None:
         opt = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
     else:  # TODO B36: the GTrXL mixer's own weight decay (0 = exempt); everything else keeps --weight-decay
@@ -454,6 +496,10 @@ def train(args):
     steps_per_env = args.total_steps // E + K + TD + 16
     replay = EZReplay(steps_per_env, E, (3, args.frame_size, args.frame_size), A, alpha=args.priority_alpha,
                       device=device)
+    rcache = ReanalysisCache(steps_per_env * E, A, device) if args.reanalyze_cache else None
+    if rcache is not None:
+        print(f"--> reanalysis cache: on (TODO B68), one search per replay position per target window of "
+              f"{args.target_update_interval} updates, noise hashed per (position, window)", flush=True)
     # Schedules follow the FULL run (--schedule-steps, EZ-V2: 100k); a shorter --total-steps is an exact
     # prefix of it (the CARLA --stop_epoch rule). Scaling the 1% warm-up to a 10k screen gave lr 0.2
     # after 120 updates instead of 1,000 and let the value head inflate itself (S-058, S058a).
@@ -462,10 +508,19 @@ def train(args):
     online_updates = int(args.total_steps * args.replay_ratio)
     total_updates = online_updates + (int(full_online * args.offline_frac) if args.total_steps >= args.schedule_steps else 0)
 
+    if args.mixer_optimizer == "adamw_carla":
+        print(f"--> mixer: AdamW (CARLA recipe), peak lr {args.mixer_lr:g}, weight decay {mwd:g} on matrices, warm-up "
+              f"{int(args.mixer_warmup_frac * total_updates)} updates then cosine to 1e-6 over {total_updates} updates", flush=True)
+
     env_steps, updates, best = 0, 0, -float("inf")
     if args.resume_from:
         ck = torch.load(args.resume_from, map_location=device, weights_only=False)
         model.load_state_dict(ck["model"]); target.load_state_dict(ck["target"]); opt.load_state_dict(ck["opt"])
+        if opt_mix is not None:
+            if "opt_mix" in ck:
+                opt_mix.load_state_dict(ck["opt_mix"])
+            else:
+                print("[Warning] the checkpoint has no mixer optimizer state: AdamW restarts its moments", flush=True)
         env_steps, updates, best = ck["env_steps"], ck["updates"], ck.get("best", best)
         rp = Path(args.resume_from).with_name("replay_latest.npz")
         if rp.exists():
@@ -475,6 +530,8 @@ def train(args):
     saver = AsyncCheckpointSaver() if getattr(args, "async_checkpoint", True) else None
 
     def save(tag: str, extra=None):
+        if opt_mix is not None:  # TODO B66: the mixer's AdamW state goes with the run (it was not saved before, so a resume reset it)
+            extra = {**(extra or {}), "opt_mix": optim_state_cpu(opt_mix)}
         if saver is not None:
             saver.save_async(tag, model, target, opt, env_steps, updates, best, vars(args), ckpt_dir,
                              replay=replay if tag == "latest" else None, extra=extra)
@@ -491,8 +548,24 @@ def train(args):
     obs, _ = envs.reset(seed=args.seed)
     print(f"autocast dtype: {amp} (native bf16: {bf16_native}); graph search: {graph_on}", flush=True)
     ep_ret = np.zeros(E); recent_returns = []
+    # TODO B62 fix 1: per env, agent steps since the last non-zero reward (not reset by a lost life or a new game, so an
+    # always-FIRE policy that loses every life without scoring also trips it) and the random steps left in the current burst
+    since_r = np.zeros(E, np.int64); burst_left = np.zeros(E, np.int64); explore_steps = 0
+    explore_rng = np.random.default_rng(args.seed + 7919)
     t0 = time.time(); last_log = env_steps; next_eval = (env_steps // args.eval_interval + 1) * args.eval_interval
     tm = {"collect": 0.0, "targets": 0.0, "update": 0.0}
+    # TODO B64 (speed of the 100k Qwen run): sub-stage split of "targets" and "update". Diagnostics only: each mark syncs the
+    # GPU, so the run is slower while it is on and the c/t/u shares above are not comparable to a run without it.
+    prof_t = args.profile_targets and device.type == "cuda"
+    tm_sub = {}
+    prof = None
+
+    def mark(key, t_):
+        if not prof_t:
+            return t_
+        torch.cuda.synchronize(); now = time.perf_counter()
+        tm_sub[key] = tm_sub.get(key, 0.0) + now - t_
+        return now
     upd_credit = 0.0
     horizon = K + TD
     stepped = False
@@ -505,7 +578,20 @@ def train(args):
             tc = time.perf_counter()
             model.eval()
             rv, rp_, ra = run_search(model, mcts, to_input(obs, device), add_noise=True, graphed=act_graph)
+            if args.stagnation_explore > 0:
+                # TODO B62 fix 1 (training only; evaluation keeps the paper protocol): after --stagnation-explore reward-free steps
+                # an env takes --stagnation-burst uniformly random actions. The search targets (rp_, rv) are still stored, only the
+                # executed action changes. Breaks the 2026-10-23 collapses (never FIRE: 0 presses in 8,000 steps; always FIRE).
+                burst_left[(since_r >= args.stagnation_explore) & (burst_left == 0)] = args.stagnation_burst
+                rnd = burst_left > 0
+                if rnd.any():
+                    ra = np.array(ra, copy=True)
+                    ra[rnd] = explore_rng.integers(0, A, size=int(rnd.sum()))
+                    explore_steps += int(rnd.sum())
+                    burst_left[rnd] -= 1
+                    since_r[rnd & (burst_left == 0)] = 0     # a finished burst restarts the count
             nobs, r, term, trunc, _ = envs.step(ra)
+            since_r = np.where(r != 0, 0, since_r + 1)
             d = np.logical_or(term, trunc)
             replay.add(obs[:, -3:], ra, r, d, rp_, rv)
             ep_ret += r
@@ -528,8 +614,14 @@ def train(args):
             for g_ in opt.param_groups:
                 g_["lr"] = lr
             if opt_mix is not None:
+                m_lr = (carla_lr(updates, total_updates, args.mixer_lr, args.mixer_warmup_frac) if args.mixer_optimizer == "adamw_carla"
+                        else args.mixer_lr * min(1.0, (updates + 1) / max(1, args.mixer_warmup)))
                 for g_ in opt_mix.param_groups:
-                    g_["lr"] = args.mixer_lr * min(1.0, (updates + 1) / max(1, args.mixer_warmup))
+                    g_["lr"] = m_lr
+
+            if args.profile_at and prof is None and updates == args.profile_at:
+                prof = torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA])
+                prof.__enter__()
 
             # ---------------- targets (target network, no grad) ---------------------------------
             tt = time.perf_counter()
@@ -541,28 +633,57 @@ def train(args):
             exists = np.concatenate([np.ones((B, 1), bool), np.cumprod(~dn, axis=1).astype(bool)], axis=1)
             rew = replay.rew[pos[:, :-1], e[:, None]] * exists[:, :-1]  # r_{t+k}, 0 past episode end
             ee = np.repeat(e, K + 1)
-            root_stacks = replay.stacks(pos[:, :K + 1].reshape(-1), ee)          # states t..t+K
-            boot_stacks = replay.stacks(pos[:, TD:TD + K + 1].reshape(-1), ee)   # states t+TD..t+K+TD
-            if getattr(args, "channels_last", True) and device.type == "cuda":
-                root_stacks = root_stacks.contiguous(memory_format=torch.channels_last)
-                boot_stacks = boot_stacks.contiguous(memory_format=torch.channels_last)
+            chl = getattr(args, "channels_last", True) and device.type == "cuda"
+            if rcache is None:
+                root_stacks = replay.stacks(pos[:, :K + 1].reshape(-1), ee)          # states t..t+K
+                boot_stacks = replay.stacks(pos[:, TD:TD + K + 1].reshape(-1), ee)   # states t+TD..t+K+TD
+                if chl:
+                    root_stacks = root_stacks.contiguous(memory_format=torch.channels_last)
+                    boot_stacks = boot_stacks.contiguous(memory_format=torch.channels_last)
             recent = ((t * E + e) > (replay.transitions - args.mixed_value_threshold)) if updates >= args.mixed_value_start else np.ones(B, bool)
+            ts = mark("t_sample", tt)
             with torch.no_grad(), torch.autocast(device_type=device.type, dtype=amp, enabled=bf16_native):
-                v_boot = np.zeros((B, K + 1), np.float32)
-                recent_idx = np.nonzero(recent)[0]
-                if len(recent_idx) == B:
-                    _, vb, _ = target.initial_inference(boot_stacks)
-                    v_boot = support.vector_to_scalar(vb).float().cpu().numpy().reshape(B, K + 1)
-                elif len(recent_idx) > 0:
-                    sel = torch.as_tensor(recent_idx, device=device)
-                    xb = boot_stacks.view(B, K + 1, *boot_stacks.shape[1:])[sel].reshape(-1, *boot_stacks.shape[1:])
-                    _, vb, _ = target.initial_inference(xb)
-                    v_boot[recent_idx] = support.vector_to_scalar(vb).float().cpu().numpy().reshape(len(recent_idx), K + 1)
-                x_root = root_stacks
-                s_re, v_re, p_re = target.initial_inference(x_root)
-                v_root = support.vector_to_scalar(v_re)
-                srch_v, srch_pi, _ = (re_graph(s_re, v_root, p_re, True) if re_graph is not None
-                                      else mcts.search(target, s_re, v_root, p_re, add_noise=True))
+                if rcache is not None:
+                    # TODO B68: search each replay position once per target window (noise hashed per position and window); repeats and the
+                    # bootstrap values come from the cache. Same targets as a fresh search in this window would give.
+                    def stacks_fn(keys):
+                        x = replay.stacks(keys // E, keys % E)
+                        return x.contiguous(memory_format=torch.channels_last) if chl else x
+
+                    def ii_fn(x):
+                        s_, v_, p_ = target.initial_inference(x)
+                        return s_, support.vector_to_scalar(v_), p_
+
+                    def search_fn(s_, v_, p_, g_):
+                        out = re_graph(s_, v_, p_, g=g_) if re_graph is not None else mcts.search(target, s_, v_, p_, g=g_)
+                        return out[0], out[1]
+
+                    bneed = (recent[:, None] & exists[:, TD:TD + K + 1]).reshape(-1)
+                    srch_v, srch_pi, vb = rcache.reanalyse(
+                        (pos[:, :K + 1] * E + e[:, None]).reshape(-1), exists[:, :K + 1].reshape(-1),
+                        (pos[:, TD:TD + K + 1] * E + e[:, None]).reshape(-1), bneed,
+                        updates // args.target_update_interval, stacks_fn, ii_fn, search_fn, A)
+                    v_boot = vb.reshape(B, K + 1).astype(np.float32)
+                    ts = mark("t_search", ts)
+                else:
+                    v_boot = np.zeros((B, K + 1), np.float32)
+                    recent_idx = np.nonzero(recent)[0]
+                    if len(recent_idx) == B:
+                        _, vb, _ = target.initial_inference(boot_stacks)
+                        v_boot = support.vector_to_scalar(vb).float().cpu().numpy().reshape(B, K + 1)
+                    elif len(recent_idx) > 0:
+                        sel = torch.as_tensor(recent_idx, device=device)
+                        xb = boot_stacks.view(B, K + 1, *boot_stacks.shape[1:])[sel].reshape(-1, *boot_stacks.shape[1:])
+                        _, vb, _ = target.initial_inference(xb)
+                        v_boot[recent_idx] = support.vector_to_scalar(vb).float().cpu().numpy().reshape(len(recent_idx), K + 1)
+                    ts = mark("t_boot", ts)
+                    x_root = root_stacks
+                    s_re, v_re, p_re = target.initial_inference(x_root)
+                    v_root = support.vector_to_scalar(v_re)
+                    ts = mark("t_root", ts)
+                    srch_v, srch_pi, _ = (re_graph(s_re, v_root, p_re, True) if re_graph is not None
+                                          else mcts.search(target, s_re, v_root, p_re, add_noise=True))
+                    ts = mark("t_search", ts)
             srch_v = srch_v.reshape(B, K + 1); srch_pi = srch_pi.reshape(B, K + 1, A)
             disc = gamma ** np.arange(TD)
             val_t = np.zeros((B, K + 1), np.float32)
@@ -572,6 +693,10 @@ def train(args):
             val_t *= ex_k
             srch_v = srch_v * ex_k
             val_t = np.where(recent[:, None], val_t, srch_v)
+            if args.policy_target_smoothing > 0:
+                # TODO B62 fix 2: entropy floor on the search policy targets (mix with uniform), so the prior cannot become one-hot
+                # when the value is flat (2026-10-23 Qwen seed 1: policy loss 0.2, V0 0.04, never pressed FIRE)
+                srch_pi = (1.0 - args.policy_target_smoothing) * srch_pi + args.policy_target_smoothing / A
             pol_t = srch_pi * ex_k[..., None]
             # value prefix: running reward sum, reset every H steps
             prefix = np.zeros((B, K), np.float32); run = np.zeros(B, np.float32)
@@ -582,6 +707,7 @@ def train(args):
                 prefix[:, k] = run
             mask = exists[:, :K].astype(np.float32)                      # action t+k was taken
             cons_mask = exists[:, 1:K + 1].astype(np.float32)             # obs t+k+1 is real
+            mark("t_rest", ts)
             tm["targets"] += time.perf_counter() - tt
 
             # ---------------- update ------------------------------------------------------------
@@ -623,8 +749,10 @@ def train(args):
                 loss = (args.reward_coeff * prefix_loss + args.value_coeff * value_loss
                         + args.policy_coeff * policy_loss + args.consistency_coeff * cons_loss)
                 wloss = (isw_ * loss).mean() / K                           # EZ-V2 gradient_scale = 1/K
+            tu2 = mark("u_fwd", tu)
             opt.zero_grad(set_to_none=True)
             wloss.backward()
+            tu2 = mark("u_bwd", tu2)
             mgn = None
             if opt_mix is not None:
                 mgn = nn.utils.clip_grad_norm_(mix_params, args.mixer_grad_clip)
@@ -658,6 +786,15 @@ def train(args):
                 replay.update_priorities(t, e, np.abs(v0.float().cpu().numpy() - val_t[:, 0]) + 1e-6)
             if updates % args.target_update_interval == 0:
                 target.load_state_dict(model.state_dict())
+            if prof_t:
+                mark("u_rest", tu2); tm_sub["n"] = tm_sub.get("n", 0) + 1
+            if prof is not None and updates >= args.profile_at + args.profile_updates:
+                prof.__exit__(None, None, None)
+                for key in ("self_device_time_total", "self_cpu_time_total"):
+                    print(prof.key_averages().table(sort_by=key, row_limit=25), flush=True)
+                prof.export_chrome_trace(str(run_dir / f"profile_upd{args.profile_at}.json"))
+                print(f"[B64 profile] updates {args.profile_at}-{updates}: trace {run_dir / f'profile_upd{args.profile_at}.json'}", flush=True)
+                prof = None; args.profile_at = 0
             tm["update"] += time.perf_counter() - tu
 
         # ---------------- logging / eval / checkpoints -----------------------------------------
@@ -669,7 +806,8 @@ def train(args):
             tot = max(sum(tm.values()), 1e-9)
             ret = float(np.mean(recent_returns[-20:])) if recent_returns else 0.0
             mixer_w = (sum(q.detach().norm() ** 2 for n, q in model.named_parameters()
-                           if "mixer" in n and n.endswith("weight")) ** 0.5).item() if args.trunk == "gtrxl" else None
+                           if "mixer" in n and n.endswith("weight")) ** 0.5).item() if args.trunk != "resnet" else None
+            cache_hits = rcache.stats() if rcache is not None else None   # TODO B68: search / bootstrap hit rates since the last line
             gn_hot = gn_hot + 1 if (args.gn_stop > 0 and float(gn) > args.gn_stop) else 0
             if gn_hot >= 3:                          # B37 retry guard: B37's lr 3e-4 runs sat at gn 1e8-1e16 for 20k steps before anyone looked
                 print(f"[gn-stop] gradient norm {float(gn):.3g} > {args.gn_stop:g} on 3 consecutive log lines: stopping at env {env_steps}", flush=True)
@@ -678,16 +816,25 @@ def train(args):
                   f"loss v {value_loss.mean().item():.3f} p {policy_loss.mean().item():.3f} "
                   f"r {prefix_loss.mean().item():.3f} c {cons_loss.mean().item():.3f} | gn {float(gn):.2f} | "
                   f"train-life-ret(20) {ret:.2f} | V0 {v0.float().mean().item():.3f} tgt {val_t[:, 0].mean():.3f} | "
-                  + (f"|mixer W| {mixer_w:.2f} | " if mixer_w is not None else "") +
+                  + (f"|mixer W| {mixer_w:.2f} | " if mixer_w is not None else "")
+                  + (f"explore {explore_steps} | " if args.stagnation_explore > 0 else "")
+                  + ("cache hit s/v {:.2f}/{:.2f} | ".format(*cache_hits) if rcache is not None else "") +
                   f"time c/t/u {100 * tm['collect'] / tot:.0f}/{100 * tm['targets'] / tot:.0f}/"
                   f"{100 * tm['update'] / tot:.0f}% | {el / 60:.1f} min", flush=True)
+            if prof_t and tm_sub.get("n"):
+                n_ = tm_sub["n"]
+                print(f"[B64 split] ms/update over {n_} updates: " +
+                      " ".join(f"{k} {1000 * v / n_:.1f}" for k, v in tm_sub.items() if k != "n"), flush=True)
+                tm_sub.clear()
             log({"loss/value": value_loss.mean().item(), "loss/policy": policy_loss.mean().item(),
                  "loss/value_prefix": prefix_loss.mean().item(), "loss/consistency": cons_loss.mean().item(),
                  "train/grad_norm": float(gn), "train/lr": lr, "train/life_return_20": ret,
                  "train/updates": updates, "train/v0_mean": v0.float().mean().item(),
                  **({"train/mixer_weight_norm": mixer_w} if mixer_w is not None else {}),
+                 **({"train/reanalysis_cache_hit": cache_hits[0], "train/bootstrap_cache_hit": cache_hits[1]} if rcache is not None else {}),
                  "train/value_target_mean": float(val_t[:, 0].mean()),
-                 "train/policy_target_entropy": float(-(pol_t[:, 0] * np.log(pol_t[:, 0] + 1e-8)).sum(-1).mean())},
+                 "train/policy_target_entropy": float(-(pol_t[:, 0] * np.log(pol_t[:, 0] + 1e-8)).sum(-1).mean()),
+                 "train/explore_steps": explore_steps},
                 env_steps)
         done_all = updates >= total_updates
         if ((env_steps >= next_eval and env_steps <= args.total_steps) or done_all) and args.eval_mode == "deferred":
@@ -740,7 +887,13 @@ def train(args):
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--env-id", default="BreakoutNoFrameskip-v4")
-    ap.add_argument("--trunk", default="resnet", choices=["resnet", "gtrxl"])
+    ap.add_argument("--trunk", default="resnet", choices=["resnet", "gtrxl", "qwen"])
+    ap.add_argument("--mixer-size", default=None, choices=["small", "30m"],
+                    help="TODO B61: named mixer shape (small = 128x2, 4 heads, as GTrXL; 30m = qwen30m 512x8, 8 heads, FFN 1536); "
+                         "unset keeps the GTrXL mixer's 128x2")
+    ap.add_argument("--mixer-qk-norm", action="store_true",
+                    help="TODO B67: Qwen3-style per-head RMSNorm on queries and keys in every mixer block (the CARLA --qk_norm block option). "
+                         "Bounds the attention logits, which AdamW 3e-4 otherwise grows to ~9,000 (one-hot attention by update 8,004, B66)")
     ap.add_argument("--norm", default="batch", choices=["batch", "heads", "all"],
                     help="batch = EZ-V2; heads/all = LayerNorm instead of BatchNorm (S-058: eval-mode BN drift)")
     ap.add_argument("--total-steps", type=int, default=100_000, help="env (agent) steps collected; < --schedule-steps = screen")
@@ -767,11 +920,14 @@ def parse_args(argv=None):
                          "bit-identical to the eager search, CUDA only")
     ap.add_argument("--compile-model", action="store_true",
                     help="Compile model with torch.compile(mode='reduce-overhead') for ~3x transformer head speedup")
-    ap.add_argument("--mixer-optimizer", choices=["sgd", "adamw"], default="sgd",
+    ap.add_argument("--mixer-optimizer", choices=["sgd", "adamw", "adamw_carla"], default="sgd",
                     help="TODO B37: optimiser of the GTrXL mixer parameters (adamw: betas 0.9/0.95, --mixer-lr, --mixer-weight-decay default 0.05; "
-                         "the rest of the network keeps SGD)")
+                         "the rest of the network keeps SGD). TODO B66 adamw_carla: CARLA's recipe for the same Qwen network (default "
+                         "betas, decay on matrices only, --mixer-weight-decay default 1e-4, warm-up --mixer-warmup-frac then cosine to 1e-6)")
     ap.add_argument("--mixer-lr", type=float, default=3e-4)
-    ap.add_argument("--mixer-warmup", type=int, default=500, help="warm-up updates of the mixer's AdamW lr")
+    ap.add_argument("--mixer-warmup", type=int, default=500, help="warm-up updates of the mixer's AdamW lr (adamw mode)")
+    ap.add_argument("--mixer-warmup-frac", type=float, default=0.05,
+                    help="TODO B66: warm-up fraction of the run for adamw_carla (CARLA's --warmup_frac)")
     ap.add_argument("--mixer-grad-clip", type=float, default=1.0, help="mixer-only gradient-norm clip (adamw mode)")
     ap.add_argument("--mixer-bg-init", type=float, default=2.0, help="GRU gate bias init of the mixer blocks (2 = closed, ~88%% skip; 0 = open)")
     ap.add_argument("--simnorm", type=int, default=0, help="TODO B22: SimNorm group size on the latent (0 = off; 8 = TD-MPC2)")
@@ -794,6 +950,9 @@ def parse_args(argv=None):
     ap.add_argument("--priority-alpha", type=float, default=1.0)
     ap.add_argument("--priority-beta", type=float, default=1.0)
     ap.add_argument("--target-update-interval", type=int, default=200)
+    ap.add_argument("--reanalyze-cache", action="store_true",
+                    help="TODO B68: search each replay position once per target window and reuse the result (noise hashed per position "
+                         "and window); 19%% of the searches of a 100k run at a 200-update window. Off = fresh noise per draw (EZ-V2)")
     ap.add_argument("--start-transitions", type=int, default=2000)
     ap.add_argument("--mixed-value-start", type=int, default=30_000, help="updates before search values replace old targets")
     ap.add_argument("--mixed-value-threshold", type=int, default=5_000, help="transitions counted as 'recent'")
@@ -809,6 +968,19 @@ def parse_args(argv=None):
     ap.add_argument("--experiment", default="Atari_EZV2_Match")
     ap.add_argument("--no-mlflow", dest="mlflow", action="store_false")
     ap.add_argument("--resume-from", default=None)
+    ap.add_argument("--stagnation-explore", type=int, default=0,
+                    help="TODO B62 fix 1: after this many reward-free agent steps an env acts randomly for --stagnation-burst steps "
+                         "(training only; 0 = off, the EZ-V2 recipe)")
+    ap.add_argument("--stagnation-burst", type=int, default=30, help="random steps per stagnation burst (B62 fix 1)")
+    ap.add_argument("--policy-target-smoothing", type=float, default=0.0,
+                    help="TODO B62 fix 2: mix the search policy targets with uniform by this weight (0 = off, the EZ-V2 recipe)")
+    ap.add_argument("--profile-targets", action="store_true",
+                    help="TODO B64: print the per-update ms of replay sampling, bootstrap values, root inference, reanalysis search, "
+                         "forward and backward at each log line (syncs the GPU at every mark: diagnostics only)")
+    ap.add_argument("--profile-at", type=int, default=0,
+                    help="TODO B64: run torch.profiler from this update for --profile-updates updates, print the top kernels and "
+                         "CPU ops and write a Chrome trace to the run directory (0 = off)")
+    ap.add_argument("--profile-updates", type=int, default=20)
     ap.add_argument("--channels-last", action=argparse.BooleanOptionalAction, default=True,
                     help="use channels_last memory format for faster Tensor Core convolutions on Ampere+")
     ap.add_argument("--async-checkpoint", action=argparse.BooleanOptionalAction, default=True,

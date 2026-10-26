@@ -174,7 +174,8 @@ def load_wor_model(
             use_path_head=bool(_resolve("use_path_head", None, False)),
             path_cascade=bool(_resolve("path_cascade", None, False)),
             token_mode=str(_resolve("token_mode", None, "pool")),
-            s2d_patch=int(_resolve("s2d_patch", None, 3))
+            s2d_patch=int(_resolve("s2d_patch", None, 3)),
+            qk_norm=bool(_resolve("qk_norm", None, False))
         )
 
     if checkpoint_path and os.path.exists(checkpoint_path):
@@ -220,6 +221,12 @@ def load_wor_model(
 
         missing, unexpected = model.load_state_dict(clean_dict, strict=False)
         print(f"✓ Loaded weights into WorldOnRailsPolicy (Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)})")
+        # TODO B67: a QK-norm mismatch has no shape conflict to make it loud (the norm tensors are simply missing or ignored), and a
+        # trunk run without the norms it was trained with computes different attention. Fatal, like the missing frozen backbone.
+        qk_bad = [k for k in list(missing) + list(unexpected) if ".q_norm." in k or ".k_norm." in k]
+        if qk_bad:
+            raise RuntimeError(f"QK-norm mismatch between {checkpoint_path} and the rebuilt model ({len(qk_bad)} keys, e.g. {qk_bad[0]}): "
+                               f"the checkpoint config's qk_norm does not match its weights.")
         # strict=False turns an architecture mismatch into a partial load that runs
         # and produces plausible-looking numbers. Name the offending keys - a short
         # list is nearly always a real mismatch worth acting on, not noise.
