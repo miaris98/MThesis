@@ -97,6 +97,62 @@ def test_bootstrap_values_reuse_the_root_pass():
     assert abs(vhit - 2 / 3) < 1e-9
 
 
+def _batches(rng, n=4, size=300, span=400):
+    return [(rng.integers(0, span, size), rng.random(size) > 0.1, rng.integers(0, span, size), rng.random(size) > 0.5)
+            for _ in range(n)]
+
+
+def test_merged_fill_gives_each_update_its_own_targets_in_fewer_searches():
+    """TODO B68 M1: the misses of the updates between two env steps searched in one fill call; each update then reads exactly the
+    targets it would have computed itself and the same positions are searched. Bootstrap passes can only drop: per update, a position
+    that is a bootstrap state of one update and a root of a later one gets a value-only pass first; merged, the root search covers it."""
+    batches = _batches(np.random.default_rng(3))
+    per, m1 = ReanalysisCache(5_000, A, "cpu"), Mock()
+    want = [per.reanalyse(*b, 2, m1.stacks, m1.ii, m1.search, A) for b in batches]
+    merged, m2 = ReanalysisCache(5_000, A, "cpu"), Mock()
+    merged.fill(*(np.concatenate([b[i] for b in batches]) for i in range(4)), 2, m2.stacks, m2.ii, m2.search, A)
+    calls, inferred = len(m2.batch_sizes), len(m2.inferred)
+    got = [merged.reanalyse(*b, 2, m2.stacks, m2.ii, m2.search, A) for b in batches]
+    assert len(m2.batch_sizes) == calls and len(m2.inferred) == inferred   # the per-update calls only read the cache
+    for w, g in zip(want, got):
+        for x, y in zip(w, g):
+            np.testing.assert_array_equal(x, y)
+    assert set(m2.searched) == set(m1.searched) and calls < len(m1.batch_sizes)
+    assert set(m2.batch_sizes) <= set(BUCKETS)
+    (hit_p, vhit_p), (hit_m, vhit_m) = per.stats(), merged.stats()
+    assert hit_m == hit_p and vhit_m >= vhit_p and len(m2.inferred) < len(m1.inferred)
+
+
+def test_merged_fill_matches_per_update_on_the_real_search():
+    torch.manual_seed(0)
+    sup = DiscreteSupport()
+    model = EZV2Model(A, obs_channels=12, support=sup, trunk="qwen", mixer_size="small", mixer_qk_norm=True, state_hw=6).eval()
+    with torch.no_grad():
+        torch.nn.init.normal_(model.repr_mixer.out.weight, std=0.02); torch.nn.init.normal_(model.dyn_mixer.out.weight, std=0.02)
+    mcts = GumbelMCTS(A, sup, num_simulations=8, discount=0.997 ** 4, lstm_horizon=5)
+    obs = torch.rand(80, 12, 96, 96, generator=torch.Generator().manual_seed(4))
+
+    def ii(x):
+        s, v, p = model.initial_inference(x)
+        return s, sup.vector_to_scalar(v), p
+
+    def search(s, v, p, g):
+        out = mcts.search(model, s, v, p, g=g)
+        return out[0], out[1]
+
+    stacks = lambda keys: obs[torch.as_tensor(np.asarray(keys))]
+    batches = _batches(np.random.default_rng(5), n=3, size=24, span=80)
+    with torch.no_grad():
+        per = ReanalysisCache(80, A, "cpu")
+        want = [per.reanalyse(*b, 1, stacks, ii, search, A) for b in batches]
+        merged = ReanalysisCache(80, A, "cpu")
+        merged.fill(*(np.concatenate([b[i] for b in batches]) for i in range(4)), 1, stacks, ii, search, A)
+        got = [merged.reanalyse(*b, 1, stacks, ii, search, A) for b in batches]
+    for w, g in zip(want, got):
+        for x, y in zip(w, g):
+            np.testing.assert_allclose(x, y, rtol=0, atol=1e-5)    # fp32; only the batch composition of the calls differs
+
+
 def test_real_search_cached_equals_uncached_with_the_same_noise():
     torch.manual_seed(0)
     sup = DiscreteSupport()

@@ -29,6 +29,24 @@ def test_fixed_depth_matches_default_search():
         assert (fv.numpy() == rv).all() and (fp.numpy() == rp).all() and (fa.numpy() == ra).all()
 
 
+def test_per_simulation_bounds_are_tight_and_exact():
+    """TODO B68 E9: the fixed mode runs only the levels each simulation can reach (GumbelMCTS.levels: 1,1,1,1,2,2,2,2,3,3,...,6,6 for
+    16 simulations). A prior that always prefers action 0 below the root makes every surviving candidate's subtree a chain, the deepest
+    trees the schedule allows: the search must still equal the default one without an overflow, and one level fewer must overflow."""
+    for sims in (16, 32):
+        model, mcts, s, v, p = _setup(sims, B=32, seed=3)
+        with torch.no_grad():
+            model.p_fc[-1].weight.zero_(); model.p_fc[-1].bias.copy_(torch.tensor([20.0, 0.0, 0.0, 0.0]))   # last layer of the head
+        g = torch.distributions.Gumbel(0.0, 1.0).sample((s.shape[0], 4))
+        rv, rp, ra = mcts.search(model, s, v, p, g=g)
+        assert int(mcts.depth.max()) == mcts.levels[-1]                  # chains: the deepest leaf of the schedule is reached
+        fv, fp, fa, overflow = mcts.search(model, s, v, p, g=g, depth_bound=sims)
+        assert not bool(overflow)
+        assert (fv.numpy() == rv).all() and (fp.numpy() == rp).all() and (fa.numpy() == ra).all()
+        mcts.levels = [max(1, n - 1) for n in mcts.levels]
+        assert bool(mcts.search(model, s, v, p, g=g, depth_bound=sims)[3]), "one level fewer than the schedule allows must overflow"
+
+
 def test_too_small_a_bound_is_reported():
     model, mcts, s, v, p = _setup(16)
     g = torch.zeros(s.shape[0], 4)

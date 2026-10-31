@@ -62,8 +62,8 @@ echo "=== installing carla_garage pinned stack (this downloads ~2.5GB of torch) 
   "numpy==1.26.4" \
   "torch==2.5.0" "torchvision==0.20.0" \
   "scipy==1.14.1" "imgaug==0.4.0" "torchmetrics==0.11.0" \
-  timm einops laspy scikit-learn jsonpickle ujson filterpy opencv-python matplotlib \
-  rdp diskcache transformers tqdm shapely
+  timm einops laspy scikit-learn jsonpickle ujson opencv-python matplotlib \
+  rdp diskcache transformers tqdm shapely "filterpy==1.4.5"
 # The full third-party set was enumerated by scanning every `import`/`from` in team_code/*.py
 # and testing each against the venv, rather than discovered one CARLA cold start at a time.
 # `agents` shows up in such a scan but is NOT a pip package - it is CARLA's own

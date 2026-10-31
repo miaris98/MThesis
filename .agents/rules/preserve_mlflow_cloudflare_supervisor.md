@@ -1,3 +1,8 @@
+---
+trigger: always_on
+description: Strictly preserve MLflow UI server and Cloudflare tunnel logic in run_multi_carla_training.sh and supervisor scripts.
+---
+
 # Preserve MLflow and Cloudflare Tunnel Logic in Supervisor Scripts
 
 ## Protected Code Sections

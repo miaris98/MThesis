@@ -59,6 +59,17 @@ class GumbelMCTS:
         self.H = lstm_horizon
         self.support = support
         self.schedule = halving_schedule(num_simulations, self.m)
+        # TODO B68 E9: the deepest leaf each simulation can reach. The root visits its top-m candidates round-robin (fewest visits first) and
+        # every visit adds one node to that candidate's subtree, so a candidate with k earlier visits has a subtree of k nodes and the new
+        # leaf sits at most at depth k + 1. Halving keeps the most-visited candidates here, an upper bound on what the search keeps.
+        # 16 sims, m = 4: 1,1,1,1,2,2,2,2,3,3,4,4,5,5,6,6 (the deepest tree measured on Breakout is 6).
+        vis, self.levels = [0] * self.m, []
+        for sim in range(self.S):
+            i = int(np.argmin(vis))
+            self.levels.append(vis[i] + 1)
+            vis[i] += 1
+            if sim in self.schedule:
+                vis = sorted(vis, reverse=True)[:self.schedule[sim]]
 
     # --------------------------------------------------------------------------------------------
     def _normalize(self, q, mn, mx):
@@ -147,22 +158,26 @@ class GumbelMCTS:
             leaf_action = torch.zeros_like(cur)
             capped = torch.zeros(B, device=dev, dtype=torch.bool)       # B43: rows whose selection ended at a depth-D node
             stop_node = torch.zeros_like(cur)
-            for _ in range(depth_bound if fixed else self.S + 1):
+            # TODO B68 E9: fixed mode runs only the levels this simulation can need (self.levels); a deeper tree still sets `overflow`
+            bound = min(depth_bound, self.levels[sim]) if fixed else None
+            for lvl in range(bound if fixed else self.S + 1):
                 if self.max_depth is not None:
                     hit = active & (self.depth[b, cur] >= self.max_depth)
                     capped, stop_node, active = capped | hit, torch.where(hit, cur, stop_node), active & ~hit
-                # root rule: first of the top-m candidates with the fewest visits
-                cand = sel[:, :m_cur]
-                cand_ch = self.child[b.unsqueeze(1), 0, cand]
-                cand_vis = torch.where(cand_ch >= 0, self.visit[b.unsqueeze(1), cand_ch.clamp(min=0)],
-                                       torch.zeros_like(cand, dtype=torch.float32))
-                a_root = cand[b, torch.argmin(cand_vis, dim=-1)]              # argmin = first minimum
-                # non-root rule
-                tq, c_vis = self._transformed_completed_q(cur)
-                improved = torch.softmax(self.logits[b, cur] + tq, dim=-1)
-                score = improved - c_vis / (1 + c_vis.sum(-1, keepdim=True))
-                a_non = score.argmax(-1)
-                a = torch.where(cur == 0, a_root, a_non)
+                if lvl == 0:
+                    # every row is at the root: root rule, first of the top-m candidates with the fewest visits
+                    cand = sel[:, :m_cur]
+                    cand_ch = self.child[b.unsqueeze(1), 0, cand]
+                    cand_vis = torch.where(cand_ch >= 0, self.visit[b.unsqueeze(1), cand_ch.clamp(min=0)],
+                                           torch.zeros_like(cand, dtype=torch.float32))
+                    a = cand[b, torch.argmin(cand_vis, dim=-1)]               # argmin = first minimum
+                else:
+                    # below the root: non-root rule (TODO B68 E9: rows still at the root here are finished, so the root rule is not
+                    # needed; computing both and picking per row by `cur == 0` gave the same actions for every active row)
+                    tq, c_vis = self._transformed_completed_q(cur)
+                    improved = torch.softmax(self.logits[b, cur] + tq, dim=-1)
+                    score = improved - c_vis / (1 + c_vis.sum(-1, keepdim=True))
+                    a = score.argmax(-1)
                 nxt = self.child[b, cur, a]
                 is_leaf = active & (nxt < 0)
                 leaf_parent = torch.where(is_leaf, cur, leaf_parent)
@@ -215,7 +230,7 @@ class GumbelMCTS:
             value = torch.where(capped, self.raw_v[b, stop_node], v_back)
             alive = torch.ones(B, device=dev, dtype=torch.bool)
             levels = 0
-            while (levels <= depth_bound) if fixed else bool(alive.any()):  # fixed: bounded, no sync; default: until done
+            while (levels <= bound) if fixed else bool(alive.any()):  # fixed: bounded (leaf depth <= bound), no sync; default: until done
                 levels += 1
                 nd = node.clamp(min=0)
                 self.vsum[b, nd] += torch.where(alive, value, torch.zeros_like(value))

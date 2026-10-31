@@ -238,11 +238,12 @@ def augment(x: torch.Tensor, pad: int = 4) -> torch.Tensor:
 
 def mixer_param_groups(model: nn.Module, weight_decay: float):
     """TODO B66: AdamW groups of the mixer as CARLA builds them for the same Qwen network (src/training/wor_optim.py,
-    decay_gates_and_norms=0): weight decay on matrices, none on biases, RMSNorm gains, alpha gates and positional tables."""
+    decay_gates_and_norms=0): weight decay on matrices, none on biases, RMSNorm gains, alpha gates, positional tables and the
+    B69 policy token (CARLA's NO_DECAY_SUFFIXES)."""
     decay, no_decay = [], []
     for n, q in model.named_parameters():
         if "mixer" in n:
-            (no_decay if q.ndim <= 1 or n.endswith((".pos", ".rel_table")) else decay).append(q)
+            (no_decay if q.ndim <= 1 or n.endswith((".pos", ".rel_table", ".policy_token")) else decay).append(q)
     return [{"params": decay, "weight_decay": weight_decay}, {"params": no_decay, "weight_decay": 0.0}]
 
 
@@ -295,6 +296,39 @@ def run_search(model, mcts: GumbelMCTS, obs: torch.Tensor, add_noise: bool, chun
                       else mcts.search(model, s, v, p, add_noise=add_noise))
         vals.append(rv); pols.append(rp); acts.append(ra)
     return np.concatenate(vals), np.concatenate(pols), np.concatenate(acts)
+
+
+PARKED_STEPS = 1000  # TODO B70: a reward-free streak this long counts as a parked ball (healthy Breakout lives score every ~50-300 steps)
+
+
+def play_window(n_actions: int) -> dict:
+    """TODO B70: empty play-diagnostics accumulator for one log window (see play_add / play_summary)."""
+    return {"steps": 0, "acts": np.zeros(n_actions, np.int64), "max_streak": 0, "parked": 0, "pi_h": 0.0, "lives": []}
+
+
+def play_add(w: dict, actions, since_reward, search_pi, ended_life_lengths) -> None:
+    """One env step of all envs: executed actions, per-env reward-free streaks after the step, the acting search policy (E, A)
+    and the lengths of the lives that ended on this step."""
+    a = np.asarray(actions, np.int64)
+    w["steps"] += len(a)
+    w["acts"] += np.bincount(a, minlength=len(w["acts"]))[:len(w["acts"])]
+    w["max_streak"] = max(w["max_streak"], int(np.max(since_reward)))
+    w["parked"] += int(np.sum(np.asarray(since_reward) >= PARKED_STEPS))
+    p = np.asarray(search_pi, np.float64)
+    w["pi_h"] += float(-(p * np.log(p + 1e-8)).sum(-1).sum())
+    w["lives"].extend(int(x) for x in ended_life_lengths)
+
+
+def play_summary(w: dict) -> dict:
+    n = max(w["steps"], 1)
+    share = w["acts"] / n
+    out = {"life len": f"{np.mean(w['lives']):.0f} (n {len(w['lives'])})" if w["lives"] else "none ended",
+           "max rf streak": w["max_streak"], f"parked(>={PARKED_STEPS})": f"{100 * w['parked'] / n:.1f}%",
+           "act share": "/".join(f"{x:.2f}" for x in share), "act-pi H": f"{w['pi_h'] / n:.3f}"}
+    out["metrics"] = {"play/max_reward_free_streak": w["max_streak"], "play/parked_share": w["parked"] / n,
+                      "play/search_pi_entropy": w["pi_h"] / n, **{f"play/act_share_{i}": float(x) for i, x in enumerate(share)},
+                      **({"play/life_length": float(np.mean(w["lives"]))} if w["lives"] else {})}
+    return out
 
 
 @torch.no_grad()
@@ -436,9 +470,16 @@ def train(args):
                       state_hw=int(np.ceil(args.frame_size / 16)),
                       mixer_out_init_std=args.mixer_out_init_std, mixer_bg_init=args.mixer_bg_init,
                       simnorm=args.simnorm, mixer_pos=args.mixer_pos, mixer_size=args.mixer_size,
-                      mixer_qk_norm=args.mixer_qk_norm).to(device)
+                      mixer_qk_norm=args.mixer_qk_norm, mixer_where=args.mixer_where,
+                      mixer_no_pos=args.mixer_no_pos).to(device)
     if args.mixer_qk_norm:
         print("--> mixer: QK-norm on (per-head RMSNorm on queries and keys, TODO B67)", flush=True)
+    if args.mixer_where == "repr":
+        assert args.trunk != "resnet", "--mixer-where repr needs --trunk gtrxl or qwen"
+        print("--> mixer: representation only, dynamics = EZ-V2 conv + ResNet (TODO B68 D1)", flush=True)
+    elif args.mixer_where == "pred":
+        print("--> mixer: CARLA trunk layout as the prediction (policy token -> value / policy heads); representation and dynamics "
+              "= EZ-V2 conv + ResNet (TODO B69)", flush=True)
     target = copy.deepcopy(model).eval()
     # bf16 autocast only where the GPU has native bf16 (Ampere+). is_bf16_supported() also returns True for
     # emulated bf16, which ran ~4.5x slower than fp16 on a 2080 Ti (S-099); there is no GradScaler for fp16,
@@ -477,18 +518,36 @@ def train(args):
     # TODO B37 step 1: per-category audit of the mixer (relative change, absolute change and gradient norm; `mixer_audit.py`: the zero-initialised
     # tensors have no meaningful relative change, read their absolute change)
     mix_w0 = mixer_audit.snapshot(model) if args.audit_every else {}
-    if getattr(args, "compile_model", False) and hasattr(torch, "compile") and device.type == "cuda":
-        try:
-            model = torch.compile(model, mode="reduce-overhead")
-            print("--> Model compiled with torch.compile(mode='reduce-overhead')", flush=True)
-        except Exception as ex:
-            print(f"[Warning] torch.compile failed ({ex}); continuing in eager mode", flush=True)
+    if (args.compile_model or args.compile_search) and device.type == "cuda":
+        # each batch shape, grad mode and train / eval mode is a compiled variant of its own (the cache's 5 buckets, acting, training,
+        # evaluation; repr_mixer and dyn_mixer share TokenMixer.forward). Past the default limit of 8 per function torch.compile runs
+        # the rest eagerly without an error (seen in atari_qwen/scripts/b68_bottleneck.py, 2026-10-26).
+        import torch._dynamo.config as dynamo_config
+        setattr(dynamo_config, "recompile_limit" if hasattr(dynamo_config, "recompile_limit") else "cache_size_limit", 64)
+    if args.compile_model and device.type == "cuda":
+        # TODO B68 E8: fuse the training step's elementwise work (the mixers' fp32 RMSNorm kernels, gates, casts), forward and backward.
+        # Compiled in place (nn.Module.compile), so the state-dict keys, the target sync and the checkpoints are unchanged; the conv /
+        # BatchNorm / LSTM parts stay eager, and the acting search uses the same compiled mixers. The old flag wrapped the whole model,
+        # which renamed every key (_orig_mod.) and broke the target sync. Acceptance: atari_qwen/scripts/b68_train_compile_check.py.
+        assert args.trunk != "resnet", "--compile-model compiles the Qwen / GTrXL mixers"
+        for mixer in (model.repr_mixer, model.dyn_mixer, model.pred_mixer):
+            if mixer is not None:
+                mixer.compile(dynamic=False)
+        print("--> training: the online model's mixers compiled (TODO B68 E8)", flush=True)
     mcts = GumbelMCTS(A, support, num_simulations=args.num_simulations, discount=gamma, lstm_horizon=H)
     # TODO B23 step 1b: replay the acting search (B = num_envs) and the reanalyze search (B = batch x (K+1), on the target
     # network, bf16 where native) from CUDA graphs; bit-identical to eager (see GraphedSearch), far fewer kernel launches
     mk = lambda: GumbelMCTS(A, support, num_simulations=args.num_simulations, discount=gamma, lstm_horizon=H)
     graph_on = args.graph_search and device.type == "cuda"
     act_graph = GraphedSearch(mk(), model) if graph_on else None
+    if args.compile_search and device.type == "cuda":
+        # TODO B68 E1: fuse the elementwise work of the target network's recurrent_inference (RMSNorm's fp32 kernels, gates, casts:
+        # ~67% of a 30m dynamics-mixer call). Same maths: on 1,536 real roots the compiled search is as close to an fp32 search as the
+        # eager one (policy TV 0.0229 vs 0.0233, value 0.0048 vs 0.0052); 1.87x on the 30m graphed search. Only recurrent_inference:
+        # inside the search it sees fixed shapes (one compile per batch / cache bucket); the root and bootstrap passes stay eager.
+        # load_state_dict copies the weights in place, so the compiled code follows every target refresh without recompiling.
+        target.recurrent_inference = torch.compile(target.recurrent_inference, dynamic=False)
+        print("--> reanalysis search: target recurrent_inference compiled (TODO B68 E1)", flush=True)
     re_graph = GraphedSearch(mk(), target, amp_dtype=amp if bf16_native else None) if graph_on else None
     print(f"--> {run_name}: trunk={args.trunk} params={sum(p.numel() for p in model.parameters()) / 1e6:.2f}M "
           f"envs={E} sims={args.num_simulations} batch={args.batch_size} gamma/step={gamma:.4f}", flush=True)
@@ -500,6 +559,12 @@ def train(args):
     if rcache is not None:
         print(f"--> reanalysis cache: on (TODO B68), one search per replay position per target window of "
               f"{args.target_update_interval} updates, noise hashed per (position, window)", flush=True)
+    if args.reanalyze_merge:
+        # TODO B68 M1: drawing batches ahead is exact only if a batch does not depend on the updates before it: uniform replay
+        # (prioritised sampling reads the priorities each update writes) and noise that is a function of (position, window)
+        assert rcache is not None and args.priority_alpha == 0, "--reanalyze-merge needs --reanalyze-cache and --priority-alpha 0"
+        print("--> reanalysis cache: misses of the updates between two env steps (after collection: of a target window) searched in "
+              "one call, from batches drawn in the same order (TODO B68 M1)", flush=True)
     # Schedules follow the FULL run (--schedule-steps, EZ-V2: 100k); a shorter --total-steps is an exact
     # prefix of it (the CARLA --stop_epoch rule). Scaling the 1% warm-up to a 10k screen gave lr 0.2
     # after 120 updates instead of 1,000 and let the value head inflate itself (S-058, S058a).
@@ -552,6 +617,11 @@ def train(args):
     # always-FIRE policy that loses every life without scoring also trips it) and the random steps left in the current burst
     since_r = np.zeros(E, np.int64); burst_left = np.zeros(E, np.int64); explore_steps = 0
     explore_rng = np.random.default_rng(args.seed + 7919)
+    # TODO B70 (2026-10-28): play diagnostics per log window, for why a run's return lags at the same losses (B69 pred: life return 13
+    # vs 19-24 at 80-100k, 44 of 60 paper-eval games parked at the step cap): life length, longest reward-free streak, share of env
+    # steps inside a streak of >= 1,000 steps ("parked"), executed-action shares and the entropy of the acting search policy
+    play = play_window(A)
+    life_len = np.zeros(E, np.int64)
     t0 = time.time(); last_log = env_steps; next_eval = (env_steps // args.eval_interval + 1) * args.eval_interval
     tm = {"collect": 0.0, "targets": 0.0, "update": 0.0}
     # TODO B64 (speed of the 100k Qwen run): sub-stage split of "targets" and "update". Diagnostics only: each mark syncs the
@@ -571,6 +641,32 @@ def train(args):
     stepped = False
     gn_hot = 0
     nan_skips = 0                                                   # updates skipped by --nan-guard (non-finite gradient norm)
+    pending = []                                                    # TODO B68 M1: batches drawn ahead; the cache holds their targets
+    chl = getattr(args, "channels_last", True) and device.type == "cuda"
+
+    def cache_keys(t_, e_, upd):
+        """TODO B68: flat replay positions (row * E + env) of an update's search roots t..t+K and bootstrap states t+TD..t+TD+K, and
+        whether a loss uses each (the same masks as the target code below)."""
+        pos_ = t_[:, None] + np.arange(horizon + 1)
+        dn_ = replay.done[pos_[:, :-1], e_[:, None]]
+        ex_ = np.concatenate([np.ones((len(t_), 1), bool), np.cumprod(~dn_, axis=1).astype(bool)], axis=1)
+        rec_ = (((t_ * E + e_) > (replay.transitions - args.mixed_value_threshold)) if upd >= args.mixed_value_start
+                else np.ones(len(t_), bool))
+        flat = pos_ * E + e_[:, None]
+        return (flat[:, :K + 1].reshape(-1), ex_[:, :K + 1].reshape(-1), flat[:, TD:TD + K + 1].reshape(-1),
+                (rec_[:, None] & ex_[:, TD:TD + K + 1]).reshape(-1))
+
+    def stacks_fn(keys):
+        x = replay.stacks(keys // E, keys % E)
+        return x.contiguous(memory_format=torch.channels_last) if chl else x
+
+    def ii_fn(x):
+        s_, v_, p_ = target.initial_inference(x)
+        return s_, support.vector_to_scalar(v_), p_
+
+    def search_fn(s_, v_, p_, g_):
+        out = re_graph(s_, v_, p_, g=g_) if re_graph is not None else mcts.search(target, s_, v_, p_, g=g_)
+        return out[0], out[1]
 
     while updates < total_updates:
         # ---------------- collect (stops at total_steps; the rest is offline training) ----------
@@ -595,6 +691,9 @@ def train(args):
             d = np.logical_or(term, trunc)
             replay.add(obs[:, -3:], ra, r, d, rp_, rv)
             ep_ret += r
+            life_len += 1
+            play_add(play, ra, since_r, rp_, life_len[d])
+            life_len[d] = 0
             for i in np.where(d)[0]:
                 recent_returns.append(ep_ret[i]); ep_ret[i] = 0.0
             obs = nobs
@@ -606,8 +705,9 @@ def train(args):
             n_upd = int(upd_credit); upd_credit -= n_upd
         else:
             n_upd = 1
+        offline = env_steps >= args.total_steps                     # no more data: batches can be drawn a whole window ahead (B68 M1)
 
-        for _ in range(n_upd):
+        for i_upd in range(n_upd):
             if updates >= total_updates:
                 break
             lr = args.lr * min(1.0, (updates + 1) / warm) * (0.1 ** (max(0, updates - warm) // args.lr_decay_steps))
@@ -626,19 +726,35 @@ def train(args):
             # ---------------- targets (target network, no grad) ---------------------------------
             tt = time.perf_counter()
             B = args.batch_size
-            t, e, isw = replay.sample(B, horizon, beta=args.priority_beta)
+            if pending:
+                t, e, isw = pending.pop(0)                          # TODO B68 M1: drawn ahead; its targets are already in the cache
+            else:
+                t, e, isw = replay.sample(B, horizon, beta=args.priority_beta)
+                if args.reanalyze_merge:
+                    # TODO B68 M1: draw now the batches of the next updates that see this same buffer, from the same RNG stream in the same
+                    # order (each update gets the batch it would have drawn), and search all their misses in one call. Stops at the next
+                    # env step and at the target refresh; once collection has ended, at the end of the window. (--profile-targets counts
+                    # this call in t_sample.)
+                    W_ = args.target_update_interval
+                    L = min(W_ - updates % W_, total_updates - updates, W_ if offline else n_upd - i_upd)
+                    pending = [replay.sample(B, horizon, beta=args.priority_beta) for _ in range(L - 1)]
+                    ks_ = [cache_keys(tb, eb, updates + j) for j, (tb, eb, _) in enumerate([(t, e, isw)] + pending)]
+                    with torch.no_grad(), torch.autocast(device_type=device.type, dtype=amp, enabled=bf16_native):
+                        rcache.fill(*(np.concatenate([k_[i] for k_ in ks_]) for i in range(4)), updates // W_,
+                                    stacks_fn, ii_fn, search_fn, A)
             ks = np.arange(horizon + 1)
             pos = t[:, None] + ks                                        # (B, K+TD+1)
             dn = replay.done[pos[:, :-1], e[:, None]]                     # done after step t+k
             exists = np.concatenate([np.ones((B, 1), bool), np.cumprod(~dn, axis=1).astype(bool)], axis=1)
             rew = replay.rew[pos[:, :-1], e[:, None]] * exists[:, :-1]  # r_{t+k}, 0 past episode end
             ee = np.repeat(e, K + 1)
-            chl = getattr(args, "channels_last", True) and device.type == "cuda"
-            if rcache is None:
-                root_stacks = replay.stacks(pos[:, :K + 1].reshape(-1), ee)          # states t..t+K
+            root_stacks = replay.stacks(pos[:, :K + 1].reshape(-1), ee)          # states t..t+K (also the training inputs)
+            if chl:
+                root_stacks = root_stacks.contiguous(memory_format=torch.channels_last)
+            x_root = root_stacks
+            if rcache is None:                                                   # the B68 cache stacks only its misses
                 boot_stacks = replay.stacks(pos[:, TD:TD + K + 1].reshape(-1), ee)   # states t+TD..t+K+TD
                 if chl:
-                    root_stacks = root_stacks.contiguous(memory_format=torch.channels_last)
                     boot_stacks = boot_stacks.contiguous(memory_format=torch.channels_last)
             recent = ((t * E + e) > (replay.transitions - args.mixed_value_threshold)) if updates >= args.mixed_value_start else np.ones(B, bool)
             ts = mark("t_sample", tt)
@@ -646,23 +762,8 @@ def train(args):
                 if rcache is not None:
                     # TODO B68: search each replay position once per target window (noise hashed per position and window); repeats and the
                     # bootstrap values come from the cache. Same targets as a fresh search in this window would give.
-                    def stacks_fn(keys):
-                        x = replay.stacks(keys // E, keys % E)
-                        return x.contiguous(memory_format=torch.channels_last) if chl else x
-
-                    def ii_fn(x):
-                        s_, v_, p_ = target.initial_inference(x)
-                        return s_, support.vector_to_scalar(v_), p_
-
-                    def search_fn(s_, v_, p_, g_):
-                        out = re_graph(s_, v_, p_, g=g_) if re_graph is not None else mcts.search(target, s_, v_, p_, g=g_)
-                        return out[0], out[1]
-
-                    bneed = (recent[:, None] & exists[:, TD:TD + K + 1]).reshape(-1)
-                    srch_v, srch_pi, vb = rcache.reanalyse(
-                        (pos[:, :K + 1] * E + e[:, None]).reshape(-1), exists[:, :K + 1].reshape(-1),
-                        (pos[:, TD:TD + K + 1] * E + e[:, None]).reshape(-1), bneed,
-                        updates // args.target_update_interval, stacks_fn, ii_fn, search_fn, A)
+                    srch_v, srch_pi, vb = rcache.reanalyse(*cache_keys(t, e, updates), updates // args.target_update_interval,
+                                                           stacks_fn, ii_fn, search_fn, A)
                     v_boot = vb.reshape(B, K + 1).astype(np.float32)
                     ts = mark("t_search", ts)
                 else:
@@ -821,6 +922,11 @@ def train(args):
                   + ("cache hit s/v {:.2f}/{:.2f} | ".format(*cache_hits) if rcache is not None else "") +
                   f"time c/t/u {100 * tm['collect'] / tot:.0f}/{100 * tm['targets'] / tot:.0f}/"
                   f"{100 * tm['update'] / tot:.0f}% | {el / 60:.1f} min", flush=True)
+            if play["steps"]:
+                ps = play_summary(play)
+                print("[play] " + " | ".join(f"{k} {v}" for k, v in ps.items() if k != "metrics"), flush=True)
+                log(ps["metrics"], env_steps)
+                play = play_window(A)
             if prof_t and tm_sub.get("n"):
                 n_ = tm_sub["n"]
                 print(f"[B64 split] ms/update over {n_} updates: " +
@@ -891,9 +997,16 @@ def parse_args(argv=None):
     ap.add_argument("--mixer-size", default=None, choices=["small", "30m"],
                     help="TODO B61: named mixer shape (small = 128x2, 4 heads, as GTrXL; 30m = qwen30m 512x8, 8 heads, FFN 1536); "
                          "unset keeps the GTrXL mixer's 128x2")
+    ap.add_argument("--mixer-no-pos", action="store_true",
+                    help="TODO B70b: the policy-token trunk (--mixer-where pred) adds no learned position table (the 36 absolute position vectors)")
     ap.add_argument("--mixer-qk-norm", action="store_true",
                     help="TODO B67: Qwen3-style per-head RMSNorm on queries and keys in every mixer block (the CARLA --qk_norm block option). "
                          "Bounds the attention logits, which AdamW 3e-4 otherwise grows to ~9,000 (one-hot attention by update 8,004, B66)")
+    ap.add_argument("--mixer-where", default="both", choices=["both", "repr", "pred"],
+                    help="TODO B68 D1: both = mixer after the representation and after every dynamics step; repr = representation only, "
+                         "the dynamics is EZ-V2's conv + ResNet (removes ~85%% of the mixer work in the search). TODO B69: pred = the CARLA "
+                         "trunk's layout as the prediction function (state-cell tokens + a policy token, value / policy read from the policy "
+                         "token); representation and dynamics are EZ-V2's. Qwen only")
     ap.add_argument("--norm", default="batch", choices=["batch", "heads", "all"],
                     help="batch = EZ-V2; heads/all = LayerNorm instead of BatchNorm (S-058: eval-mode BN drift)")
     ap.add_argument("--total-steps", type=int, default=100_000, help="env (agent) steps collected; < --schedule-steps = screen")
@@ -919,7 +1032,8 @@ def parse_args(argv=None):
                     help="replay the acting, reanalyze and inline-eval searches from CUDA graphs (TODO B23 step 1b); "
                          "bit-identical to the eager search, CUDA only")
     ap.add_argument("--compile-model", action="store_true",
-                    help="Compile model with torch.compile(mode='reduce-overhead') for ~3x transformer head speedup")
+                    help="TODO B68 E8: torch.compile the online model's mixers in place (training forward + backward and the acting search; "
+                         "state-dict keys unchanged)")
     ap.add_argument("--mixer-optimizer", choices=["sgd", "adamw", "adamw_carla"], default="sgd",
                     help="TODO B37: optimiser of the GTrXL mixer parameters (adamw: betas 0.9/0.95, --mixer-lr, --mixer-weight-decay default 0.05; "
                          "the rest of the network keeps SGD). TODO B66 adamw_carla: CARLA's recipe for the same Qwen network (default "
@@ -950,9 +1064,16 @@ def parse_args(argv=None):
     ap.add_argument("--priority-alpha", type=float, default=1.0)
     ap.add_argument("--priority-beta", type=float, default=1.0)
     ap.add_argument("--target-update-interval", type=int, default=200)
+    ap.add_argument("--compile-search", action="store_true",
+                    help="TODO B68 E1: torch.compile the target network's recurrent_inference used by the reanalysis search (fuses its "
+                         "elementwise work; as close to an fp32 search as the eager path; 1.87x on the 30m graphed search)")
     ap.add_argument("--reanalyze-cache", action="store_true",
                     help="TODO B68: search each replay position once per target window and reuse the result (noise hashed per position "
                          "and window); 19%% of the searches of a 100k run at a 200-update window. Off = fresh noise per draw (EZ-V2)")
+    ap.add_argument("--reanalyze-merge", action="store_true",
+                    help="TODO B68 M1 (needs --reanalyze-cache and --priority-alpha 0): draw the batches of the updates between two env "
+                         "steps (once collection has ended: of the target window) up front, in the same order, and search all their cache "
+                         "misses in one call. Same batches and targets; a search's fixed cost (~95 ms on the 30m mixer) is paid once, not per update")
     ap.add_argument("--start-transitions", type=int, default=2000)
     ap.add_argument("--mixed-value-start", type=int, default=30_000, help="updates before search values replace old targets")
     ap.add_argument("--mixed-value-threshold", type=int, default=5_000, help="transitions counted as 'recent'")

@@ -60,18 +60,17 @@ def build(ck_path):
                   state_hw=int(np.ceil(a.frame_size / 16)), mixer_out_init_std=a.mixer_out_init_std,
                   mixer_bg_init=a.mixer_bg_init, simnorm=getattr(a, "simnorm", 0) or 0,
                   mixer_pos=getattr(a, "mixer_pos", "abs") or "abs", mixer_size=getattr(a, "mixer_size", None),
-                  mixer_qk_norm=bool(getattr(a, "mixer_qk_norm", False)))
+                  mixer_qk_norm=bool(getattr(a, "mixer_qk_norm", False)),
+                  mixer_where=getattr(a, "mixer_where", "both") or "both")
     m.load_state_dict(ck["model"])
     return m.eval(), ck.get("updates"), ck.get("env_steps")
 
 
-def mixer_stats(mixer, x):
-    """Manual pass through a Qwen TokenMixer: per-block attention stats, then the output/input norm ratio."""
-    B, C, H, W = x.shape
-    t = x.flatten(2).transpose(1, 2)
-    h = mixer.inp(t) + mixer.pos
+def block_stats(block_list, h):
+    """Per-block attention stats of a stack of Qwen blocks on the token sequence h; returns (stats, h after the blocks)."""
+    B = h.shape[0]
     blocks = []
-    for blk in mixer.blocks:
+    for blk in block_list:
         att, xn = blk.attn, blk.norm1(h)
         q = att.q_proj(xn).view(B, -1, att.num_heads, att.head_dim).transpose(1, 2)
         k = att.k_proj(xn).view(B, -1, att.num_heads, att.head_dim).transpose(1, 2)
@@ -80,13 +79,25 @@ def mixer_stats(mixer, x):
         s = (q @ k.transpose(-2, -1)) * att.scale
         p = s.softmax(-1)
         ent = -(p * p.clamp_min(1e-12).log()).sum(-1)                     # (B, heads, N)
-        blocks.append({"entropy": float(ent.mean() / math.log(t.shape[1])),
-                       "entropy_min_head": float(ent.mean(dim=(0, 2)).min() / math.log(t.shape[1])),
+        blocks.append({"entropy": float(ent.mean() / math.log(h.shape[1])),
+                       "entropy_min_head": float(ent.mean(dim=(0, 2)).min() / math.log(h.shape[1])),
                        "peak": float(p.amax(-1).mean()), "logit_absmax": float(s.abs().amax()),
                        "alpha_attn": float(blk.alpha_attn.abs().mean()), "alpha_ffn": float(blk.alpha_ffn.abs().mean())})
         h = blk(h)
+    return blocks, h
+
+
+def mixer_stats(mixer, x):
+    """Manual pass through a Qwen TokenMixer: per-block attention stats, then the output/input norm ratio."""
+    t = x.flatten(2).transpose(1, 2)
+    blocks, h = block_stats(mixer.blocks, mixer.inp(t) + mixer.pos)
     out = mixer.out(mixer.norm_out(h))
     return blocks, float(out.norm() / t.norm())
+
+
+def pred_stats(trunk, s):
+    """TODO B69: the same per-block stats for the policy-token prediction trunk (sequence = policy token + state cells)."""
+    return block_stats(trunk.blocks, trunk.tokens(s))[0]
 
 
 def diag(ck_path, obs, act):
@@ -94,7 +105,9 @@ def diag(ck_path, obs, act):
     r = {"ckpt": ck_path, "updates": upd, "env_steps": env, "trunk": m.trunk}
     pre = m.repr_res(m.down(obs))
     s = m.representation(obs)
-    if m.trunk == "qwen":
+    if m.pred_mixer is not None:
+        r["pred_blocks"] = pred_stats(m.pred_mixer, s)
+    elif m.trunk == "qwen":
         r["repr_blocks"], r["repr_ratio"] = mixer_stats(m.repr_mixer, pre)
     elif m.trunk == "gtrxl":
         t = pre.flatten(2).transpose(1, 2)
@@ -111,7 +124,9 @@ def diag(ck_path, obs, act):
     plane = (act.float() / m.action_dim).view(-1, 1, 1, 1).expand(-1, 1, m.hw, m.hw)
     plane = F.relu(m.act_ln(m.act_conv(plane)))
     x = m.dyn_res(F.relu(m.dyn_bn(m.dyn_conv(torch.cat([s, plane], 1))) + s))
-    if m.trunk == "qwen":
+    if m.dyn_mixer is None:  # TODO B68 D1: representation-only mixer
+        pass
+    elif m.trunk == "qwen":
         r["dyn_blocks"], r["dyn_ratio"] = mixer_stats(m.dyn_mixer, x)
     elif m.trunk == "gtrxl":
         t = x.flatten(2).transpose(1, 2)

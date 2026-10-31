@@ -13,6 +13,10 @@ and has to earn its contribution - the comparison isolates the transformer, noth
 `trunk="qwen"` (TODO B61) puts our Qwen blocks (RMSNorm, attention, SwiGLU, alpha-gated residuals;
 src/models/transformer/layers.py) in the same mixer slot. `mixer_size` picks the width: "small" matches
 the GTrXL mixer (128 wide, 2 blocks, 4 heads), "30m" is the CARLA head's qwen30m shape (512, 8, 8).
+
+`mixer_where` places the Qwen blocks: "both" (the default, as above), "repr" (representation only, TODO B68 D1), or "pred"
+(TODO B69): the CARLA trunk's layout as the prediction function. The conv representation and dynamics are EZ-V2's, as the CNN
+encoder is CARLA's, and the value and policy are read from a policy token by the Qwen trunk instead of by the conv heads.
 """
 import math
 from typing import Optional, Tuple
@@ -183,6 +187,42 @@ class TokenMixer(nn.Module):
         return t.transpose(1, 2).reshape(B, C, H, W)
 
 
+class PolicyTokenTrunk(nn.Module):
+    """TODO B69: the CARLA trunk's layout (QwenWaypointTransformer, src/models/world_on_rails/qwen_wor_policy.py) as the prediction
+    function. Each of the HxW state cells becomes a token (linear projection + learned position, as CARLA's vision tokens), a learned
+    policy token is prepended, Qwen blocks and a final RMSNorm run over the sequence, and the value and policy logits are read from the
+    policy token by Linear-GELU-Linear heads, as CARLA reads its waypoints. The heads' last layers start at zero (EZ-V2's init_zero:
+    uniform prior and zero value at init, which the search relies on)."""
+    def __init__(self, channels: int, hw: int, dim: int, depth: int, heads: int, ffn_dim: int, num_actions: int,
+                 support_size: int, qk_norm: bool = False, no_pos: bool = False):
+        super().__init__()
+        self.inp = nn.Linear(channels, dim)
+        self.no_pos = no_pos   # TODO B70b: --mixer-no-pos drops the learned position table from the tokens (the parameter stays, unused)
+        self.pos = nn.Parameter(torch.zeros(1, hw, dim))
+        self.policy_token = nn.Parameter(torch.zeros(1, 1, dim))
+        nn.init.trunc_normal_(self.pos, std=0.02)
+        nn.init.trunc_normal_(self.policy_token, std=0.02)
+        self.blocks = nn.ModuleList([QwenTransformerBlock(dim, num_heads=heads, ffn_dim=ffn_dim, qk_norm=qk_norm) for _ in range(depth)])
+        self.norm_out = RMSNorm(dim)
+        self.value_head = nn.Sequential(nn.Linear(dim, 256), nn.GELU(), nn.Linear(256, support_size))
+        self.policy_head = nn.Sequential(nn.Linear(dim, 256), nn.GELU(), nn.Linear(256, num_actions))
+        for head in (self.value_head, self.policy_head):
+            nn.init.zeros_(head[-1].weight)
+            nn.init.zeros_(head[-1].bias)
+
+    def tokens(self, s: torch.Tensor) -> torch.Tensor:
+        """(B, C, H, W) state -> (B, 1 + HW, dim) sequence, policy token first."""
+        t = self.inp(s.flatten(2).transpose(1, 2)) + (0.0 if self.no_pos else self.pos)
+        return torch.cat([self.policy_token.expand(s.shape[0], -1, -1), t], dim=1)
+
+    def forward(self, s: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        h = self.tokens(s)
+        for blk in self.blocks:
+            h = blk(h)
+        policy_repr = self.norm_out(h)[:, 0]
+        return self.value_head(policy_repr), self.policy_head(policy_repr)
+
+
 def swap_batchnorm(module: nn.Module, skip=()) -> None:
     """Replace BatchNorm2d(C) by GroupNorm(1, C) (= LayerNorm over C,H,W) and BatchNorm1d(n) by
     LayerNorm(n) in every submodule except those whose top-level name is in `skip`.
@@ -210,9 +250,13 @@ class EZV2Model(nn.Module):
                  head_hidden: int = 256, action_embed_dim: int = 16, support: Optional[DiscreteSupport] = None,
                  trunk: str = "resnet", mixer_dim: int = 128, mixer_depth: int = 2, norm: str = "batch",
                  mixer_out_init_std: float = 0.0, mixer_bg_init: float = 2.0, simnorm: int = 0,
-                 mixer_pos: str = "abs", mixer_size: Optional[str] = None, mixer_qk_norm: bool = False):
+                 mixer_pos: str = "abs", mixer_size: Optional[str] = None, mixer_qk_norm: bool = False,
+                 mixer_where: str = "both", mixer_no_pos: bool = False):
         super().__init__()
         assert trunk in ("resnet", "gtrxl", "qwen")
+        assert mixer_where in ("both", "repr", "pred")
+        assert mixer_where != "pred" or trunk == "qwen", "TODO B69: the policy-token trunk is built from the Qwen block"
+        pred_trunk = trunk == "qwen" and mixer_where == "pred"
         self.action_dim, self.C, self.hw, self.trunk = action_dim, num_channels, state_hw, trunk
         # TODO B22: SimNorm group size on the latent (0 = off, the EZ-V2 default). 8 = TD-MPC2's value.
         self.simnorm = simnorm
@@ -235,12 +279,14 @@ class EZV2Model(nn.Module):
         self.lstm = nn.LSTM(input_size=flat, hidden_size=lstm_hidden)
         self.rew_bn2 = nn.BatchNorm1d(lstm_hidden)
         self.rew_fc = mlp(lstm_hidden, list(fc_layers), S, init_zero=True)
-        # prediction (value + policy)
-        self.pred_res = ResidualBlock(num_channels, num_channels)
-        self.v_conv, self.v_bn = nn.Conv2d(num_channels, reduced_channels, 1), nn.BatchNorm2d(reduced_channels)
-        self.p_conv, self.p_bn = nn.Conv2d(num_channels, reduced_channels, 1), nn.BatchNorm2d(reduced_channels)
-        self.v_fc = mlp(flat, list(fc_layers), S, init_zero=True)
-        self.p_fc = mlp(flat, list(fc_layers), action_dim, init_zero=True)
+        # prediction (value + policy); under mixer_where="pred" the policy-token trunk below replaces these conv heads
+        if not pred_trunk:
+            self.pred_res = ResidualBlock(num_channels, num_channels)
+            self.v_conv, self.v_bn = nn.Conv2d(num_channels, reduced_channels, 1), nn.BatchNorm2d(reduced_channels)
+            self.p_conv, self.p_bn = nn.Conv2d(num_channels, reduced_channels, 1), nn.BatchNorm2d(reduced_channels)
+            self.v_fc = mlp(flat, list(fc_layers), S, init_zero=True)
+            self.p_fc = mlp(flat, list(fc_layers), action_dim, init_zero=True)
+        self.pred_mixer = None
         # SimSiam projection (target side) + head (online side)
         state_dim = num_channels * state_hw * state_hw
         self.proj = nn.Sequential(
@@ -250,7 +296,7 @@ class EZV2Model(nn.Module):
         self.proj_head = nn.Sequential(
             nn.Linear(proj_out, head_hidden), nn.BatchNorm1d(head_hidden), nn.ReLU(),
             nn.Linear(head_hidden, proj_out))
-        # thesis variant: transformer token mixing in representation and dynamics
+        # thesis variant: transformer token mixing in representation and dynamics, or the policy-token trunk as the prediction (B69)
         if trunk != "resnet":
             hw2 = state_hw * state_hw
             heads, ffn = 4, None
@@ -258,15 +304,25 @@ class EZV2Model(nn.Module):
                 mixer_dim, mixer_depth, heads, ffn = MIXER_SIZES[mixer_size]
             kw = dict(heads=heads, bg_init=mixer_bg_init, out_init_std=mixer_out_init_std, pos_mode=mixer_pos, block=trunk, ffn_dim=ffn,
                       qk_norm=mixer_qk_norm)
+        if pred_trunk:
+            # TODO B69: no token mixer in the representation or the dynamics; the Qwen trunk is the prediction function
+            self.repr_mixer = self.dyn_mixer = None
+            self.pred_mixer = PolicyTokenTrunk(num_channels, hw2, mixer_dim, mixer_depth, heads, ffn or 4 * mixer_dim, action_dim, S,
+                                               qk_norm=mixer_qk_norm, no_pos=mixer_no_pos)
+        elif trunk != "resnet":
             self.repr_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth, **kw)
-            self.dyn_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth, **kw)
+            # TODO B68 D1: "repr" keeps the mixer in the representation only (the CARLA trunk's role: encode the observation); the
+            # dynamics is then EZ-V2's conv + ResNet alone, which removes ~85% of the mixer work in the search
+            self.dyn_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth, **kw) if mixer_where == "both" else None
         self.lstm_hidden = lstm_hidden
         # norm: "batch" = EZ-V2; "heads" = LayerNorm in reward/value/policy heads; "all" = LayerNorm
         # everywhere except the SimSiam projection (its BatchNorm is what prevents collapse).
         assert norm in ("batch", "heads", "all")
         if norm == "heads":
             for n in ("rew_bn", "rew_bn2", "rew_fc", "pred_res", "v_bn", "p_bn", "v_fc", "p_fc"):
-                sub = getattr(self, n)
+                sub = getattr(self, n, None)
+                if sub is None:  # TODO B69: no conv prediction heads under mixer_where="pred"
+                    continue
                 if isinstance(sub, (nn.BatchNorm1d, nn.BatchNorm2d)):
                     setattr(self, n, nn.LayerNorm(sub.num_features) if isinstance(sub, nn.BatchNorm1d)
                             else nn.GroupNorm(1, sub.num_features))
@@ -285,7 +341,7 @@ class EZV2Model(nn.Module):
 
     def representation(self, obs: torch.Tensor) -> torch.Tensor:
         s = self.repr_res(self.down(obs))
-        if self.trunk != "resnet":
+        if self.trunk != "resnet" and self.repr_mixer is not None:
             s = self.repr_mixer(s)
         return self.simnorm_latent(s)
 
@@ -294,7 +350,7 @@ class EZV2Model(nn.Module):
         plane = F.relu(self.act_ln(self.act_conv(plane)))
         x = self.dyn_bn(self.dyn_conv(torch.cat([s, plane], dim=1)))
         x = self.dyn_res(F.relu(x + s))
-        if self.trunk != "resnet":
+        if self.trunk != "resnet" and self.dyn_mixer is not None:
             x = self.dyn_mixer(x)
         return self.simnorm_latent(x)
 
@@ -305,6 +361,8 @@ class EZV2Model(nn.Module):
         return self.rew_fc(x), hidden
 
     def prediction(self, s: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.pred_mixer is not None:  # TODO B69: value and policy read from the policy token, as CARLA reads its waypoints
+            return self.pred_mixer(s)
         x = self.pred_res(s)
         v = self.v_fc(F.relu(self.v_bn(self.v_conv(x))).flatten(1))
         p = self.p_fc(F.relu(self.p_bn(self.p_conv(x))).flatten(1))

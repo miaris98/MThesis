@@ -15,11 +15,11 @@ sys.path.insert(0, HERE)
 import mixer_diag as md  # noqa: E402
 
 torch.set_num_threads(4)
-OUT = "/workspace/b66/out"
+OUT = os.environ.get("MECH_OUT", "/workspace/b66/out")
 # comma lists from the environment (B67 added runs while the watcher was live); it exits once every done marker exists and nothing is left
 LABELS = tuple(os.environ.get("MECH_LABELS", "b66_fix_s1,b66_sgd_s1").split(","))
 DONES = tuple(os.environ.get("MECH_DONE", "/workspace/b66/logs/done_s1.marker").split(","))
-RES = "/workspace/b66/mech/mech.jsonl"
+RES = os.environ.get("MECH_RES", "/workspace/b66/mech/mech.jsonl")
 H = lambda p: -(p * np.log(np.clip(p, 1e-12, None))).sum(-1)
 
 
@@ -65,9 +65,11 @@ def main():
             with open(RES, "a") as f:
                 f.write(json.dumps(r) + "\n")
             done.add(p)
-            rb, db = r["repr_blocks"], r["dyn_blocks"]
-            print(f"{time.strftime('%H:%M')} {label} env {r['env_steps']} upd {r['updates']} | repr ratio {r['repr_ratio']:.3f} dyn ratio {r['dyn_ratio']:.3f} "
-                  f"| repr ent {rb[0]['entropy']:.3f}/{rb[1]['entropy']:.3f} peak {rb[0]['peak']:.2f}/{rb[1]['peak']:.2f} "
+            # no dyn_blocks under --mixer-where repr (TODO B68 D1); pred_blocks instead of repr_blocks under --mixer-where pred (TODO B69)
+            tag = "pred" if "pred_blocks" in r else "repr"
+            rb, db = r[f"{tag}_blocks"], r.get("dyn_blocks", [])
+            print(f"{time.strftime('%H:%M')} {label} env {r['env_steps']} upd {r['updates']} | repr ratio {r.get('repr_ratio', float('nan')):.3f} dyn ratio {r.get('dyn_ratio', float('nan')):.3f} "
+                  f"| {tag} ent {rb[0]['entropy']:.3f}/{rb[-1]['entropy']:.3f} peak {rb[0]['peak']:.2f}/{rb[-1]['peak']:.2f} "
                   f"| logit max {max(b['logit_absmax'] for b in rb + db):.1f} | alpha a/f {rb[0]['alpha_attn']:.2f}/{rb[0]['alpha_ffn']:.2f} "
                   f"| prior H {r['policy_entropy']:.3f} P(FIRE) {r['p_fire']:.3f} | search H recent {r.get('search_pi_entropy_recent', float('nan')):.3f} "
                   f"| V {r['value_mean']:.2f}", flush=True)

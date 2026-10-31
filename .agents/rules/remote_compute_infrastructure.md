@@ -1,113 +1,56 @@
 ---
 trigger: always_on
-description: Mandatory pattern for all remote compute scripts. Never hardcode SSH host/port/paths — always use remote_config.py and the .remote file.
+description: Box-agnostic remote compute infrastructure (.remote, remote_config.py, machine.py), remote launch verification, SSH/process hygiene, and queue pitfalls.
 ---
 
-## Remote Compute Infrastructure Rules
+# Remote Compute Infrastructure & Launch Hygiene Rules
 
-### 1. Box-Agnostic Script Requirement
+## 1. Box-Agnostic Script Requirement
 All scripts in `scripts/setup/` and `scratch/` that touch a remote compute box **MUST** use the central config loader. **Never hardcode SSH host, port, user, workspace path, venv path, or CPU core ranges** anywhere in script source files.
 
-### 2. The Config Layer
+## 2. The Config Layer
+- **Config file** (git-ignored, one per box): `.remote` at the repository root (never read directly — use `remote_config.py` or `python scripts/setup/vast_fleet.py select <idx_or_id>`).
+- **Template** (committed): `.remote.example` — copy to `.remote` on every new box.
+- **Loader module**: `scripts/setup/remote_config.py` (`from remote_config import load_config`).
+  - Use `cfg.ssh()`, `cfg.ssh_T()`, `cfg.scp()`, `cfg.scp_download()`, `cfg.remote_path()`, `cfg.python()`, `cfg.python_carla()`, `cfg.run_ssh()`.
+  - Never import `paramiko` in setup/scratch scripts; use `subprocess` + `cfg.ssh_T()` for stdin piping.
+  - Do not add `HOST =` or `PORT =` module-level constants.
 
-**Config file** (git-ignored, one per box): `.remote` at the repository root.
-```ini
-[remote]
-host      = 1.2.3.4
-port      = 50011
-user      = root
-workspace = /workspace/MThesis
-venv      = /venv/main/bin
-venv_carla = /venv/carla_py38/bin
-cpu_cores_a = 16-20
-cpu_cores_b = 21-25
-cpu_cores_c = 26-31
-```
+## 3. Sizing and Paths on the Box
+- **Do not write a new `check_*.py` per run.** Use `python scripts/setup/box.py probe|status|env` and `python scripts/ops/run_status_report.py`.
+- **Size jobs from `scripts/lib/machine.py`, never from `os.cpu_count()` / `multiprocessing.cpu_count()`.** Those count every host CPU, not the cgroup quota (`cpu.max`), and `pids.max` caps processes + threads (S-086). In shell: `eval "$(python3 scripts/lib/machine.py --export)"` gives `REC_DATALOADER_WORKERS`, `REC_EZV2_NUM_CPUS`, `REC_CARLA_LANES`, `REC_EVAL_OMP_THREADS`, `REC_BF16`. For EZ-V2 on Blackwell (`scripts/training/ezv2_setup_blackwell.sh`), always pass `EZV2_NUM_CPUS=<quota>` and `OMP_NUM_THREADS=1`.
+- **Shell scripts source `scripts/lib/common.sh`** for paths (`WORKSPACE`, `MTHESIS_ROOT`, `GARAGE`, ...), `CUDA_DEVICE_ORDER=PCI_BUS_ID` (so CUDA indices match CARLA's `-graphicsadapter`), and the only copies of `kill_tree` / `clear_carla_ports`.
+- **Several CARLA lanes on one GPU require `scripts/setup/patch_bench2drive.py`**, applied by `launch_b2d20.sh setup|run`.
 
-**Template** (committed): `.remote.example` — copy this to `.remote` on every new box.
+---
 
-**Loader module**: `scripts/setup/remote_config.py`
+## 4. SSH Key Safety, Heredoc Safety & Background Process Launching
+- **Never Edit `authorized_keys` on Rented Boxes**: Editing `/root/.ssh/authorized_keys` once deleted the user's SSH key and locked out the box. Relay box-to-box copies through the local machine via `ssh A 'tar -cf - files' | ssh B 'tar -xf - -C dir'` and compare `sha256` on both ends.
+- **Never Use Unquoted Bash Heredocs with Backticks or `$`**: Passing Python/Markdown containing backticks or `$(...)` through `<<EOF` executes command substitutions in bash. Always write multi-line scripts to a file first or use single-quoted `<<'EOF'` with environment variables.
+- **Never Run Remote Jobs in Foreground Under an SSH Timeout**: Running a remote command without `setsid nohup` under a local timeout kills the remote process when the SSH client times out. Furthermore, `cd DIR && setsid nohup ... &` over SSH can hang waiting for stdout to close; always launch detached jobs with a subshell redirecting all standard streams:
+  `(cd DIR; setsid nohup CMD > LOG 2>&1 < /dev/null &)`
+  In `while read` loops calling `ssh`, always pass `ssh -n` or `<&3` so `ssh` does not consume the loop's stdin.
+- **Fail-Fast Multi-Phase Scripts**: Any script chaining dependent steps (`cache -> train -> eval`) must check exit codes and stop immediately on failure (`set -e` or `|| exit 1`), never just `echo "status $?"`.
 
-### 3. How to Use in a Script
+---
 
-```python
-from remote_config import load_config   # scripts/setup/ scripts: direct import
-# OR for scratch/ scripts:
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts", "setup"))
-from remote_config import load_config
+## 5. Pre-Launch Dependency Closure & Post-Launch Verification
+- **Sync Full Import Closure**: Before launching on a box, sync every package the entry point imports (e.g. both `atari_qwen/` AND `src/`). Re-ship any file patched since the last sync (`git diff --name-only`), and re-apply local patches after any tarball refresh.
+- **Preflight Import Check Per Venv**: A box has separate venvs (`/venv/main` for training/Atari and `venv_carla` for CARLA leaderboard evaluation). Before launching unattended jobs, test-import the actual entry-point modules (`import train_wor`, `import leaderboard.leaderboard_evaluator`, `import bench2drive_agent`) in the target venv. In `venv_carla`, `py-trees` must be pinned to `0.8.3`. For Town11–13 routes, verify `AdditionalMaps_0.9.15.tar.gz` is imported (`https://downloads.carlasim.com/Linux/AdditionalMaps_0.9.15.tar.gz` if `tiny.carla.org` returns 403).
+- **Verified Launch (`launch_checked.sh` & Command-Line Audit)**:
+  - Launch remote jobs with `scripts/ops/launch_checked.sh HOST PORT LOG "CMD"` (waits 50s and verifies the PID is alive and the log has no `Traceback`/`Error`/`No module named`).
+  - After every launch, inspect `ps aux | grep <trainer>` and the log for a flag-unique line (e.g. `[B37 audit]`, `[A28]`, `-quality-level=`) to confirm new flags were not silently dropped by wrapper scripts.
 
-cfg = load_config()
+---
 
-# SSH command list (pass to subprocess.run)
-subprocess.run(cfg.ssh("nvidia-smi"), capture_output=True)
-
-# SSH with stdin pipe (-T flag, no pseudo-TTY)
-subprocess.run(cfg.ssh_T("python -"), input=code.encode())
-
-# SCP upload
-subprocess.run(cfg.scp("local/file.py", cfg.remote_path("some/file.py")))
-
-# SCP download
-subprocess.run(cfg.scp_download("/remote/file.pth", "local/dest.pth"))
-
-# Remote paths under workspace root
-cfg.remote_path("results/100k_benchmark")  # → /workspace/MThesis/results/100k_benchmark
-
-# Remote Python interpreter
-cfg.python()        # → /venv/main/bin/python
-cfg.python_carla()  # → /venv/carla_py38/bin/python
-
-# CPU cores for taskset (Gate 2 parallel variants)
-cfg.cpu_cores_a   # → "16-20"
-cfg.cpu_cores_b   # → "21-25"
-cfg.cpu_cores_c   # → "26-31"
-
-# Convenience: run_ssh prints the command and returns CompletedProcess
-cfg.run_ssh("tail -n 20 /workspace/gate1_poc.log", check=False)
-```
-
-### 4. Switching Boxes
-
-Edit **`.remote`** only — all 25+ scripts update automatically:
-```ini
-host = NEW_IP
-port = NEW_PORT
-```
-
-For CI or one-off overrides, use environment variables (no `.remote` file needed):
-```
-REMOTE_HOST=x.x.x.x REMOTE_PORT=22 python scripts/setup/foo.py
-```
-
-### 5. Creating New Remote Scripts
-
-When writing any new script that SSHes into a remote box:
-1. Import `load_config` from `remote_config`.
-2. Use `cfg.ssh()`, `cfg.scp()`, `cfg.remote_path()`, etc. — **no raw strings**.
-3. Never import `paramiko` in setup/scratch scripts; use `subprocess` + `cfg.ssh_T()` for stdin piping.
-4. Do not add `HOST =` or `PORT =` module-level constants.
-
-### 6. Sizing and paths on the box (added 2026-09-28)
-
-- **Do not write a new `check_*.py` per run.** Use `python scripts/setup/box.py probe|status|env`; `status` takes
-  `-p PATTERN` and `-l LOG`, and prints the box's real container limits.
-- **Size jobs from `scripts/lib/machine.py`, never from `os.cpu_count()` / `multiprocessing.cpu_count()`.** Those
-  count every host CPU, not the cgroup quota; `pids.max` also caps processes plus threads (S-086). In shell:
-  `eval "$(python3 scripts/lib/machine.py --export)"` gives `REC_DATALOADER_WORKERS`, `REC_EZV2_NUM_CPUS`,
-  `REC_CARLA_LANES`, `REC_EVAL_OMP_THREADS`, `REC_BF16`.
-- **Shell scripts source `scripts/lib/common.sh`** for paths (`WORKSPACE`, `MTHESIS_ROOT`, `GARAGE`, ... all
-  env-overridable), `CUDA_DEVICE_ORDER=PCI_BUS_ID` (so CUDA indices match CARLA's `-graphicsadapter`), and the only
-  copies of `kill_tree` / `clear_carla_ports`. Never kill with a bare `pkill -f` pattern.
-- **Several CARLA lanes on one GPU require `scripts/setup/patch_bench2drive.py`**, applied by
-  `launch_b2d20.sh setup|run`. Unpatched, one lane's crash kills every CARLA server on that GPU.
-- The one-off scripts listed in section 7 are being retired (archive and reasons:
-  `E:\MThesis_EXP\local_repo_logs_20260928\scripts_cleanup_20260928\MANIFEST.md`).
-
-### 7. Files Modified in the 2026-09-23 Migration
-
-All 25 box-specific scripts were migrated. The complete list:
-
-**`scripts/setup/`**: `remote_commander.py`, `launch_gate1_poc.py`, `launch_gate2_trio.py`, `launch_atari_38k_resumed.py`, `sync_atari_resume.py`, `upload_atari_checkpoints.py`, `upload_carla_checkpoints.py`, `remote_setup_carla_and_mlflow.py`, `check_atari_live.py`, `check_atari_status.py`, `check_atari_steps.py`, `check_50k_eval.py`, `check_gpu.py`, `check_progress.py`, `check_carla_epoch.py`, `check_auto_launch.py`, `check_dataset_and_atari.py`, `check_remote_env.py`, `verify_gate1_ckpt.py`, `inspect_atari_ckpts.py`, `terminate_atari.py`, `test_gym_remote.py`, `test_ssh_fast.py`, `probe_new_box.py`, `monitor_box.py`, `live_status_report.py`, `backup_epoch50_final.py`, `launch_pdm_lite_download.py`
-
-**`scratch/`**: `profile_step.py`, `eval_check.py`, `deploy_resume.py`, `deploy_launch.py`, `check_stack.py`
+## 6. Process Termination, CARLA Lane Queues & Classifier Denials
+- **No Self-Kill `pkill -f`**: Never put a `pkill -f <pattern>` inside an SSH command or script whose own command line contains `<pattern>` (even `[h]` bracket tricks fail if the filename appears elsewhere in the same command). Kill by PID, session ID (`pkill -s <sid>`), or guardian process tree (`ps --forest`).
+- **Replacing Launchers / Queues**: Killing a queue/launcher script (`launch_boxA.sh`, `queue_A9c.sh`) leaves its already-spawned training/eval children running! Before starting a replacement queue, check `/proc/PID/cmdline` for running `train_wor` / `b2d_guardian` / `CarlaUE4` processes, kill orphaned `CarlaUE4` servers holding RPC ports (`-carla-rpc-port=`), and never run two chains with the same run label.
+- **CARLA Eval Lane Health & Route Files**:
+  - A CARLA eval lane is healthy **only** if its `.json` record count/mtime advances and `CarlaUE4` holds VRAM (~4–5.3 GB/lane); live guardian processes alone can be hung on orphaned evaluators.
+  - Keep route list files strictly LF-only (`tr -d '\r'`); Windows CRLF (`\r`) causes `"Couldn't find the route with id"` and false crash exclusions.
+  - Before relaunching a failed lane, move old `guardian_logs/<label>*` and poisoned `bench2drive_out/<label>*` aside or use a new label (`<label>d<k>` via `scripts/eval/lane_plan.py`) so stale attempt counts do not trigger false crash-route skips.
+- **Windows Git-Bash Background Loops**: Stopping a background task does **not** stop child `bash.exe` sync loops (`backup_run_pairs.sh`, `pair_loop`), which will race with replacement loops on `.part` files. Always check `Get-CimInstance Win32_Process | Where-Object CommandLine -match 'backup_run_pairs|pair_loop|sync'` and stop old PIDs via `Stop-Process` before starting a new loop.
+- **Rejected Launches & Permission Denials**:
+  - If the user rejects or cancels a launch tool call, check the target boxes first (`ps`, lane file mtimes) before answering — background steps may have already started. Report what is running and ask whether to stop it.
+  - If a safety/permission classifier denies a remote launch (`Modify Shared Resources`) or config edit (`Self-Modification`), **never** retry or route around it. Report the exact command/rule to the user and wait for their explicit go or let the user run it directly.

@@ -34,8 +34,10 @@ def category(name: str) -> str:
         return "gate_bias"
     if "norm" in name:
         return "norm"
-    if "mixer.out" in name or "mixer.inp" in name or name.endswith(".pos"):
+    if "mixer.out" in name or "mixer.inp" in name or name.endswith((".pos", ".policy_token")):
         return "io"
+    if "_head." in name:  # TODO B69: the policy-token trunk's value / policy heads
+        return "head"
     return "other"
 
 

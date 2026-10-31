@@ -61,30 +61,29 @@ class ReanalysisCache:
         self.s_pi = torch.zeros(num_positions, num_actions, dtype=torch.float32, device=device)
         self.v_ver = torch.full((num_positions,), -1, dtype=torch.int64, device=device)
         self.v_val = torch.zeros(num_positions, dtype=torch.float32, device=device)
-        self.hits = self.lookups = self.v_hits = self.v_lookups = 0
+        self.searched = self.lookups = self.v_inferred = self.v_lookups = 0
 
     def stats(self, reset: bool = True) -> Tuple[float, float]:
-        r = (self.hits / max(1, self.lookups), self.v_hits / max(1, self.v_lookups))
+        """(share of the updates' distinct needed roots served without a new search, the same for the bootstrap values)."""
+        r = (1.0 - self.searched / max(1, self.lookups), 1.0 - self.v_inferred / max(1, self.v_lookups))
         if reset:
-            self.hits = self.lookups = self.v_hits = self.v_lookups = 0
+            self.searched = self.lookups = self.v_inferred = self.v_lookups = 0
         return r
 
-    def reanalyse(self, root_keys: np.ndarray, root_need: np.ndarray, boot_keys: np.ndarray, boot_need: np.ndarray, version: int,
-                  stacks: Callable, initial_inference: Callable, search: Callable, num_actions: int):
-        """Targets for one update.
+    def fill(self, root_keys: np.ndarray, root_need: np.ndarray, boot_keys: np.ndarray, boot_need: np.ndarray, version: int,
+             stacks: Callable, initial_inference: Callable, search: Callable, num_actions: int) -> Tuple[int, int]:
+        """Computes every needed root search and bootstrap value not yet held under `version` (arguments as `reanalyse`).
+        Returns the numbers of distinct needed roots and bootstrap positions.
 
-        root_keys / root_need: (n_root,) flat positions of the search roots and whether any loss uses them (False past an episode end:
-        those targets are zeroed by the caller anyway, so they are not searched). boot_keys / boot_need: the same for the bootstrap values.
-        stacks(keys) -> observation stacks; initial_inference(x) -> (latent, scalar value, policy logits) of the target network;
-        search(latent, value, logits, g) -> (values (n,), policies (n, A)) as numpy, with the Gumbel noise g given.
-        Returns (search values (n_root,), policies (n_root, A), bootstrap values (n_boot,)) as numpy; unneeded entries are 0."""
+        TODO B68 M1: called on the union of several updates' batches it searches all their misses in one call. A 30m search costs
+        about 95 ms fixed + 0.27 ms per root (compiled, 2026-10-26), so per-update searches of a few hundred misses are mostly fixed
+        cost. The results do not depend on which call computes them: a position's noise is a hash of (position, version)."""
         dev = self.device
         # 1. roots: one search per distinct needed position not yet searched under this version
         uk = np.unique(root_keys[root_need])
         if len(uk):
-            ukt = torch.as_tensor(uk, device=dev)
-            miss = uk[(self.s_ver[ukt] != version).cpu().numpy()]
-            self.lookups += len(uk); self.hits += len(uk) - len(miss)
+            miss = uk[(self.s_ver[torch.as_tensor(uk, device=dev)] != version).cpu().numpy()]
+            self.searched += len(miss)
             for lo in range(0, len(miss), BUCKETS[-1]):
                 mk = miss[lo:lo + BUCKETS[-1]]
                 n = len(mk); pad = bucket(n) - n
@@ -99,22 +98,35 @@ class ReanalysisCache:
                 self.s_ver[kt] = version
                 self.v_val[kt] = v[:n].float()
                 self.v_ver[kt] = version
-        rk = torch.as_tensor(root_keys, device=dev)
-        need = torch.as_tensor(root_need, device=dev)
-        sv_all = torch.where(need, self.s_val[rk], torch.zeros((), device=dev))
-        pi_all = self.s_pi[rk] * need[:, None]
         # 2. bootstrap values: initial inference only, shared with the root pass of the same position and version
         ub = np.unique(boot_keys[boot_need])
         if len(ub):
-            ubt = torch.as_tensor(ub, device=dev)
-            vmiss = ub[(self.v_ver[ubt] != version).cpu().numpy()]
-            self.v_lookups += len(ub); self.v_hits += len(ub) - len(vmiss)
+            vmiss = ub[(self.v_ver[torch.as_tensor(ub, device=dev)] != version).cpu().numpy()]
+            self.v_inferred += len(vmiss)
             for lo in range(0, len(vmiss), BUCKETS[-1]):
                 mk = vmiss[lo:lo + BUCKETS[-1]]
                 kt = torch.as_tensor(mk, device=dev)
                 _, v, _ = initial_inference(stacks(mk))
                 self.v_val[kt] = v.float()
                 self.v_ver[kt] = version
+        return len(uk), len(ub)
+
+    def reanalyse(self, root_keys: np.ndarray, root_need: np.ndarray, boot_keys: np.ndarray, boot_need: np.ndarray, version: int,
+                  stacks: Callable, initial_inference: Callable, search: Callable, num_actions: int):
+        """Targets for one update.
+
+        root_keys / root_need: (n_root,) flat positions of the search roots and whether any loss uses them (False past an episode end:
+        those targets are zeroed by the caller anyway, so they are not searched). boot_keys / boot_need: the same for the bootstrap values.
+        stacks(keys) -> observation stacks; initial_inference(x) -> (latent, scalar value, policy logits) of the target network;
+        search(latent, value, logits, g) -> (values (n,), policies (n, A)) as numpy, with the Gumbel noise g given.
+        Returns (search values (n_root,), policies (n_root, A), bootstrap values (n_boot,)) as numpy; unneeded entries are 0."""
+        n_root, n_boot = self.fill(root_keys, root_need, boot_keys, boot_need, version, stacks, initial_inference, search, num_actions)
+        self.lookups += n_root; self.v_lookups += n_boot
+        dev = self.device
+        rk = torch.as_tensor(root_keys, device=dev)
+        need = torch.as_tensor(root_need, device=dev)
+        sv_all = torch.where(need, self.s_val[rk], torch.zeros((), device=dev))
+        pi_all = self.s_pi[rk] * need[:, None]
         bk = torch.as_tensor(boot_keys, device=dev)
         vb_all = torch.where(torch.as_tensor(boot_need, device=dev), self.v_val[bk], torch.zeros((), device=dev))
         return sv_all.cpu().numpy(), pi_all.cpu().numpy(), vb_all.cpu().numpy()

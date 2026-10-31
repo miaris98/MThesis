@@ -7,9 +7,9 @@
 # A run without a final checkpoint (stopped early) is skipped and named in the log.
 # usage: final_evals.sh MARKER LABEL [LABEL ...]    logs: /workspace/b66/logs/eval_final_{paper,sticky}_<label>.log, marker evals_done_<first label>
 cd /workspace/MThesis
-export PYTHONPATH=/workspace/MThesis MLFLOW_ALLOW_FILE_STORE=true OMP_NUM_THREADS=4 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES=0
+export PYTHONPATH=/workspace/MThesis MLFLOW_ALLOW_FILE_STORE=true OMP_NUM_THREADS=4 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES=${GPU:-0}
 export CUDA_MPS_PIPE_DIRECTORY=/tmp/mps_pipe CUDA_MPS_LOG_DIRECTORY=/tmp/mps_log
-G=/workspace/b66/logs; O=/workspace/b66/out
+G=${G:-/workspace/b66/logs}; O=${O:-/workspace/b66/out}   # env overrides G, O, GPU (B69, 2026-10-27)
 MARKER=$1; shift
 until [ -f "$MARKER" ]; do sleep 60; done
 echo "$(date -u +%H:%M) $(basename $MARKER) seen, starting the finals"

@@ -1,4 +1,9 @@
+---
+trigger: always_on
+description: Communication formatting guidelines (plain text and unicode symbols instead of raw LaTeX syntax).
+---
+
 # Communication Style Guidelines
 
 ## Formatting Rules:
-- **No LaTeX Notation**: Do NOT use LaTeX math syntax ($...$, $$, \approx, \times, \to, etc.) because it does not render in the user conversation UI. Use standard text, unicode symbols (≈, ×, ->, ≤, ≥), or simple markdown formatting instead.
+- **No Raw LaTeX Notation in Chat**: Do NOT use raw unrendered LaTeX math syntax (`$...$`, `$$`, `\approx`, `\times`, `\to`, etc.) in the user conversation UI. Use standard text, unicode symbols (`≈`, `×`, `->`, `≤`, `≥`), or simple markdown formatting instead.
