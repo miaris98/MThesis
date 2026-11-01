@@ -48,6 +48,13 @@ The status block below is the only snapshot in this file: replace it, don't appe
 - **Offline Q-Head Check (`model_epoch_017.pth`, 1,591 held-out validation frames, `offline_qhead_check.json`):** Mean L1 error `2.3734`; Spearman rank correlation mean `0.5007` (median `0.6195`); predicted argmax in target top-1 (with ties) `60.8%` (`66.1%` top-3); marginal speed argmax agreement `60.6%`, lateral argmax agreement `95.5%`.
 - **Closed-Loop Smoke on Bench2Drive Route `2664` (`Town12`, `ParkedObstacleTwoWays_1`, Low quality):** Both arms loaded `model_epoch_017.pth` + `frozen_backbone.pth` (`Merged 494 frozen backbone tensors`) and finished cleanly. `a71_q_off` collided with the parked car (`collisions_vehicle: 19.2`, `Failed - TickRuntime`, DS `23.5`, RC `39.1%`); `a71_q_on` (`WOR_QCRITIC="beta=1"`, logged `[A71] Q-critic decode on`) had **0 vehicle collisions** (`collisions_vehicle: 0.0`, `Failed - Agent got blocked`, DS `0.0`).
 
+**2026-11-01 evening: findings, fixes and challenges (commit 7402f39; results on `E:\MThesis_EXP\live_20261101_a71_q1_partial\`).**
+- Route 2664 smoke: Q decode on = 0 collisions but blocked (DS 0) vs off DS 23.5. Causes: (1) the over-speed limit was the expert's target speed, which carries the expert's own wait behind the obstacle, so passing was worth ~0; (2) the decoder picked the lane from the BC-weighted mass (a braking BC judges every column at v = 0) and needed half the mass on one offset; (3) 3 s from standstill is worth ~1 Q unit.
+- Fixes: road cruise speed only for standing obstacles (never red/yellow light incl. IDM queues, walkers, junctions); 4 s terminal value with actors moved on at constant velocity, a post-horizon lane change and a collision if an actor still reaches the stopped ego; drivable mask anchored to the route lane mid-bypass; flat debris (ControlLoss dirtdebris, 0.07 m) not an obstacle; decoder: lane from column values with lat_margin 1 / stay_margin 0.25, confirm_ticks 5, no side-to-side flips, lane-change speed from Q (BC where flat), plain decode on NaN.
+- Real-data smoke (20 Town01 routes, debris fix): 0 errors, safe action 99.3%, expert-action collisions 4.2%. Solver 0.66 s/frame: use --stride 4 (dense 2 on obstacle scenarios) and a CPU box for labels.
+- Challenges: two reviews found label/decoder flaws each round; the 16-thread 5880 Ada box was CPU-bound for labels; the label box was rented and destroyed unused; the E15 baseline lane reached 12/104 routes before the user stopped for the night (no unattended overnight runs). Box total ~$1.40.
+- Next (box run): a71_box_driver.sh setup -> labels (or a71_label_box.sh on a CPU box) -> train -> check (pick lat_margin from decode_* calibration) -> eval_e15 + eval_q on the 104 routes; train_a72 and a73 on the same labels.
+
 **Idea.** Other actors are "on rails": the logs are replayed and never react to the ego car. Only the ego car is simulated, with a fitted kinematic model. A dynamic-programming pass over a discrete action set gives Q(s, a) for every logged frame. The policy is trained toward softmax(Q / T). This is the method of our baseline (WoR) applied to our data and our network.
 
 **Repo state.**
@@ -119,7 +126,14 @@ The status block below is the only snapshot in this file: replace it, don't appe
 - The off-road proxy has no map.
 - The ego model may be poor on extreme actions.
 
-### A72. Design C: offline RL (discrete IQL / CQL) on the logged transitions plus A71's counterfactual actions - **Next** (after A71 step 3)
+### A72. Design C: offline RL (discrete IQL / CQL) on the logged transitions plus A71's counterfactual actions - **Code ready 2026-11-01 (commit 9eb0237), box run pending**
+
+**Code (2026-11-01).** `src/training/offline_rl.py` (expectile V on a Polyak target Q head, Huber TD on Q(s, a_exp), exact CQL over the 40
+actions), a V head on the Qwen policy token, `WOR_TRANSITIONS=1` (each sample also loads the next logged frame, the expert action and the reward
+of its logged step, stored by `build_q_labels.py` for every frame), `train_wor.py --offline_rl iql|cql`, box step `a71_box_driver.sh train_a72`.
+Only the expert's own transitions have a next frame, so TD runs on those; the other 39 actions are shaped by the CQL penalty and A71's labels
+(`--q_critic_loss_weight`, 0.5 in the box step). Evaluation reuses the A71 decoder: IQL's extracted policy pi_BC exp(beta A) equals
+pi_BC exp(beta Q). 12 tests (`tests/test_offline_rl.py`).
 
 **Idea.** Train a critic with an offline-RL loss on transitions labelled with A71's reward. Then push the policy toward high-advantage actions.
 
@@ -154,7 +168,16 @@ So the critic must also see **non-expert actions**: A71's on-rails rollouts give
 
 **Gate:** as A71. **Cost:** Qwen 3-20 GPU-h per seed, about $10-40 for 3 seeds plus evaluations; WoR 12-24 GPU-h per seed, about $15-45.
 
-### A73. Design B: a latent world model on frozen features, with RL in imagination (the EfficientZero V2 machinery on CARLA) - **Later** (start only if A71 or A72 shows the value signal helps)
+### A73. Design B: a latent world model on frozen features, with RL in imagination (the EfficientZero V2 machinery on CARLA) - **Offline code ready 2026-11-01; closed loop only if A71 or A72 shows the value signal helps**
+
+**Code (2026-11-01).** `src/models/world_on_rails/latent_world_model.py` (16 pooled tokens, Qwen 30m trunk or MLP, 5 ensemble heads each with
+its own action embedding, reward / value / 40-action policy heads), `src/training/latent_world_model_train.py` (K = 5 unroll on predicted
+latents against an EMA encoder, n-step value on real rewards, one-step lookahead over all 40 actions with the ensemble-spread penalty plus BC
+0.2, window dataset from the A59 pooled cache and the A72 transition fields), `scripts/training/train_world_model.py` (MLflow, route-level
+validation), `scripts/analysis/a73_world_model_gate.py` (k-step latent error vs a copy baseline, disagreement ratio, reward collapse), box step
+`a71_box_driver.sh a73`. Found while testing: with the action only in the shared trunk the ensemble spread was *lower* on unseen actions (0.075
+vs 0.085); per-member action embeddings give 6.3-7.5x higher spread on unseen actions over 4 seeds. 9 tests (`tests/test_latent_world_model.py`).
+Not built: imagined-rollout actor training beyond the one-step lookahead, and the closed-loop agent.
 
 **Idea.** Learn dynamics, reward and value in the frozen regnety feature space from the logs. Improve the policy with short imagined rollouts or Gumbel search, with a conservatism penalty so the policy cannot exploit model errors. This reuses the Atari agent's components, which would give the thesis one RL method on both benchmarks.
 

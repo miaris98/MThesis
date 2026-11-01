@@ -5,6 +5,7 @@
 #   eval    lanes: E15 | a71q1 off | a71q1 on (Q decode), 104 lead + obstacle routes at Low, the 5 crash routes at Epic
 #   train   E15 epoch 15 -> 20 with the Q head on qcf_v4, E15's recipe
 #   train_a72  TODO A72: the same fine-tune with IQL / CQL on the expert transitions (batch 128: every sample also loads frame k+1)
+#   a73     TODO A73: pooled cache, latent world model, offline gate (no closed loop until A71 / A72 show the value signal helps)
 #   check   offline Q-head check of the trained epochs
 set -uo pipefail
 mkdir -p /workspace/a71; S=/workspace/a71/status
@@ -55,6 +56,18 @@ train_a72)  # TODO A72: same resume and recipe as train, plus IQL / CQL on the e
   mark "TRAIN_A72_${A72_MODE:-iql}_START"
   WOR_Q_MIN_COVERAGE=0.2 $PY -u scripts/training/train_wor.py --data_dir $D --save_dir /workspace/checkpoints/A72_${A72_MODE:-iql} --run_label a72_${A72_MODE:-iql}     --policy_arch qwen30m --backbone regnety_032 --weights_path $E15/frozen_backbone.pth --pretrained 1 --freeze_backbone 1     --img_size 288x768 --crop_bottom_frac 0.0 --vision_grid 4 --route_overlay 1 --route_points 4     --use_augmented_camera 1 --target_speed_loss_weight 0.2 --target_speed_input policy --lateral_loss_weight 3.0 --wp_loss_weight 1.0     --batch_size ${A72_BS:-128} --lr_heads 3e-4 --lr_backbone 1e-4 --grad_clip 5.0 --warmup_frac 0.05 --val_split 0.15 --seed 0     --epochs 50 --stop_epoch 20 --save_freq 1 --val_every 1 --resume_from $E15/model_epoch_015.pth     --q_critic 1 --q_labels qcf_v4 --q_critic_loss_weight ${A72_QLW:-0.5} --offline_rl ${A72_MODE:-iql} --iql_tau 0.7 --rl_gamma 0.95 --cql_alpha 1.0     --num_workers ${NW:-14} --use_mlflow 1 --kill_stale 0 --experiment_name A72_${A72_MODE:-iql} > /workspace/a71/train_a72_${A72_MODE:-iql}.log 2>&1
   mark "TRAIN_A72_EXIT $?" ;;
+a73)  # TODO A73: pooled cache of E15's frozen encoder (E15's image settings), world model (A73_TRUNK qwen|mlp; qwen = 30m), then the offline gate
+  mark "A73_${A73_TRUNK:-qwen}_START"
+  if ! ls /workspace/pooled_e15/*.json > /dev/null 2>&1; then
+    $PY scripts/training/build_pooled_cache.py --data_dir $D --out_dir /workspace/pooled_e15 --backbone regnety_032 --frozen_backbone $E15/frozen_backbone.pth       --img_size 288x768 --crop_bottom_frac 0.0 --route_overlay 1 --route_points 4 --use_augmented_camera 0 --grid 4 --batch_size 128       --num_workers ${NW:-14} --device cuda:0 > /workspace/a71/a73_cache.log 2>&1 || { mark A73_CACHE_FAILED; exit 1; }
+  fi
+  PREFIX=$(ls /workspace/pooled_e15/*.json | head -1); PREFIX=${PREFIX%.json}
+  SIZE=""; [ "${A73_TRUNK:-qwen}" = qwen ] && SIZE="--size 30m"
+  $PY -u scripts/training/train_world_model.py --data_dir $D --pooled_cache $PREFIX --q_labels qcf_v4 --K 5 --trunk ${A73_TRUNK:-qwen} $SIZE     --epochs ${A73_EPOCHS:-10} --batch_size 256 --lr 1e-4 --penalty ${A73_PENALTY:-1} --num_workers ${NW:-14}     --save_dir /workspace/checkpoints/A73_${A73_TRUNK:-qwen} > /workspace/a71/a73_${A73_TRUNK:-qwen}.log 2>&1
+  mark "A73_TRAIN_EXIT $?"
+  CK=$(ls /workspace/checkpoints/A73_${A73_TRUNK:-qwen}/wm_epoch_*.pth | tail -1)
+  $PY scripts/analysis/a73_world_model_gate.py --ckpt $CK --out /workspace/a71/a73_gate_${A73_TRUNK:-qwen}.json > /workspace/a71/a73_gate.log 2>&1
+  mark "A73_GATE_EXIT $? $(grep -o '"gate_pass": [a-z]*' /workspace/a71/a73_gate_${A73_TRUNK:-qwen}.json)" ;;
 check)
   for e in ${EPOCHS:-16 18 20}; do
     f=/workspace/checkpoints/A71_q1/model_epoch_$(printf %03d $e).pth; [ -f $f ] || continue
