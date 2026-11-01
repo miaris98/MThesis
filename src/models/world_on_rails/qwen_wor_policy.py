@@ -27,6 +27,7 @@ from src.models.transformer.layers import RMSNorm, QwenTransformerBlock
 from src.models.world_on_rails.ray_geometry import (
     RAY_GEOMETRY_CHANNELS, append_ray_geometry)
 from src.config.camera import DEFAULT_CROP_BOTTOM_FRAC
+from src.models.world_on_rails.q_critic import QCriticHead, q_decode_speed, q_shift_lateral
 
 # Trunk sizes. The 10m/30m entries exist because the offline dataset is ~9,600 frames:
 # at 100m the trunk carries roughly 11,000 trainable parameters per training sample and
@@ -167,7 +168,8 @@ class QwenWorldOnRailsPolicy(nn.Module):
         token_mode: str = "pool",
         s2d_patch: int = 3,
         token_mask: float = 0.0,
-        qk_norm: bool = False
+        qk_norm: bool = False,
+        use_q_critic: bool = False
     ):
         super().__init__()
         self.num_commands = num_commands
@@ -275,6 +277,9 @@ class QwenWorldOnRailsPolicy(nn.Module):
                 self.path_embed = nn.Linear(self.path_points * 2, self.embed_dim)
                 nn.init.zeros_(self.path_embed.weight)
                 nn.init.zeros_(self.path_embed.bias)
+        # TODO A71: Q(s, speed bin, lateral offset) on the policy token, trained on the counterfactual labels and read by act() under WOR_QCRITIC
+        self.use_q_critic = bool(use_q_critic)
+        self.q_head = QCriticHead(self.embed_dim) if self.use_q_critic else None
 
         trunk_params = sum(p.numel() for p in self.trunk.parameters())
         seq_len = self.num_vision_tokens + 4
@@ -360,6 +365,8 @@ class QwenWorldOnRailsPolicy(nn.Module):
         # comparison stays about the trunk and not about what the speed head could see.
         if self.use_path_head:
             out["path"] = self.path_head(policy_repr).view(B, self.path_points, 2)
+        if self.q_head is not None:
+            out["q_sa"] = self.q_head(policy_repr)
         if self.target_speed_head is not None:
             if self.target_speed_input == "policy":
                 ts_in = policy_repr
@@ -446,6 +453,7 @@ class QwenWorldOnRailsPolicy(nn.Module):
                 from src.agents.safety_layer import SafetyLayer
                 self._safety, self._safety_ready, self._last_brake = SafetyLayer.from_env(), True, 0.0
             probs = out["target_speed_logits"][0].float().softmax(-1).cpu().numpy()
+            target_speed_kmh, probs = q_decode_speed(self, out, probs, target_speed_kmh)        # TODO A71: no-op unless WOR_QCRITIC is set
             if self._safety is not None:
                 tgt_mps, force_brake = self._safety.update(speed_mps, probs, self.target_speed_head.bins.cpu().numpy(), target_speed_kmh / 3.6,
                                                          self._last_brake, getattr(self, "_last_throttle", 0.0))
@@ -466,6 +474,7 @@ class QwenWorldOnRailsPolicy(nn.Module):
                 print("[A15] steering from the predicted path (WOR_PATH_STEER=1)", flush=True)
                 self._path_steer_logged = True
 
+        wps = q_shift_lateral(self, wps, route)                                                  # TODO A71: no-op unless a lateral offset was chosen
         steer, throttle, brake = self.controller.control_from_waypoints(
             waypoints=wps,
             current_speed_kmh=current_speed_kmh,

@@ -175,7 +175,8 @@ def load_wor_model(
             path_cascade=bool(_resolve("path_cascade", None, False)),
             token_mode=str(_resolve("token_mode", None, "pool")),
             s2d_patch=int(_resolve("s2d_patch", None, 3)),
-            qk_norm=bool(_resolve("qk_norm", None, False))
+            qk_norm=bool(_resolve("qk_norm", None, False)),
+            use_q_critic=bool(_resolve("use_q_critic", None, False))     # TODO A71: adds the q_head tensors
         )
 
     if checkpoint_path and os.path.exists(checkpoint_path):

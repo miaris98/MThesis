@@ -20,6 +20,7 @@ from src.models.world_on_rails.wor_policy import WorldOnRailsPolicy
 from src.training.wor_dataset import create_wor_train_val_dataloaders
 from src.training.wor_eval import run_validation, to_device_batch_with_features, waypoint_losses
 from src.models.world_on_rails.aux_heads import target_speed_loss
+from src.models.world_on_rails.q_critic import q_critic_term
 from src.training.wor_checkpoint import (
     CheckpointWriter, best_metric_so_far, load_trainable_state, to_cpu)
 from src.training.wor_optim import build_optimizer, build_warmup_cosine_scheduler
@@ -115,6 +116,7 @@ class WorldOnRailsTrainer:
         target_speed_loss_weight: float = 0.0,
         speed_loss_kwargs: Optional[dict] = None,
         path_loss_weight: float = 0.0,
+        q_critic_loss_weight: float = 0.0,
         grad_clip: float = 5.0,
         warmup_frac: float = 0.05,
         decay_gates_and_norms: bool = False,
@@ -141,6 +143,7 @@ class WorldOnRailsTrainer:
         self.wp_loss_weight = wp_loss_weight
         self.target_speed_loss_weight = target_speed_loss_weight
         self.path_loss_weight = path_loss_weight                  # TODO A15: L1 on the path head's 10 ego-frame points (0 = off)
+        self.q_critic_loss_weight = q_critic_loss_weight          # TODO A71: smooth L1 on the counterfactual Q labels (0 = off)
         self.speed_loss_kwargs = dict(speed_loss_kwargs or {})   # TODO A39: lambda_over / lambda_under of the asymmetric ordinal term
         # Datasets without precomputed Q-values (e.g. PDM-Lite) leave target_q at
         # zero, so q_loss_weight defaults to 0 to avoid supervising toward zero.
@@ -204,6 +207,7 @@ class WorldOnRailsTrainer:
             "use_path_head": bool(getattr(model, "use_path_head", False)),
             "path_cascade": bool(getattr(model, "path_cascade", False)),
             "qk_norm": bool(getattr(model, "qk_norm", False)),  # TODO B67: adds q_norm / k_norm tensors to every trunk block
+            "use_q_critic": bool(getattr(model, "use_q_critic", False)),  # TODO A71: adds the q_head tensors
             "target_speed_input": getattr(model, "target_speed_input", None),
             "use_rail_q": getattr(model, "use_rail_q", None),
             "use_ray_geometry": getattr(model, "use_ray_geometry", None),
@@ -315,7 +319,7 @@ class WorldOnRailsTrainer:
         self.model.train()
         total_loss_accum = 0.0
         q_loss_accum = 0.0
-        aux_accum = {"target_speed": 0.0, "path": 0.0}      # TODO A15 / A39: the auxiliary losses were never in the epoch metrics (MLflow)
+        aux_accum = {"target_speed": 0.0, "path": 0.0, "q_critic": 0.0}      # TODO A15 / A39 / A71: the auxiliary losses were never in the epoch metrics (MLflow)
         wp_loss_accum = 0.0
         ade_accum = 0.0
         fde_accum = 0.0
@@ -381,6 +385,10 @@ class WorldOnRailsTrainer:
                     path_l1 = ((out["path"].float() - tp).abs().sum(-1).mean(-1) * valid).sum() / valid.sum().clamp(min=1.0)
                     total_loss = total_loss + self.path_loss_weight * path_l1
                     losses["path"] = path_l1
+                q_term = q_critic_term(out, batch, self.q_critic_loss_weight, self.device)   # TODO A71
+                if q_term is not None:
+                    total_loss = total_loss + q_term
+                    losses["q_critic"] = q_term / self.q_critic_loss_weight
 
             if self.use_amp:
                 self.scaler.scale(total_loss).backward()
@@ -503,6 +511,7 @@ class WorldOnRailsTrainer:
             "wp_curvature_err": avg_curvature_err,
             "speed_head_loss": aux_accum["target_speed"] / max(1, num_batches),
             "path_loss": aux_accum["path"] / max(1, num_batches),
+            "q_critic_loss": aux_accum["q_critic"] / max(1, num_batches),
             "grad_norm": avg_grad_norm,
             "nonfinite_grad_batches": nonfinite_batches,
             "clipped_grad_batches": clipped_batches,
@@ -653,9 +662,11 @@ class WorldOnRailsTrainer:
                            "lr_backbone", "lr_heads", "samples_per_sec",
                            "data_wait_sec", "compute_sec", "save_sec"]
             scalar_tags += ["wp_heading_err", "wp_curvature_err"]
+            scalar_tags += [k for k, w in (("speed_head_loss", self.target_speed_loss_weight), ("path_loss", self.path_loss_weight),
+                                           ("q_critic_loss", self.q_critic_loss_weight)) if w > 0]
             scalar_tags += [k for k in ("val_loss", "val_wp_ade_m", "val_wp_fde_m",
                                         "val_wp_lateral_error_m", "val_wp_longitudinal_error_m",
-                                        "val_wp_heading_err", "val_wp_curvature_err")
+                                        "val_wp_heading_err", "val_wp_curvature_err", "val_q_critic_loss")
                             if k in metrics]
             for tag in scalar_tags:
                 self.logger.add_scalar(f"wor/{tag}", metrics[tag], epoch)

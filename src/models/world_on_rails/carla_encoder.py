@@ -126,8 +126,12 @@ class CarlaPretrainedEncoder(nn.Module):
         ckpt = torch.load(weights_path, map_location="cpu", weights_only=False)
         state = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
 
+        if isinstance(state, dict) and set(state) == {"model"} and isinstance(state["model"], dict):
+            state = state["model"]                      # a run's own frozen_backbone.pth ({"model": {"encoder.encoder.*": ...}})
         enc = {k[len(_TFPP_IMAGE_PREFIX):]: v
                for k, v in state.items() if k.startswith(_TFPP_IMAGE_PREFIX)}
+        if not enc:
+            enc = {k[len("encoder.encoder."):]: v for k, v in state.items() if k.startswith("encoder.encoder.")}
         if not enc:
             # Also accept an already-extracted encoder-only file.
             enc = {k: v for k, v in state.items() if not k.startswith(("head.", "join.", "loss_"))}

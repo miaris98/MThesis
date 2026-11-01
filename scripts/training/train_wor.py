@@ -165,6 +165,9 @@ def parse_args():
     parser.add_argument("--route_key", type=str, default="route", choices=["route", "route_original"], help="PDM-Lite field for the route points and overlay (TODO A14, S-096). 'route' is bent around obstacles by the expert; 'route_original' is the unshifted plan the leaderboard gives the agent at test time. Only differs on obstacle scenarios (Town12/13). Training-only: evaluation always receives the plan")
     parser.add_argument("--swerve_frac", type=float, default=0.0, help="TODO A16 (arm K): oversample swerve frames - the expert's route shifted >0.5 m off route_original, plus the --swerve_window frames before - to this share of each epoch's draws (with replacement, epoch length unchanged). 0 = off (uniform shuffle, as every arm so far); ~0.1 is the TODO's 'moderate'. Needs obstacle data (Town12/13 archives)")
     parser.add_argument("--swerve_window", type=int, default=8, help="Approach frames before each shifted frame that also count as swerve frames (PDM-Lite logs at ~4 Hz, so 8 is ~2 s)")
+    parser.add_argument("--q_critic", type=int, default=0, help="TODO A71: add the Q-critic head (Q over 8 speed bins x 5 lateral offsets, policy token; qwen heads only). Read at evaluation only under WOR_QCRITIC")
+    parser.add_argument("--q_critic_loss_weight", type=float, default=1.0, help="TODO A71: weight of the smooth-L1 Q-label loss when --q_critic 1")
+    parser.add_argument("--q_labels", type=str, default=None, help="TODO A71: tag of the per-route counterfactual Q label files (<route>/<tag>.npz, scripts/training/build_q_labels.py)")
     return parser.parse_args()
 
 
@@ -176,6 +179,11 @@ def main():
     os.environ["WOR_ANTICIPATE_S"] = str(args.anticipate_s)    # TODO A38 step 1 (read when the dataset indexes routes)
     os.environ["WOR_BRAKE_FRAC"] = str(args.brake_frac)        # TODO A38 step 2 (read by the train loader)
     os.environ["WOR_BRAKE_WINDOW"] = str(args.brake_window)
+    if args.q_critic and (args.policy_arch == "cnn" or not args.q_labels or args.target_speed_loss_weight <= 0):
+        raise SystemExit("--q_critic 1 needs a qwen --policy_arch, --q_labels TAG (scripts/training/build_q_labels.py writes the labels) and the "
+                         "target-speed head (--target_speed_loss_weight > 0): act() reads the Q head only through the speed posterior")
+    if args.q_labels:
+        os.environ["WOR_Q_LABELS"] = args.q_labels             # TODO A71 (read when the dataset indexes routes)
     if args.token_mode == "s2d" and args.pooled_cache:
         raise SystemExit("--token_mode s2d reads the stride-16 level and cannot use --pooled_cache (the cache holds the pooled stride-32 map)")
     if args.pooled_cache:
@@ -333,7 +341,8 @@ def main():
             token_mode=args.token_mode,
             s2d_patch=args.s2d_patch,
             token_mask=args.token_mask,
-            qk_norm=bool(args.qk_norm)
+            qk_norm=bool(args.qk_norm),
+            use_q_critic=bool(args.q_critic)
         )
 
     # 2. Initialize Trainer
@@ -370,6 +379,7 @@ def main():
         target_speed_loss_weight=args.target_speed_loss_weight,
         speed_loss_kwargs={"lambda_over": args.speed_lambda_over, "lambda_under": args.speed_lambda_under},
         path_loss_weight=args.path_loss_weight if args.path_head else 0.0,
+        q_critic_loss_weight=args.q_critic_loss_weight if args.q_critic else 0.0,
         wp_loss_weight=args.wp_loss_weight,
         q_loss_weight=args.q_loss_weight,
         lateral_loss_weight=args.lateral_loss_weight,

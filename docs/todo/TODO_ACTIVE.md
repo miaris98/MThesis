@@ -15,6 +15,198 @@ The status block below is the only snapshot in this file: replace it, don't appe
 
 ---
 
+## New CARLA items, 2026-11-01: A71-A73 (RL on the logged dataset; CARLA used only to evaluate) - Next, top CARLA priority (user, 2026-11-01: "create these as the next top todos ... try both wor and qwen")
+
+**Why.**
+- The thesis is about deep RL in complex environments, but every CARLA result so far is behaviour cloning: Q targets are zero and `--q_loss_weight 0` everywhere.
+- Online RL in CARLA is too slow for the budget: about 4-12 RL steps/s per lane. CaRL-scale PPO (300 M steps) would take about 4 box-months.
+- These three items run the RL **on the PDM-Lite logs**, at dataloader speed, 100-1,000× faster than the simulator. CARLA is used only for the closed-loop score.
+- All three items share one reward, built from the logs. A71 builds that reward first.
+
+**Two arms per item: WoR network and Qwen network.**
+
+| | WoR network | Qwen network |
+|---|---|---|
+| Model | `--policy_arch cnn` (`WorldOnRailsPolicy` / `SpatialQHead`, arm H's network) | `qwen30m` with E15's recipe |
+| Input | the full 9×24 map, so the live encoder or the 279 GB full-map cache | the pooled 4×4 cache (A59, 20 GB, exact for this family) |
+| Trunk | conv head | the trunk is never edited (same-network rule); only heads are added |
+| Prior evidence | arm H (BC) was −15.0 DS against arm E on 19 routes (S-090) | — |
+
+**Rules for every item:**
+- **Gate:** go/no-go on the 106 lead + obstacle routes, one seed, paired against plain E15. Then 220 routes at Low plus the Epic crash-route column, 3 seeds.
+- **Tracking and backups:** MLflow; E: first, then Drive.
+- **Cost reference:** estimates are from the 2026-11-01 session. Prices are $0.25-0.45 per GPU-hour and $1-3 per 220-route evaluation; they cover compute only and assume working code.
+
+**Literature:** WoR (arXiv 2105.00636, code `dotchen/WorldOnRails`), IQL 2110.06169, CQL 2006.04779, TD3+BC 2106.06860, D4RL 2004.07219, Kumar et al. 2204.05618, MuZero Unplugged 2104.06294, ROSMO 2210.05980, MOPO 2005.13239, COMBO 2102.08363, LOMPO 2012.11547, MILE 2210.07729, LAW 2406.08481, Think2Drive 2402.16720, Raw2Drive 2505.16394, DreamerV3 2301.04104.
+
+### A71. Design A: World on Rails Bellman backups on the PDM-Lite logs, distilled into the policy - **In progress (smoke & diagnostics verified 2026-11-01)**
+
+**2026-11-01 Verification Update (branch `feature/offline_rl_qcritic`, saved to `E:\MThesis_EXP\live_20261101_a71_qcritic\` with verified `sha256`):**
+- **Implemented Qwen Q-critic & counterfactual lattice:** `src/training/counterfactual_q.py`, `scripts/training/build_q_labels.py`, `src/models/world_on_rails/q_critic.py` + hooks (`qwen_wor_policy.py`, `wor_trainer.py`, `wor_eval.py`, `wor_dataset.py`, `wor_checkpoint.py`, `wor_loader.py`, `train_wor.py`, `carla_encoder.py`). 54/54 A71 unit tests pass.
+- **Labels (`qcf_v2` -> `qcf_v3`, 89 Town12 `HardBreakRoute` + `ParkedObstacleTwoWays` routes):** 9,920 frames labelled with 0 errors (95.5% coverage); after fixing stationary lateral crab-walk (`s2 == s`), stopped-ego `expert_action_index` lookahead (`ts < 1.0`), swept-check start station (`s_lo = min(s+1, s2)`), follower detection on first visible frame, and `hold = 4` (`1.0 s` matching `act()`'s `hold_ticks = 20`) with `overspeed_margin = 0.5`, **`expert_collision_share` dropped from `0.2435` (`qcf_v2`) to `0.0845` (`qcf_v3`)** and `safe_action_share` rose from `0.9839` to `0.9851` (`spread = 7.34`, `distinct_q = 11.17`, `expert_top3_share = 0.353`).
+- **2-Epoch E15 Fine-Tune Smoke (`A71_smoke`, epochs 16-17, 150 batches/epoch):** Completed cleanly (`FINETUNE_EXIT 0`). `Total Loss` dropped `3.4643 -> 2.4086` (`WP Loss: 0.6121 -> 0.5109`, `q_critic_loss: 2.85 -> 1.90`); held-out `val_q_critic_loss` dropped `2.7077 -> 2.3734`, while waypoint `VAL Loss` (`0.5700 -> 0.5727`) and `VAL ADE` (`0.454 m -> 0.453 m`, `Lat: 0.044 m`) stayed at E15's level.
+- **Offline Q-Head Check (`model_epoch_017.pth`, 1,591 held-out validation frames, `offline_qhead_check.json`):** Mean L1 error `2.3734`; Spearman rank correlation mean `0.5007` (median `0.6195`); predicted argmax in target top-1 (with ties) `60.8%` (`66.1%` top-3); marginal speed argmax agreement `60.6%`, lateral argmax agreement `95.5%`.
+- **Closed-Loop Smoke on Bench2Drive Route `2664` (`Town12`, `ParkedObstacleTwoWays_1`, Low quality):** Both arms loaded `model_epoch_017.pth` + `frozen_backbone.pth` (`Merged 494 frozen backbone tensors`) and finished cleanly. `a71_q_off` collided with the parked car (`collisions_vehicle: 19.2`, `Failed - TickRuntime`, DS `23.5`, RC `39.1%`); `a71_q_on` (`WOR_QCRITIC="beta=1"`, logged `[A71] Q-critic decode on`) had **0 vehicle collisions** (`collisions_vehicle: 0.0`, `Failed - Agent got blocked`, DS `0.0`).
+
+**Idea.** Other actors are "on rails": the logs are replayed and never react to the ego car. Only the ego car is simulated, with a fitted kinematic model. A dynamic-programming pass over a discrete action set gives Q(s, a) for every logged frame. The policy is trained toward softmax(Q / T). This is the method of our baseline (WoR) applied to our data and our network.
+
+**Repo state.**
+- `RailsDynamicProgramming` (`src/models/world_on_rails/world_model.py`) is a **stub**. It backs up `max_a' Q(t+1)` along the logged trajectory only: there is no ego model and no state lattice, and the "adjacent rails" comment is not implemented. It needs rewriting.
+- Q targets for PDM-Lite are zeros (`wor_dataset.py:512`).
+- The Qwen `rail_head` has 9 outputs. Resuming E15 accepts only the new `path_head.` and `path_embed.` tensors (`wor_checkpoint.py`), so a new Q head must be whitelisted.
+
+**Steps.**
+1. **Ego model.**
+   - Fit a kinematic bicycle model (learned wheelbases, steer gain, linear throttle→acceleration, constant brake) on PDM-Lite pose and control sequences.
+   - Check it on held-out routes, including hard steering and braking. WoR fit on 2,400 random-action frames, and expert-only logs cover a narrow action range.
+   - If the error on extreme actions is high, collect about 2,400 random-action frames in CARLA (minutes of simulator time; ego only, no RL rollouts).
+2. **Reward from the logs.**
+   - Route and target reward: lateral and heading error to the 20-point route, and speed against the expert's `target_speed`.
+   - "Free" mask, in place of a collision term (as in WoR): the future boxes of actors along their logged tracks (IDs persist between frames). Off-road is approximated as lateral distance from the route above about half a lane, because PDM-Lite has no HD map.
+   - Stop reward: `light_hazard`, `stop_sign_hazard`, and vehicle or walker hazard.
+   - Brake bonus.
+   - Reuse the one-dimensional counterfactual in `scripts/analysis/pdm_lite_label_audit.py`.
+3. **Solver.** Rewrite the solver as WoR's `rails/bellman.py`:
+   - a value grid around each logged frame;
+   - backups over the action set, with linear interpolation;
+   - Q multiplied by the free mask.
+
+   Run it offline on CPU over arm J's 427k frames and store `q_values` per frame. Sanity checks before any training:
+   - the expert's own action ranks in the top 3 of Q in most frames;
+   - argmax-Q actions are collision-free on frames with a lead vehicle.
+4. **Heads.**
+   - **Qwen:** a 28-action Q / policy head on the policy token.
+   - **WoR:** `SpatialQHead` re-targeted to the 28 actions.
+   - Loss: KL(softmax(Q / T) ‖ policy). Keep the waypoint and target-speed losses at E15's weights.
+5. **Two ways to act** (one arm each):
+   - (a) **act-from-Q**, as WoR does: expected steer and throttle under the policy, brake if π_brake ≥ 0.5;
+   - (b) **waypoints + PID as now**, with the Q head as an auxiliary loss only.
+6. **Arms.**
+   - **A71-Q1:** E15 fine-tuned for 5 epochs with the Q head.
+   - **A71-Q2:** Qwen from scratch for 20 epochs (only if Q1 passes the offline checks).
+   - **A71-W:** WoR network from scratch for 20 epochs, which is arm H plus Q distillation. Compare it against arm H and the released WoR.
+   - **Ablation:** r_stop 0.1 vs 0.01 (WoR's code and paper disagree).
+
+**Starting hyperparameters** (sources: WoR paper App. A/D/E and Table 9; code `config.yaml`, `rails/bellman.py`, `rails/rails.py`; checked against the code 2026-11-01)
+
+| Parameter | Start value | Source / note |
+|---|---|---|
+| Planning rate | 4 Hz (PDM-Lite logs at about 4 Hz) | WoR: action repeat 5 at 20 FPS, so 4 FPS |
+| Backup horizon | H = 5 (1.25 s) | `num_plan: 5` |
+| Discount | γ = 1 (finite H) | `bellman.py` has no discount |
+| Value grid | 96×96 positions at 1/3 m; 5 headings over ±95° | WoR §4 |
+| Speed grid | **our change:** 0-20 m/s on the 8 TF++ bins (`aux_heads.TARGET_SPEEDS`) | WoR: 4 bins over 0-8 m/s, too slow for PDM-Lite |
+| Actions | 28 (9 steer × 3 throttle + 1 brake) | WoR §4 |
+| Ego model | Adam lr 1e-2, batch 128, 100 epochs, 10-step autoregressive L1 on position and cos/sin of yaw | App. A; `train_phase0.py` uses Adam (the paper says SGD) |
+| Rewards | +1 in the target lane, speed and heading, falling smoothly; r_stop = 0.1; brake bonus +5 at t = 0 only; free mask in place of a collision penalty | code; the paper gives r_stop = 0.01 (ablate) |
+| Target speed | **our change:** PDM-Lite `target_speed` | WoR: fixed 6.0 / 6.5 m/s |
+| Q → target | softmax(Q / 0.01) | `temperature: 0.01` |
+| Distillation | KL over all speed bins (WoR's Table 4 ablation favours supervising all); Adam 3e-4, batch 128, 20 epochs | Table 9; we keep E15's AdamW 3e-4, batch 256, for comparability |
+
+**Gate.**
+- **Offline:** the sanity checks in step 3, and validation waypoint ADE no worse than E15 for arm (b).
+- **Closed loop:** at least +5 DS over E15 on the 106 routes, or a lead or obstacle subgroup gain whose interval excludes 0. Then 220 routes × 3 seeds.
+
+**Cost:** the solver pass on CPU is about $1-2, run once and shared by A72 and A73.
+
+| Arm | Per seed | 3 seeds plus evaluations |
+|---|---|---|
+| Qwen | 1-6 GPU-h; the fine-tune is about 1.5 GPU-h, under $1 | about $5-20 |
+| WoR | about 6 GPU-h with the live encoder | about $8-20 |
+
+**Risks.**
+- The on-rails assumption breaks where we are weak: lead vehicles braking, cut-ins, yielding.
+- The off-road proxy has no map.
+- The ego model may be poor on extreme actions.
+
+### A72. Design C: offline RL (discrete IQL / CQL) on the logged transitions plus A71's counterfactual actions - **Next** (after A71 step 3)
+
+**Idea.** Train a critic with an offline-RL loss on transitions labelled with A71's reward. Then push the policy toward high-advantage actions.
+
+**The known trap:** with expert-only data, offline RL tends to match BC at best.
+- D4RL CARLA: BC 31.8 vs CQL 20.9 on carla-lane.
+- Kumar et al. 2022: offline RL beats BC on expert data only with few critical states, sparse rewards or noisy data.
+- arXiv 2512.18662 beats IL only with noisy behaviour data.
+
+So the critic must also see **non-expert actions**: A71's on-rails rollouts give, for every frame, the reward and next state of all 27 non-expert actions.
+
+**Steps.**
+1. **Dataset:** expert transitions plus A71's counterfactual (s, a, r, s') per frame. Rewards are normalised to about [−1, 1].
+2. **Discrete IQL first** (no out-of-distribution action queries), then **discrete CQL** with exact logsumexp over the 28 actions as the second arm.
+3. **Arms.**
+   - **A72-Q:** Qwen trunk shared by the Q, V and policy heads. If the shared trunk is unstable, try separate trunks (about 3× the cost).
+   - **A72-W:** WoR conv head with Q, V and policy outputs.
+   - Control as in A71: (a) act-from-policy, (b) auxiliary only.
+4. **Comparisons:** against E15 (BC) and A71 on the same frames. A72 counts only if it beats both.
+
+**Starting hyperparameters**
+
+| Parameter | Start value | Source |
+|---|---|---|
+| Discount | γ = 0.9-0.95 per 0.25 s step (at 4 Hz, 0.99 would be a horizon of about 25 s) | driving offline RL: 0.9 (2512.18662), 0.95 (2508.07029); BC-SAC 0.92 |
+| IQL expectile τ | 0.7 | IQL App. B (MuJoCo, Kitchen/Adroit) |
+| IQL inverse temperature β | 0.5-3 (sweep 0.5, 3) | IQL: 0.5 for narrow human data, 3 for MuJoCo |
+| IQL advantage weight | exp(A) clipped at 100 | IQL App. B |
+| CQL α | 1 (sweep 0.5-4) | CQL App. F, Atari / QR-DQN range |
+| Target network | Polyak 0.005 | IQL, TD3+BC |
+| Optimiser | critic Adam 3e-4; actor 3e-5 (CQL) or cosine schedule (IQL) | CQL App. F, IQL App. B |
+| BC fallback | TD3+BC-style α = 2.5 with λ = α / mean\|Q\| as a third arm | TD3+BC Table 4 |
+
+**Gate:** as A71. **Cost:** Qwen 3-20 GPU-h per seed, about $10-40 for 3 seeds plus evaluations; WoR 12-24 GPU-h per seed, about $15-45.
+
+### A73. Design B: a latent world model on frozen features, with RL in imagination (the EfficientZero V2 machinery on CARLA) - **Later** (start only if A71 or A72 shows the value signal helps)
+
+**Idea.** Learn dynamics, reward and value in the frozen regnety feature space from the logs. Improve the policy with short imagined rollouts or Gumbel search, with a conservatism penalty so the policy cannot exploit model errors. This reuses the Atari agent's components, which would give the thesis one RL method on both benchmarks.
+
+**Prior art:**
+- Raw2Drive (RL with a world model on Bench2Drive) reports **71.36 DS** in its paper (Table 5). The leaderboard lists it at 74.36.
+- Think2Drive needed about 3 A6000-days *with a simulator*.
+- Raw2Drive took 64 H800-days, with a privileged world model.
+- None of these is offline-only.
+
+**Steps.**
+1. **Model.**
+   - A deterministic transition model over the frozen features: the 16 pooled tokens for Qwen, or the pooled map for WoR.
+   - Trained to predict the next frame's frozen features (latent L2 or SimSiam, weight 1, as in LAW), with no pixel reconstruction (MILE sets the image weight to 0).
+   - Reward, value and continue heads, with A71's reward as the target.
+2. **Ensemble.** 5 dynamics heads on a shared trunk (LOMPO style). Penalty = λ × ensemble spread on imagined rewards.
+3. **Policy improvement.** Either:
+   - short imagined rollouts (h = 5) plus a value bootstrap; or
+   - Gumbel search with the logged action at the root (prior 0.25, MuZero Unplugged).
+
+   Keep a BC or regularisation term because the data are expert (ROSMO α = 0.2).
+4. **Arms.**
+   - **A73-Q:** Qwen trunk as the representation / prediction function. Atari's `pred` layout is the closest code (B69); the B66/B67 lessons apply (QK-norm, AdamW ≤ 1e-4, warm-up, clipping).
+   - **A73-W:** conv dynamics on the pooled map.
+5. **Offline gate before any CARLA run:**
+   - 5-step latent prediction error on held-out routes;
+   - ensemble disagreement that rises on counterfactual actions (as it should);
+   - no reward-model collapse.
+
+**Starting hyperparameters**
+
+| Parameter | Start value | Source |
+|---|---|---|
+| Unroll | K = 5 (1.25 s at 4 Hz) | MuZero Unplugged, ROSMO, our EZ port; LAW's best horizon is 1.5 s |
+| Training windows | 12 frames (3 s); observation dropout 0.25 | MILE: T = 12 at 5 Hz, dropout 0.25 |
+| Imagination horizon | h = 5, then the value bootstrap | MOPO / COMBO image tasks (not DreamerV3's 15, which was tuned with a simulator) |
+| TD | n = 5, λ = 0.95 | MuZero Unplugged; DreamerV3 |
+| Discount | 0.98-0.99 per step | ROSMO 0.997⁴ ≈ 0.988 |
+| Conservatism | 5-head ensemble, reward penalty λ ∈ {1, 5}; or COMBO β ∈ {0.5, 1, 5} | MOPO G.2, LOMPO, COMBO App. B |
+| Reanalyse | 100% | MuZero Unplugged |
+| Real-data fraction | f = 0.5 | COMBO default |
+| Optimiser | world model AdamW 1e-4 (weight decay 0.01); policy 3e-5 | MILE Table 10; DreamerV3 Table W.1; Raw2Drive App. C.3 |
+| Batch | 256-512 windows | ROSMO 512; our EZ port 256 |
+
+**Cost:** Qwen 25-60 GPU-h per seed, about $40-170 for 3 seeds plus evaluations, including 2-3 debugging runs. WoR 15-40 GPU-h per seed, about $25-110, with the large map cache.
+
+**Risks:**
+- model exploitation;
+- the logs hold almost only expert actions (A71's counterfactual actions help);
+- the most engineering of the three items.
+
+---
+
 ## Status: 2026-10-05 evening Athens (S-125 to S-129) - **all boxes destroyed after verified saves (box 3 ~15:25, boxes 2 and 4 ~16:45); no box is running; today's results are on E: (`live_20261005_*`, `analysis_20261005`) and on the HF relay (`results_20261005/`)**
 
 | Item | Result |

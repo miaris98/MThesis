@@ -23,6 +23,9 @@ from torch.utils.data import Dataset
 
 from src.config.camera import preprocess_rgb
 from src.training.swerve import anticipated_targets, brake_onset_flags, route_shift, swerve_flags
+from src.training.counterfactual_q import QConfig, check_q_label_coverage, load_q_labels
+
+Q_ROW = len(QConfig().speed_targets) * len(QConfig().lat_targets)       # TODO A71: one flattened Q label (8 speed bins x 5 lateral offsets)
 
 
 def _camera_offset_matrix(translation_y: float, rotation_yaw_deg: float) -> np.ndarray:
@@ -192,6 +195,7 @@ class WorldOnRailsDataset(Dataset):
         else:
             self.is_synthetic = False
             self._index_dataset()
+            check_q_label_coverage(self.samples, os.environ.get("WOR_Q_LABELS"))     # TODO A71: a wrong tag must not train the head on nothing
 
     def _index_dataset(self):
         """Indexes all trajectory frames in the dataset directory (recursively, to
@@ -305,6 +309,7 @@ class WorldOnRailsDataset(Dataset):
         _ant_k = int(round(float(os.environ.get("WOR_ANTICIPATE_S", "0") or 0) * 4))
         _ant = anticipated_targets(_ts, _ant_k)
         _onset = brake_onset_flags(_ts, int(os.environ.get("WOR_BRAKE_WINDOW", "8")))
+        _qlab = load_q_labels(route_dir, os.environ.get("WOR_Q_LABELS"))    # TODO A71: counterfactual Q labels by frame id ({} = none)
 
         for i in range(5, num_frames - pred_len - 2):
             cur = parsed[i]
@@ -341,7 +346,8 @@ class WorldOnRailsDataset(Dataset):
                 "waypoints": waypoints,
                 "swerve": bool(swerve[i]),
                 "brake_onset": bool(_onset[i]),
-                "path": cur["path"]
+                "path": cur["path"],
+                "qsa": _qlab.get(frame_id)        # labelled from the true ego pose: the recovery-camera sample below gets none
             })
 
             # Recovery-augmentation sample: a second, genuinely re-rendered camera at this
@@ -554,7 +560,10 @@ class WorldOnRailsDataset(Dataset):
 
         # TODO A15: path label (10 x 2, ego frame of this camera) and its validity; zeros + 0 where a frame carries no 20-point route
         _path = None if self.is_synthetic else self.samples[idx].get("path")
+        _qsa = None if self.is_synthetic else self.samples[idx].get("qsa")        # TODO A71
         sample = {
+            "target_qsa": torch.as_tensor(_qsa if _qsa is not None else np.zeros(Q_ROW), dtype=torch.float32),
+            "qsa_valid": torch.tensor(1.0 if _qsa is not None else 0.0, dtype=torch.float32),
             "target_path": torch.as_tensor(np.array(_path if _path else np.zeros((10, 2)), dtype=np.float32), dtype=torch.float32),
             "path_valid": torch.tensor(1.0 if _path else 0.0, dtype=torch.float32),
             "speed": speed_tensor,

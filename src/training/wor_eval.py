@@ -10,6 +10,8 @@ import time
 import torch
 import torch.nn.functional as F
 
+from src.models.world_on_rails.q_critic import q_critic_term
+
 
 def waypoint_losses(
     out: Dict[str, torch.Tensor],
@@ -216,6 +218,7 @@ def run_validation(
     acc = {"loss": 0.0, "ade": 0.0, "fde": 0.0, "lat": 0.0, "lon": 0.0,
            "heading": 0.0, "curvature": 0.0}
     n = 0
+    q_sum, q_rows = 0.0, 0.0                      # TODO A71: held-out Q-label loss, a diagnostic outside val_loss (same reasoning as heading)
 
     for batch_idx, batch in enumerate(val_loader):
         if max_batches and batch_idx >= max_batches:
@@ -234,12 +237,18 @@ def run_validation(
         acc["heading"] += losses["heading"].item()
         acc["curvature"] += losses["curvature"].item()
         n += 1
+        term = q_critic_term(out, batch, 1.0, device)
+        if term is not None:
+            rows = float(batch["qsa_valid"].sum())
+            q_sum, q_rows = q_sum + float(term) * rows, q_rows + rows
 
     if was_training:
         model.train()
 
     d = max(1, n)
+    q_diag = {"val_q_critic_loss": q_sum / q_rows} if q_rows > 0 else {}
     return {
+        **q_diag,
         "val_loss": acc["loss"] / d,
         "val_wp_ade_m": acc["ade"] / d,
         "val_wp_fde_m": acc["fde"] / d,
