@@ -4,6 +4,7 @@ The Gemini review of 2026-11-01 found that `rail_head` is trained but never read
 single closed-loop route. These tests pin the opposite: the head exists only when asked for, its labels and loss mask frames without a label,
 the plain decode is untouched unless WOR_QCRITIC is set, and with it set the Q values move both the commanded speed and the lateral offset.
 """
+import dataclasses
 import gzip
 import json
 import os
@@ -16,6 +17,7 @@ from src.models.world_on_rails.q_critic import (
     LAT_TARGETS, QCriticHead, decode_with_q, parse_qcritic_env, q_critic_loss, q_critic_term)
 from src.models.world_on_rails.qwen_wor_policy import QwenWorldOnRailsPolicy
 from src.models.world_on_rails.aux_heads import TARGET_SPEEDS
+from src.training.counterfactual_q import QConfig
 
 KW = dict(backbone_name="resnet18", pretrained=False, model_size="10m", vision_grid=4, use_target_speed=True, route_points=4)
 NV, ND = len(TARGET_SPEEDS), len(LAT_TARGETS)
@@ -93,8 +95,8 @@ def test_decode_moves_speed_and_lateral_offset_toward_high_q():
 def test_env_parsing():
     assert parse_qcritic_env(None) is None and parse_qcritic_env("") is None
     assert parse_qcritic_env("0") is None and parse_qcritic_env("off") is None
-    cfg = parse_qcritic_env("beta=2,lat_sigma=1.5,lat_threshold=0.6,lateral=0,hold_ticks=10")
-    assert cfg["beta"] == 2.0 and cfg["lat_sigma"] == 1.5 and cfg["lat_threshold"] == 0.6 and cfg["lateral"] == 0.0 and cfg["hold_ticks"] == 10
+    cfg = parse_qcritic_env("beta=2,lat_margin=1.5,lateral=0,hold_ticks=10")
+    assert cfg["beta"] == 2.0 and cfg["lat_margin"] == 1.5 and cfg["lateral"] == 0.0 and cfg["hold_ticks"] == 10
     assert parse_qcritic_env("beta=1")["lateral"] == 1.0         # defaults fill in
     with pytest.raises(ValueError):
         parse_qcritic_env("beta=1,lat_thresh=0.9")               # a typo must not silently fall back to the default
@@ -150,7 +152,7 @@ def test_lateral_choice_is_held_for_hold_ticks(monkeypatch):
     right[:, LAT_TARGETS.index(3.5)] = 10.0
     centre = torch.zeros(NV, ND)
     centre[:, LAT_TARGETS.index(0.0)] = 10.0
-    _act(m, monkeypatch, "beta=5,hold_ticks=3")
+    _act(m, monkeypatch, "beta=5,hold_ticks=3,confirm_ticks=1")
     lats = []
     for k in range(6):
         with torch.no_grad():
@@ -214,13 +216,29 @@ def test_act_reads_the_q_head_when_switched_on(monkeypatch):
         bias = torch.zeros(NV, ND)
         bias[:, LAT_TARGETS.index(3.5)] = 10.0                   # Q says: move one lane right
         m.q_head.net[-1].bias.copy_(bias.reshape(-1))
-    right = _act(m, monkeypatch, "beta=5")
+    right = _act(m, monkeypatch, "beta=5,confirm_ticks=1")
     ramp = np.minimum(3.5, off["wps"][:, 1] + 1.75 * 0.25 * (np.arange(5) + 1))      # straight route: the normal is +y; at most lat_rate * t_k
     assert np.allclose(right["wps"][:, 1], ramp, atol=1e-4)
     assert np.allclose(right["wps"][:, 0], off["wps"][:, 0], atol=1e-4)
     assert m.last_debug["q_lat"] == 3.5 and m.last_debug["q_sa"].shape == (NV, ND)
-    no_lat = _act(m, monkeypatch, "beta=5,lateral=0")
+    no_lat = _act(m, monkeypatch, "beta=5,lateral=0,confirm_ticks=1")
     assert np.allclose(no_lat["wps"], off["wps"], atol=1e-6)
+
+
+def test_per_tick_decode_log_is_written_only_when_asked(monkeypatch, tmp_path):
+    """Route 2664 could not be diagnosed after the fact: nothing recorded what the decoder chose each tick."""
+    torch.manual_seed(0)
+    m = QwenWorldOnRailsPolicy(**KW, use_q_critic=True).eval()
+    log = tmp_path / "decode.jsonl"
+    monkeypatch.delenv("WOR_QCRITIC_LOG", raising=False)
+    _act(m, monkeypatch, "beta=1")
+    assert not log.exists()
+    monkeypatch.setenv("WOR_QCRITIC_LOG", str(log))
+    _act(m, monkeypatch, "beta=1")
+    _act(m, monkeypatch, "beta=1", keep_state=True)
+    rows = [json.loads(x) for x in log.read_text().splitlines()]
+    assert len(rows) == 2 and rows[1]["tick"] == rows[0]["tick"] + 1
+    assert {"q_lat", "q_cand", "lock_left", "q_v", "v_lat", "q_sa"} <= set(rows[0]) and len(rows[0]["q_sa"]) == NV
 
 
 # ---------------------------------------------------------------- resume and loader
@@ -266,7 +284,7 @@ def _write_route(root, n=14):
         Image.fromarray(np.zeros((32, 64, 3), np.uint8)).save(rd / "rgb" / f"{fid}.jpg")
     q = np.arange(n * NV * ND, dtype=np.float32).reshape(n, NV, ND)
     q[n - 3:] = np.nan
-    np.savez(rd / "qlab_test.npz", frame=np.array([f"{i:04d}" for i in range(n)]), q=q)
+    np.savez(rd / "qlab_test.npz", frame=np.array([f"{i:04d}" for i in range(n)]), q=q, config=json.dumps(dataclasses.asdict(QConfig())))
     return rd, q
 
 
@@ -332,3 +350,111 @@ def test_dataset_without_the_switch_emits_invalid_labels(tmp_path, monkeypatch):
     ds = WorldOnRailsDataset(data_dir=str(tmp_path), img_size=(32, 64), cache_decoded=False)
     s = ds[0]
     assert float(s["qsa_valid"]) == 0.0 and s["target_qsa"].shape == (NV * ND,)
+
+
+def _labels_with_config(rd, tag, cfg_dict):
+    rd.mkdir(exist_ok=True)
+    np.savez(rd / f"{tag}.npz", frame=np.array(["0000"]), q=np.zeros((1, NV, ND), np.float32), config=json.dumps(cfg_dict))
+
+
+def test_label_file_built_with_another_hold_or_margin_is_rejected(tmp_path):
+    """A stale tag (e.g. qcf_v2: hold 8, no overspeed_margin) used to load silently because only the action grid was compared."""
+    import dataclasses
+    from src.training.counterfactual_q import QConfig, load_q_labels
+    good = dataclasses.asdict(QConfig())
+    _labels_with_config(tmp_path / "ok", "t", good)
+    assert len(load_q_labels(str(tmp_path / "ok"), "t")) == 1
+    for key, val in (("hold", 8), ("margin", 0.3), ("gamma", 0.9), ("horizon", 8)):
+        _labels_with_config(tmp_path / key, "t", {**good, key: val})
+        with pytest.raises(ValueError, match=key):
+            load_q_labels(str(tmp_path / key), "t")
+    old = {k: v for k, v in good.items() if k != "overspeed_margin"}      # written before the field existed
+    _labels_with_config(tmp_path / "old", "t", old)
+    with pytest.raises(ValueError, match="overspeed_margin"):
+        load_q_labels(str(tmp_path / "old"), "t")
+
+
+def test_label_file_without_a_config_is_rejected(tmp_path):
+    from src.training.counterfactual_q import load_q_labels
+    rd = tmp_path / "r"
+    rd.mkdir()
+    np.savez(rd / "noc.npz", frame=np.array(["0000"]), q=np.zeros((1, NV, ND), np.float32))
+    with pytest.raises(ValueError, match="config"):
+        load_q_labels(str(rd), "noc")
+
+
+def test_lane_change_needs_lat_margin_of_column_value():
+    bins = np.array(TARGET_SPEEDS)
+    q = np.zeros((NV, ND))
+    q[:, LAT_TARGETS.index(-1.75)] = 0.9
+    assert decode_with_q(_probs(10.0), q, bins, beta=1.0, lat_margin=1.0)[1] == 0.0
+    q[3, LAT_TARGETS.index(-1.75)] = 1.1                          # one speed in the left lane is worth more than the margin
+    assert decode_with_q(_probs(10.0), q, bins, beta=1.0, lat_margin=1.0)[1] == -1.75
+    assert decode_with_q(_probs(10.0), q, bins, beta=1.0, lat_margin=1.5)[1] == 0.0
+
+
+# ---------------------------------------------------------------- review 2026-11-01 evening: hysteresis on value, no sign flips, speed in a lane change
+
+def test_shifted_car_stays_while_the_side_is_better_and_returns_without_a_margin():
+    bins = np.array(TARGET_SPEEDS)
+    q = np.zeros((NV, ND))
+    q[:, LAT_TARGETS.index(-3.5)] = 2.0
+    q[:, LAT_TARGETS.index(0.0)] = 1.5                            # still beside the obstacle: the side is better, but by less than the margin
+    assert decode_with_q(_probs(8.0), q, bins, beta=1.0, lat_margin=1.0, current_d=-3.5)[1] == -3.5
+    q[:, LAT_TARGETS.index(0.0)] = 2.1                            # past it: the own lane is best again
+    assert decode_with_q(_probs(8.0), q, bins, beta=1.0, lat_margin=1.0, current_d=-3.5)[1] == 0.0
+
+
+def test_no_direct_flip_from_one_side_to_the_other():
+    bins = np.array(TARGET_SPEEDS)
+    q = np.zeros((NV, ND))
+    q[:, LAT_TARGETS.index(3.5)] = 5.0
+    assert decode_with_q(_probs(8.0), q, bins, beta=1.0, current_d=-3.5)[1] == 0.0
+
+
+def test_lane_change_speed_is_the_lowest_near_best_bin_not_a_softmax_over_ties():
+    """Review: with bins >= 10 m/s tied (unreachable within the hold) softmax(Q) commanded 13 m/s against an expert target of 8, and an all-zero Q
+    column 11 m/s."""
+    bins = np.array(TARGET_SPEEDS)
+    q = np.zeros((NV, ND))
+    q[:, LAT_TARGETS.index(-3.5)] = [1.70, 2.34, 3.38, 3.23, 3.23, 3.23, 3.23, 3.23]
+    q[:, LAT_TARGETS.index(0.0)] = -5.0
+    v, d, _ = decode_with_q(_probs(0.0), q, bins, beta=1.0)
+    assert d == -3.5 and v == pytest.approx(8.0)
+    v, _, _ = decode_with_q(_probs(8.0), np.zeros((NV, ND)), bins, beta=1.0, forced_d=-3.5)
+    assert v == pytest.approx(8.0)                               # a flat column: BC decides (it also stops for a red light while shifted)
+    v, _, _ = decode_with_q(_probs(0.0), np.zeros((NV, ND)), bins, beta=1.0, forced_d=-3.5)
+    assert v == 0.0
+
+
+def test_a_one_tick_candidate_does_not_move_the_car(monkeypatch):
+    torch.manual_seed(0)
+    m = QwenWorldOnRailsPolicy(**KW, use_q_critic=True).eval()
+    with torch.no_grad():
+        bias = torch.zeros(NV, ND)
+        bias[:, LAT_TARGETS.index(3.5)] = 10.0
+        m.q_head.net[-1].bias.copy_(bias.reshape(-1))
+    _act(m, monkeypatch, "beta=5,confirm_ticks=3")
+    assert m.last_debug["q_lat"] == 0.0 and m.last_debug["q_cand"] == 3.5
+    _act(m, monkeypatch, "beta=5,confirm_ticks=3", keep_state=True)
+    assert m.last_debug["q_lat"] == 0.0
+    _act(m, monkeypatch, "beta=5,confirm_ticks=3", keep_state=True)
+    assert m.last_debug["q_lat"] == 3.5                          # the third agreeing tick commits
+
+
+def test_a_shifted_car_returns_unless_its_offset_beats_the_lane_by_the_stay_margin():
+    bins = np.array(TARGET_SPEEDS)
+    q = np.zeros((NV, ND))
+    q[:, LAT_TARGETS.index(-3.5)], q[:, LAT_TARGETS.index(-1.75)], q[:, LAT_TARGETS.index(0.0)] = 0.30, 0.35, 0.20
+    assert decode_with_q(_probs(8.0), q, bins, beta=1.0, current_d=-3.5, stay_margin=0.25)[1] == 0.0       # review: it used to stay at -3.5
+    q[:, LAT_TARGETS.index(-3.5)] = 1.0
+    assert decode_with_q(_probs(8.0), q, bins, beta=1.0, current_d=-3.5, stay_margin=0.25)[1] == -3.5
+
+
+def test_non_finite_q_falls_back_to_the_plain_decode():
+    bins = np.array(TARGET_SPEEDS)
+    q = np.zeros((NV, ND))
+    q[2, 1] = np.nan
+    probs = _probs(8.0)
+    v, d, dbg = decode_with_q(probs, q, bins, beta=1.0)
+    assert d == 0.0 and v == pytest.approx(float((probs * bins).sum())) and dbg.get("nonfinite")

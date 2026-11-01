@@ -4,19 +4,28 @@ The head predicts Q(s, a) over the counterfactual action grid of src/training/co
 `LAT_TARGETS` lateral offsets from the route. It is trained by regression on those labels (Q distillation, as World on Rails distils its
 Bellman table). At evaluation it is read only when WOR_QCRITIC is set:
 
-    pi(v, d | s)  proportional to  pi_BC(v | s) * prior(d) * exp(beta * Q(s, v, d))
+    d = argmax_d max_v Q(s, v, d) if it beats the own lane by lat_margin, else 0;   pi(v | d)  proportional to  pi_BC(v | s) * exp(beta * Q(s, v, d))
 
-pi_BC(v) is the speed head's softmax; prior(d) favours the own lane (exp(-|d| / lat_sigma)), because the network has no lateral head of its own.
-The lateral offset is chosen first: the car leaves its lane only when the lateral marginal puts at least `lat_threshold` on one offset, and a
-chosen offset is then held for `hold_ticks` agent ticks (20 = 1 s at 20 Hz, the label's own commitment) so the aim point cannot flicker. The
-commanded speed is the mean of pi(v | executed d), never the average over lane changes the car does not make (review 2026-11-01). The waypoints
+pi_BC(v) is the speed head's softmax. The lateral offset is chosen first, from each column's value V(d) = max_v Q(s, v, d): the car leaves its
+lane only for an offset worth at least `lat_margin` (Q units; one step of full-speed progress = 1) more than the offset it drives, returns as
+soon as its own lane is the best column, never crosses from one side to the other directly, and commits to a new offset only after
+`confirm_ticks` agreeing ticks; a chosen offset is then held for `hold_ticks` agent ticks (20 = 1 s at 20 Hz). The commanded speed is the mean of
+pi(v | executed d), never the average over lane changes the car does not make (review 2026-11-01): pi_BC(v) exp(beta Q(s, v, d)) in lane; in a
+lane change, whose speed BC never planned (its posterior is for the in-lane plan: stop behind the parked car), the bin closest to BC's speed
+among those within SPEED_TOL of the column's best (a softmax over Q drove the tied, unreachable fast bins: 13 m/s against an expert target of 8;
+where the column is flat, BC decides, red lights included).
+Until 2026-11-01 evening the offset was the argmax of the BC-weighted lateral marginal times an own-lane prior, which needed half the mass on one
+offset: on route 2664 the car stopped behind the parked car for good (a braking BC judges every column at v = 0, where passing and stopping tie,
+and two free side lanes split the mass). The waypoints
 of a shifted choice move along the route normal by their residual to the target offset (offsets are measured from the route, as in the labels),
 at most the label's lateral rate times their time ahead. beta = 0 passes the plain decode through unchanged.
 
-    WOR_QCRITIC="beta=1,lat_sigma=1,lat_threshold=0.5,lateral=1,hold_ticks=20,lat_rate=1.75"   (unset, "" or "0" = the plain decode, bit-identical)
+    WOR_QCRITIC="beta=1,lat_margin=1,stay_margin=0.25,lateral=1,hold_ticks=20,confirm_ticks=5,lat_rate=1.75"   (unset, "" or "0" = the plain decode, bit-identical)
+    WOR_QCRITIC_LOG=/path/decode.jsonl                                          (optional: one JSON line per tick with the decoder's choice)
 """
 from __future__ import annotations
 
+import json
 import os
 from typing import Dict, Optional, Tuple
 
@@ -28,7 +37,7 @@ import torch.nn.functional as F
 from src.models.world_on_rails.aux_heads import TARGET_SPEEDS
 
 LAT_TARGETS = (-3.5, -1.75, 0.0, 1.75, 3.5)          # = counterfactual_q.QConfig.lat_targets
-_ENV_DEFAULTS = {"beta": 1.0, "lat_sigma": 1.0, "lat_threshold": 0.5, "lateral": 1.0, "hold_ticks": 20, "lat_rate": 1.75}
+_ENV_DEFAULTS = {"beta": 1.0, "lat_margin": 1.0, "stay_margin": 0.25, "lateral": 1.0, "hold_ticks": 20, "confirm_ticks": 5, "lat_rate": 1.75}
 WP_DT = 0.25                                          # the waypoints are the next five 4 Hz poses
 
 
@@ -76,25 +85,46 @@ def parse_qcritic_env(spec: Optional[str]) -> Optional[Dict[str, float]]:
     return cfg
 
 
-def decode_with_q(probs: np.ndarray, q: np.ndarray, bins: np.ndarray, beta: float, lat_sigma: float = 1.0, lat_threshold: float = 0.5,
-                  lateral: bool = True, forced_d: Optional[float] = None) -> Tuple[float, float, Dict]:
-    """(target speed in m/s, lateral offset in m, debug). The offset is chosen first (or forced, e.g. held from an earlier tick); the speed is
-    the mean of pi(v | that offset)."""
+SPEED_TOL = 0.1                                       # Q units: in a lane change, speed bins this close to their column's best count as best
+
+
+def decode_with_q(probs: np.ndarray, q: np.ndarray, bins: np.ndarray, beta: float, lat_margin: float = 1.0, lateral: bool = True,
+                  forced_d: Optional[float] = None, current_d: float = 0.0, stay_margin: float = 0.25) -> Tuple[float, float, Dict]:
+    """(target speed in m/s, lateral offset in m, debug). The offset is chosen first from the column values, relative to the offset being driven
+    (`current_d`), or forced (held from an earlier tick): a side offset needs `lat_margin` over the current one, a shifted car stays only while
+    its offset beats the own lane by `stay_margin`, and a car on one side goes back to its lane before it may cross to the other. A Q with a
+    non-finite value is not used: the plain decode. The speed is the mean of pi(v | offset) in
+    lane and, in a lane change, the bin closest to BC's speed among those within SPEED_TOL of the column's best."""
     probs = np.asarray(probs, dtype=np.float64)
-    if beta == 0.0:
-        return float((probs * bins).sum()), 0.0, {"p_v": probs, "p_lat": None, "candidate": 0.0}
+    q = np.asarray(q, dtype=np.float64)
+    if beta == 0.0 or not np.isfinite(q).all():
+        return float((probs * bins).sum()), 0.0, {"p_v": probs, "p_lat": None, "v_lat": None, "candidate": 0.0, "nonfinite": beta != 0.0}
     lat = np.asarray(LAT_TARGETS)
-    logits = (np.log(np.clip(probs, 1e-12, None))[:, None] - np.abs(lat)[None, :] / max(lat_sigma, 1e-6)
-              + beta * (np.asarray(q, dtype=np.float64) - np.max(q)))
+    logits = np.log(np.clip(probs, 1e-12, None))[:, None] + beta * (q - np.max(q))
     joint = np.exp(logits - logits.max())
     joint /= joint.sum()
-    p_lat = joint.sum(0)
-    j = int(np.argmax(p_lat))
-    candidate = float(lat[j]) if lateral and lat[j] != 0.0 and p_lat[j] >= lat_threshold else 0.0
+    v_lat = q.max(0)
+    centre = int(np.argmin(np.abs(lat)))
+    cur = int(np.argmin(np.abs(lat - current_d))) if lateral else centre
+    j = int(np.argmax(v_lat))                           # exact ties go to the first (leftmost) offset
+    if not lateral or (cur != centre and v_lat[cur] < v_lat[centre] + stay_margin):
+        candidate = 0.0                                 # a shifted car whose offset no longer clearly beats its lane goes back
+    elif j == cur or (j != centre and v_lat[j] - v_lat[cur] < lat_margin):
+        candidate = float(lat[cur])                     # keep driving the current offset
+    elif j == centre or (cur != centre and np.sign(lat[j]) != np.sign(lat[cur])):
+        candidate = 0.0                                 # back to the own lane (also the way across to the other side)
+    else:
+        candidate = float(lat[j])
     d = candidate if forced_d is None else float(forced_d)
-    col = joint[:, int(np.argmin(np.abs(lat - d)))]
-    p_v = col / max(col.sum(), 1e-300)
-    return float((p_v * bins).sum()), d, {"p_v": p_v, "p_lat": p_lat, "candidate": candidate}
+    k = int(np.argmin(np.abs(lat - d)))
+    if k == centre:
+        col = joint[:, k]
+        p_v = col / max(col.sum(), 1e-300)
+    else:                                               # BC's posterior is for its own in-lane plan (stop behind the parked car), and a softmax
+        near = np.flatnonzero(q[:, k] >= q[:, k].max() - SPEED_TOL)     # over Q ties drives the fastest unreachable bins: of the near-best
+        p_v = np.zeros(len(bins))                                         # bins, the one closest to BC's speed (BC itself where Q is flat)
+        p_v[int(near[np.argmin(np.abs(bins[near] - float((probs * bins).sum())))])] = 1.0
+    return float((p_v * bins).sum()), d, {"p_v": p_v, "p_lat": joint.sum(0), "v_lat": v_lat, "candidate": candidate}
 
 
 def q_decode_speed(policy, out: Dict[str, torch.Tensor], probs: np.ndarray, target_speed_kmh: float) -> Tuple[float, np.ndarray]:
@@ -116,17 +146,24 @@ def q_decode_speed(policy, out: Dict[str, torch.Tensor], probs: np.ndarray, targ
     if cfg["beta"] == 0.0:
         policy._q_choice = {"q_sa": q, "q_lat": 0.0, "p_lat": None}
         return target_speed_kmh, probs
-    lock = getattr(policy, "_q_lock", None) or {"d": 0.0, "left": 0}
-    _, cand, dbg0 = decode_with_q(probs, q, policy.target_speed_head.bins.cpu().numpy(), cfg["beta"], cfg["lat_sigma"], cfg["lat_threshold"],
-                                  bool(cfg["lateral"]))
+    lock = getattr(policy, "_q_lock", None) or {"d": 0.0, "left": 0, "pend": 0.0, "n": 0}
+    _, cand, _ = decode_with_q(probs, q, policy.target_speed_head.bins.cpu().numpy(), cfg["beta"], cfg["lat_margin"], bool(cfg["lateral"]),
+                               current_d=lock["d"], stay_margin=cfg["stay_margin"])
+    lock["pend"], lock["n"] = cand, (lock["n"] + 1 if cand == lock["pend"] else 1)
     if lock["left"] > 0:
         lock["left"] -= 1                                       # hold the earlier choice
-    elif cand != lock["d"]:
-        lock = {"d": cand, "left": int(cfg["hold_ticks"]) - 1}  # a new choice, held for hold_ticks ticks including this one
+    elif cand != lock["d"] and lock["n"] >= int(cfg["confirm_ticks"]):
+        lock.update(d=cand, left=int(cfg["hold_ticks"]) - 1)    # a new choice seen confirm_ticks ticks in a row, held for hold_ticks ticks
     policy._q_lock = lock
-    v, d, dbg = decode_with_q(probs, q, policy.target_speed_head.bins.cpu().numpy(), cfg["beta"], cfg["lat_sigma"], cfg["lat_threshold"],
-                              bool(cfg["lateral"]), forced_d=lock["d"])
-    policy._q_choice = {"q_sa": q, "q_lat": d, "p_lat": dbg["p_lat"], "lat_rate": cfg["lat_rate"]}
+    v, d, dbg = decode_with_q(probs, q, policy.target_speed_head.bins.cpu().numpy(), cfg["beta"], cfg["lat_margin"], bool(cfg["lateral"]),
+                              forced_d=lock["d"])
+    policy._q_choice = {"q_sa": q, "q_lat": d, "p_lat": dbg["p_lat"], "v_lat": dbg["v_lat"], "q_cand": cand, "q_v": v, "lat_rate": cfg["lat_rate"]}
+    if os.environ.get("WOR_QCRITIC_LOG"):                       # per-tick decode record (JSON lines) for diagnosing a closed-loop route
+        policy._q_tick = getattr(policy, "_q_tick", -1) + 1
+        with open(os.environ["WOR_QCRITIC_LOG"], "a") as f:
+            f.write(json.dumps({"pid": os.getpid(), "tick": policy._q_tick, "q_lat": d, "q_cand": cand, "lock_left": lock["left"], "q_v": round(v, 3),
+                                "bc_v": round(float((probs * policy.target_speed_head.bins.cpu().numpy()).sum()), 3),
+                                "v_lat": np.round(dbg["v_lat"], 3).tolist(), "q_sa": np.round(q, 3).tolist()}) + "\n")
     return 3.6 * v, dbg["p_v"]
 
 

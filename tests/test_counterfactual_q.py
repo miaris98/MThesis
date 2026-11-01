@@ -24,16 +24,16 @@ def _straight_route(n=20):
     return [[2.5 + i, 0.0] for i in range(n)]
 
 
-def _frames(n, speed=8.0, target_speed=8.0, actors=None, ego_info=None, route_y=0.0):
+def _frames(n, speed=8.0, target_speed=8.0, actors=None, ego_info=None, route_y=0.0, meas_extra=None):
     """n logged frames of an ego driving straight along +x at `speed`; `actors(t)` returns that frame's boxes in world coordinates (extents as
     PDM-Lite logs them, true [x, y] for statics too: data_agent.py fixes CARLA's swapped static extent before saving). `target_speed` may be a
-    function of t. `route_y` puts route_original that far right of the ego."""
+    function of t. `route_y` puts route_original that far right of the ego. `meas_extra(t)` adds measurement fields (hazard flags, speed_limit)."""
     out = []
     for t in range(n):
         x = speed * 0.25 * t
         ts = target_speed(t) if callable(target_speed) else target_speed
         meas = {"speed": speed, "target_speed": ts, "ego_matrix": _ego_matrix(x)[:3], "route_original": [[p[0], p[1] + route_y] for p in _straight_route()],
-                "route": _straight_route(), "light_hazard": False, "stop_sign_hazard": False, "junction": False}
+                "route": _straight_route(), "light_hazard": False, "stop_sign_hazard": False, "junction": False, **(meas_extra(t) if meas_extra else {})}
         boxes = [{"class": "ego_car", "extent": [2.45, 0.92, 0.75], "position": [0, 0, 0], "yaw": 0.0, "id": 1, "matrix": _ego_matrix(x)},
                  {"class": "ego_info", "num_lanes_same_direction": 2, "num_lanes_opposite_direction": 1, "ego_lane_number": 0, "is_in_junction": False,
                   **(ego_info or {})}]
@@ -187,7 +187,7 @@ def _brute_force_q(scene, cfg):
     return best, hits
 
 
-@pytest.mark.parametrize("hold", [1, 2])
+@pytest.mark.parametrize("hold", [1, 2, 4])
 @pytest.mark.parametrize("scene_kind", ["empty", "static_near", "oncoming"])
 def test_dp_equals_brute_force_on_a_tiny_lattice(scene_kind, hold):
     """Moving actor, a target speed that changes per frame (over-speed fires), a speed cap above the target and a one-lane road (off-road cells):
@@ -223,8 +223,8 @@ def test_lateral_targets_stay_distinct_under_the_hold():
 
 # ---------------------------------------------------------------- behaviour
 
-def _q(actors=None, speed=8.0, target_speed=8.0, ego_info=None, cfg=CFG):
-    scene = build_scene(_frames(cfg.horizon + 2, speed=speed, target_speed=target_speed, actors=actors, ego_info=ego_info), 0, cfg)
+def _q(actors=None, speed=8.0, target_speed=8.0, ego_info=None, cfg=CFG, meas_extra=None):
+    scene = build_scene(_frames(cfg.horizon + 2, speed=speed, target_speed=target_speed, actors=actors, ego_info=ego_info, meas_extra=meas_extra), 0, cfg)
     return solve_q(scene, cfg)
 
 
@@ -280,3 +280,160 @@ def test_config_rejects_a_hold_longer_than_the_horizon():
         QConfig(horizon=4, hold=5)
     with pytest.raises(ValueError):
         QConfig(hold=0)
+
+
+# ---------------------------------------------------------------- labels -> the decoder act() applies (2026-11-01 smoke: stopped behind the car)
+
+def _bc(v, width=1.0):
+    from src.models.world_on_rails.aux_heads import TARGET_SPEEDS
+    p = np.exp(-np.abs(np.array(TARGET_SPEEDS) - v) / width)
+    return p / p.sum()
+
+
+@pytest.mark.parametrize("bc_speed", [8.0, 0.0])
+def test_decoder_on_real_bypass_labels_leaves_the_lane_even_when_bc_wants_to_stop(bc_speed):
+    """Route 2664 (2026-11-01): with the Q decode on, the car stopped behind the parked car for good. Two causes, both in the decoder: the lane
+    was chosen from the BC-weighted mass (a BC that brakes judges every column at v = 0, where passing and stopping tie), and a lane change
+    needed half the mass on one offset (two free side lanes split it). The lane is now chosen from each column's value max_v Q(v, d)."""
+    from src.models.world_on_rails.aux_heads import TARGET_SPEEDS
+    from src.models.world_on_rails.q_critic import decode_with_q
+    stopped = {"class": "car", "id": 3, "extent": [2.4, 1.0, 0.8], "speed": 0.0, "world": (18.0, 0.0, 0.0)}
+    q = _q(actors=lambda t: [dict(stopped)], speed=8.0, target_speed=8.0)
+    v, d, dbg = decode_with_q(_bc(bc_speed), q, np.array(TARGET_SPEEDS), beta=1.0)
+    assert d != 0.0 and dbg["v_lat"][CFG.lat_targets.index(d)] == q.max()
+    # and it drives past: BC's speed posterior is for its own in-lane plan (stop behind the car), so a lane change takes its speed from Q alone
+    assert v > 4.0
+
+
+def test_decoder_on_real_empty_road_labels_stays_in_lane_at_the_expert_speed():
+    from src.models.world_on_rails.aux_heads import TARGET_SPEEDS
+    from src.models.world_on_rails.q_critic import decode_with_q
+    v, d, _ = decode_with_q(_bc(8.0), _q(), np.array(TARGET_SPEEDS), beta=1.0)
+    assert d == 0.0 and abs(v - 8.0) < 2.0
+
+
+# ---------------------------------------------------------------- what the expert slowed for (review 2026-11-01 evening)
+
+def _waiting(t):
+    """The expert waits behind a parked car: target speed 0 because of an object, not a light or a stop sign."""
+    return {"speed_limit": 8.33, "speed_reduced_by_obj_type": "static.prop.mesh", "vehicle_hazard": True}
+
+
+@pytest.mark.parametrize("gap,adv", [(6.0, 1.0), (8.0, 0.75)])
+def test_passing_a_parked_car_from_standstill_is_worth_the_decoders_margin(gap, adv):
+    """The 2026-11-01 review measured V(side) - V(lane) of 0.5 / 0.0 / -0.2 for a stopped ego 8 / 12 / 18 m behind a parked car, and exactly 0 when the
+    expert's target speed was 0 (waiting): the limit carried the expert's own reaction to the car, and 3 s from rest is worth ~1 Q unit of
+    progress. A decoder needing lat_margin = 1 never left the lane, as on route 2664."""
+    parked = {"class": "static_car", "extent": [2.4, 1.0, 0.8], "world": (gap + 2.45 + 2.4, 0.0, 0.0)}
+    q = _q(actors=lambda t: [dict(parked)], speed=0.0, target_speed=0.0, meas_extra=_waiting)
+    v_lat = q.max(0)
+    assert v_lat.max() - v_lat[_idx(0, 0)[1]] >= adv
+
+
+@pytest.mark.parametrize("ahead,lo,hi", [(20.0, 1.0, 99.0), (46.0, -99.0, 0.0), (60.0, -99.0, 0.0)])
+def test_a_moving_car_bypasses_near_the_obstacle_not_40_m_before_it(ahead, lo, hi):
+    """With a terminal value that let the car only stay in its lane after the horizon, the labels sent it into the oncoming lane 46 m before a
+    parked car; the continuation may now change lanes too, at the cost of the time the change takes."""
+    st = {"class": "static_car", "extent": [2.0, 0.9, 0.8], "world": (ahead, 0.0, 0.0)}
+    q = _q(actors=lambda t: [dict(st)], speed=8.0, target_speed=8.0, meas_extra=lambda t: {"speed_limit": 8.33})
+    adv = q.max(0).max() - q.max(0)[_idx(0, 0)[1]]
+    assert lo <= adv <= hi
+
+
+def test_red_light_still_makes_stopping_best_and_no_side_lane_better():
+    red = lambda t: {"speed_limit": 13.9, "speed_reduced_by_obj_type": "traffic.traffic_light", "light_hazard": True}
+    q = _q(speed=4.0, target_speed=0.0, meas_extra=red)
+    v_best, d_best = np.unravel_index(np.argmax(q), q.shape)
+    assert CFG.speed_targets[v_best] == 0.0 and d_best == _idx(0, 0)[1]
+    assert q.max(0).max() - q.max(0)[_idx(0, 0)[1]] < 0.5
+
+
+def test_terminal_value_is_capped_by_the_gap_ahead_and_by_the_limit():
+    """Ending the horizon at speed right behind a stopped car must not earn the progress the car cannot make, nor speeding past a red light."""
+    from src.training.counterfactual_q import _Lattice
+    stopped = {"class": "car", "id": 3, "extent": [2.4, 1.0, 0.8], "speed": 0.0, "world": (40.0, 0.0, 0.0)}
+    one_lane = {"num_lanes_same_direction": 1, "num_lanes_opposite_direction": 0}          # no lane to change into after the horizon
+    free = _Lattice(build_scene(_frames(CFG.horizon + 2, ego_info=one_lane), 0, CFG), CFG)
+    near = _Lattice(build_scene(_frames(CFG.horizon + 2, actors=lambda t: [dict(stopped)], ego_info=one_lane), 0, CFG), CFG)
+    d, v = free.d0, int(np.argmin(np.abs(free.v_grid - 8.0)))
+    s = int(round(24.0 / CFG.s_res))                       # 24 m on: 13.6 m of the car's rear is left (40 - 2.4 - 2.45 - 24 + margins)
+    assert near.tail[d, v, s] < free.tail[d, v, s] - 1.0
+    assert near.tail[d, 0, s] == pytest.approx(0.0)       # standing still earns nothing either way
+    red = _Lattice(build_scene(_frames(CFG.horizon + 2, target_speed=0.0, meas_extra=lambda t: {"light_hazard": True, "speed_limit": 13.9}), 0, CFG), CFG)
+    assert red.tail[d, v, s] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------- second review 2026-11-01 evening: the road limit only for standing obstacles
+
+def test_road_limit_only_for_static_or_standing_vehicle_causes_never_at_red_lights_walkers_or_junctions():
+    from src.training.counterfactual_q import speed_limit_of
+    base = {"target_speed": 0.0, "speed_limit": 13.9}
+    cruise = min(0.72 * 13.9, 20.0)                                              # PDM-Lite cruises at 0.72 x the limit, not at the limit
+    assert speed_limit_of({**base, "speed_reduced_by_obj_type": "static.prop.trafficwarning"}) == pytest.approx(cruise)
+    assert speed_limit_of({**base, "speed_reduced_by_obj_type": "vehicle.audi.a2", "speed_reduced_by_obj_id": 7}, standing={7}) == pytest.approx(cruise)
+    assert speed_limit_of({**base, "speed_reduced_by_obj_type": "vehicle.audi.a2", "speed_reduced_by_obj_id": 7}, standing=set()) == 0.0   # a moving lead
+    assert speed_limit_of({**base, "speed_reduced_by_obj_type": "walker.pedestrian.0001", "walker_hazard": True}) == 0.0
+    assert speed_limit_of({**base, "speed_reduced_by_obj_type": "static.prop.mesh", "junction": True}) == 0.0
+    red = [{"class": "traffic_light", "state": "Red", "affects_ego": True}]
+    assert speed_limit_of({**base, "speed_reduced_by_obj_type": "vehicle.audi.a2", "speed_reduced_by_obj_id": 7}, boxes=red, standing={7}) == 0.0
+    green = [{"class": "traffic_light", "state": "Green", "affects_ego": True}]
+    assert speed_limit_of({**base, "speed_reduced_by_obj_type": "static.prop.mesh"}, boxes=green) == pytest.approx(cruise)
+
+
+def test_a_red_light_queue_is_not_overtaken_through_the_oncoming_lane():
+    """Review: PDM-Lite logs the queue's lead car, not the light, as the cause (IDM), and light_hazard stays False: the road limit made the
+    oncoming lane +0.99 better from rest, enough for lat_margin = 1."""
+    queue = {"class": "car", "id": 5, "extent": [2.4, 1.0, 0.8], "speed": 0.0, "world": (12.0 + 4.85, 0.0, 0.0)}
+    light = {"class": "traffic_light", "state": "Red", "affects_ego": True, "extent": [0.5, 0.5, 1.0], "world": (40.0, 3.0, 0.0)}
+    extra = lambda t: {"speed_limit": 13.9, "speed_reduced_by_obj_type": "vehicle.audi.a2", "speed_reduced_by_obj_id": 5, "vehicle_hazard": True}
+    q = _q(actors=lambda t: [dict(queue), dict(light)], speed=0.0, target_speed=0.0, meas_extra=extra,
+           ego_info={"num_lanes_same_direction": 1, "num_lanes_opposite_direction": 1})
+    assert q.max(0).max() - q.max(0)[_idx(0, 0)[1]] < 0.5
+
+
+@pytest.mark.parametrize("oncoming_x,want_bypass", [(60.0, False), (70.0, False), (200.0, True)])
+def test_the_tail_sees_an_oncoming_car_arriving_after_the_horizon(oncoming_x, want_bypass):
+    """Review: the tail took the oncoming car at its horizon position as a fixed wall, so pulling out 20 m before a parked car with a car coming
+    at 10 m/s from 60-70 m scored +2 (a 7 s horizon: -4.4 / -3.4). Actors now move on at constant velocity through the tail."""
+    parked = {"class": "static_car", "extent": [2.4, 1.0, 0.8], "world": (20.0, 0.0, 0.0)}
+    oncoming = lambda t: {"class": "car", "id": 9, "extent": [2.4, 1.0, 0.8], "world": (oncoming_x - 2.5 * t, -LANE, math.pi)}
+    q = _q(actors=lambda t: [dict(parked), oncoming(t)], speed=8.0, target_speed=8.0, meas_extra=lambda t: {"speed_limit": 11.6},
+           ego_info={"num_lanes_same_direction": 1, "num_lanes_opposite_direction": 1})
+    adv = q[:, _idx(0, -LANE)[1]].max() - q[:, _idx(0, 0)[1]].max()
+    assert (adv >= 1.0) if want_bypass else (adv < 0.5)
+
+
+def test_a_car_already_in_the_oncoming_lane_is_sent_back_to_its_route_lane():
+    """Review: ego_info is logged for the lane under the ego; in the oncoming lane CARLA counts the route lane as an opposite lane, which the mask put
+    on the left, so the route lane on the right read off-road and the labels kept the car in the oncoming lane. The mask is now anchored to the route
+    lane (the ego_info of the latest frame in it)."""
+    in_lane = {"num_lanes_same_direction": 1, "num_lanes_opposite_direction": 1, "ego_lane_number": 0, "is_in_junction": False}
+    frames = []
+    for t in range(20):
+        x, y = 2.0 * t, (-LANE if t >= 6 else 0.0)
+        meas = {"speed": 8.0, "target_speed": 8.0, "ego_matrix": _ego_matrix(x, y)[:3], "route": _straight_route(),
+                "route_original": [[p[0], p[1] - y] for p in _straight_route()]}
+        boxes = [{"class": "ego_car", "extent": [2.45, 0.92, 0.75], "position": [0, 0, 0], "yaw": 0.0, "id": 1},
+                 {"class": "ego_info", **in_lane}]                              # same numbers, but in the oncoming lane they describe that lane
+        frames.append((meas, boxes))
+    from src.training.counterfactual_q import build_scene
+    q = solve_q(build_scene(frames, 7, CFG), CFG)
+    v_lat = q.max(0)
+    assert int(np.argmax(v_lat)) == _idx(0, 0)[1]                               # back to the route lane
+    assert v_lat[_idx(0, 0)[1]] - v_lat[_idx(0, -LANE)[1]] > 0.25               # staying in the oncoming lane is clearly worse
+    from src.training.counterfactual_q import _Lattice
+    lat = _Lattice(build_scene(frames, 7, CFG), CFG)
+    assert lat.d_cost[np.argmin(np.abs(lat.d_grid - LANE))] >= 1.0                # the shoulder right of the route lane is off-road
+    assert lat.d_cost[np.argmin(np.abs(lat.d_grid - 0.0))] == 0.0
+
+
+def test_flat_debris_on_the_road_is_not_an_obstacle():
+    """ControlLoss scatters static.prop.dirtdebris01 (0.07 m high) on the lane; the expert drives over it, the labels had every action collide."""
+    from src.training.counterfactual_q import _is_obstacle
+    assert not _is_obstacle({"class": "static", "type_id": "static.prop.dirtdebris01", "extent": [0.93, 0.76, 0.07]})
+    assert _is_obstacle({"class": "static", "type_id": "static.prop.trafficwarning", "extent": [1.1, 1.6, 1.0]})
+    assert _is_obstacle({"class": "static_car", "extent": [2.4, 1.0, 0.8]})
+    debris = {"class": "static", "type_id": "static.prop.dirtdebris01", "extent": [0.93, 0.76, 0.07], "world": (15.0, 0.0, 0.0)}
+    q = _q(actors=lambda t: [dict(debris)], speed=8.0, target_speed=8.0)
+    v_best, d_best = np.unravel_index(np.argmax(q), q.shape)
+    assert d_best == _idx(0, 0)[1] and q.max() > 0.0

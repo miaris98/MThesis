@@ -59,3 +59,53 @@ def test_expert_action_index_uses_target_speed_and_route_shift():
     meas_stopped = {"target_speed": 0.0, "route": [[2.5 + j, -1.75 if j > 3 else 0.0] for j in range(20)], "route_original": [[2.5 + j, 0.0] for j in range(20)]}
     v0, d0 = bql.expert_action_index(meas_stopped, cfg)
     assert cfg.speed_targets[v0] == 0.0 and cfg.lat_targets[d0] == 0.0
+
+
+def _write_bypass_route(root: Path, n: int) -> Path:
+    """The expert bends its route one lane left (-y) around a parked car in its lane; the opposite lane (left of lane 0) is free."""
+    rd = root / "Town12" / "ParkedObstacleTwoWays" / "Route1_Rep0"
+    (rd / "measurements").mkdir(parents=True)
+    (rd / "boxes").mkdir()
+    for i in range(n):
+        x = 2.0 * i
+        meas = {"speed": 8.0, "target_speed": 8.0, "ego_matrix": [[1, 0, 0, x], [0, 1, 0, 0], [0, 0, 1, 0]],
+                "route_original": [[2.5 + j, 0.0] for j in range(20)], "route": [[2.5 + j, -3.5 if j > 3 else 0.0] for j in range(20)], "command": 4}
+        boxes = [{"class": "ego_car", "extent": [2.45, 0.92, 0.75], "position": [0, 0, 0], "yaw": 0.0, "id": 1},
+                 {"class": "ego_info", "num_lanes_same_direction": 1, "num_lanes_opposite_direction": 1, "ego_lane_number": 0, "is_in_junction": False},
+                 {"class": "static_car", "extent": [2.0, 0.9, 0.8], "position": [24.0 - x, 0.0, 0.0], "yaw": 0.0}]
+        for sub, obj in (("measurements", meas), ("boxes", boxes)):
+            with gzip.open(rd / sub / f"{i:04d}.json.gz", "wt") as f:
+                json.dump(obj, f)
+    return rd
+
+
+def test_bypass_frames_report_whether_the_label_argmax_takes_the_experts_side(tmp_path):
+    cfg = QConfig()
+    rd = _write_bypass_route(tmp_path, cfg.horizon + 4)
+    st = bql.label_route_dir(str(rd), "qb", cfg)
+    assert st["bypass_frames"] == st["labelled"] == 4
+    assert st["bypass_argmax_expert_side_share"] == 1.0          # the parked car is in lane, the left lane is free: the best action goes left
+    plain = bql.label_route_dir(str(_write_route(tmp_path / "p", cfg.horizon + 4)), "qb", cfg)
+    assert plain["bypass_frames"] == 0 and plain["bypass_argmax_expert_side_share"] is None
+
+
+def test_scenario_of_a_route_dir():
+    assert bql.scenario_of("/w/data/Town12/data/ParkedObstacleTwoWays/Route31_Rep0") == "ParkedObstacleTwoWays"
+
+
+def test_set_overrides_any_qconfig_field_and_rejects_unknown_ones():
+    import pytest
+    cfg = bql.apply_overrides(QConfig(), ["hold=8", "overspeed_margin=0", "margin=0.3"])
+    assert (cfg.hold, cfg.overspeed_margin, cfg.margin) == (8, 0.0, 0.3) and isinstance(cfg.hold, int)
+    with pytest.raises(ValueError):
+        bql.apply_overrides(QConfig(), ["no_such=1"])
+
+
+def test_stride_labels_every_nth_frame_and_dense_scenarios_more_often(tmp_path):
+    cfg = QConfig()
+    rd = _write_route(tmp_path, cfg.horizon + 8)                               # Town12/Accident/...: matches the dense regex
+    st = bql.label_route_dir(str(rd), "qs", cfg, stride=4, dense_regex="Accident|Obstacle", dense_stride=2)
+    assert st["labelled"] == 4                                                  # frames 0, 2, 4, 6 of the 8 with a full horizon
+    assert sorted(load_q_labels(str(rd), "qs")) == ["0000", "0002", "0004", "0006"]
+    st = bql.label_route_dir(str(rd), "qs4", cfg, stride=4, dense_regex="NoSuchScenario", dense_stride=2)
+    assert st["labelled"] == 2

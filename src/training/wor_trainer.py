@@ -8,6 +8,7 @@ PPO/SAC trainers' logging stack).
 The objective and the held-out pass live in src/training/wor_eval.py; the optimizer
 groups and LR schedule live in src/training/wor_optim.py.
 """
+import dataclasses
 from typing import Dict, Optional, Tuple
 import math
 import os
@@ -237,6 +238,11 @@ class WorldOnRailsTrainer:
             "use_augmented_camera": use_augmented_camera,
             "color_aug_prob": color_aug_prob
         })
+        if q_critic_loss_weight > 0:
+            # TODO A71: load_q_labels refuses files whose config differs from QConfig(), so QConfig() is the config the labels were built with
+            from src.training.counterfactual_q import QConfig
+            self.logger.log_params({"q_critic_loss_weight": q_critic_loss_weight, "q_labels": os.environ.get("WOR_Q_LABELS", ""),
+                                    **{f"q_label_{k}": v for k, v in dataclasses.asdict(QConfig()).items()}})
 
         # Per-epoch CSV telemetry.
         self.csv_logger = CSVTelemetryLogger(

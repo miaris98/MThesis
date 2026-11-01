@@ -15,19 +15,29 @@ the next step, so Q(s0, .) would be flat, and a lateral target released after th
 
 Reward per step (driving one step at v_max in lane earns w_progress):
     progress   +w_progress * (lattice distance travelled) / (v_max * dt)
-    over-speed -w_overspeed * max(0, v - (expert target speed at that frame + margin)) / v_max. Red lights, stop signs and curves are only in the
-               logs as the expert's target speed dropping, so this term carries them without a stop-line geometry PDM-Lite does not log.
+    over-speed -w_overspeed * max(0, v - (limit at that frame + overspeed_margin)) / v_max. The limit is the expert's target speed where the
+               expert slowed for a red light, a stop sign or the road (curves): those are only in the logs as the target speed dropping, so this
+               term carries them without a stop-line geometry PDM-Lite does not log. Where PDM-Lite says an actor caused the slow-down
+               (speed_reduced_by_obj_type vehicle / walker / static) the limit is the road's speed_limit instead: the actor is in the scene and
+               the collision term judges it, and the expert's own reaction to it (waiting behind a parked car) must not be what the labels
+               reward (review 2026-11-01 evening: every moving action was "over speed" while the expert waited, so passing was worth 0).
     lateral    -w_lateral * |d| / lane width
     off-road   -w_offroad where d leaves the lanes the frame's `ego_info` reports around the ego's own lane
     collision  collision_penalty, terminal: the ego box (+ margin) overlaps a logged actor box anywhere along the step's swept stations (actors at
                mid-step) or at its end (actors at the step's end); no tunnelling at 5 m per step. Same-lane followers are not obstacles: a logged
                follower never reacts, so it would make every braking action a rear-end collision.
 
+Terminal value at the horizon (state d, v, s): gamma^(N/2) * max over d' of (w_progress * progress / (v_max * dt) - n_back * lateral and
+off-road cost at d'), N = tail_s / dt, where progress is what the next tail_s seconds at min(v, limit_H) allow: |d' - d| / lat_rate seconds
+capped by the free gap at d (the lane change after the horizon), the rest by the free gap at d' (logged actors at the horizon step). Without
+it, 3 s from standstill is worth about one Q unit of progress, less than staying put once the lateral cost is paid.
+
 `Scene.rollout_return` evaluates one explicit action sequence with the same transitions; the brute-force test checks the dynamic programme
 against it.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 from dataclasses import dataclass
@@ -38,6 +48,7 @@ import numpy as np
 TF_SPEEDS = (0.0, 4.0, 8.0, 10.0, 13.88888888, 16.0, 17.77777777, 20.0)   # = aux_heads.TARGET_SPEEDS (kept torch-free here)
 LANE_WIDTH = 3.5
 _IGNORED = ("ego_car", "ego_info", "weather", "landmark")
+FLAT_HALF_HEIGHT = 0.2                  # m: static boxes lower than this (half-extent z) are road debris, not obstacles
 
 
 @dataclass(frozen=True)
@@ -62,6 +73,7 @@ class QConfig:
     w_lateral: float = 0.05
     w_offroad: float = 1.0
     collision_penalty: float = -10.0
+    tail_s: float = 4.0                     # terminal value: progress over the next tail_s seconds, capped by the free gap and the limit
     max_actor_range: float = 80.0
 
     def __post_init__(self):
@@ -156,6 +168,8 @@ def _is_obstacle(b: dict) -> bool:
     cls = str(b.get("class", ""))
     if cls in _IGNORED or cls.startswith(("traffic_light", "stop_sign")) or "extent" not in b:
         return False
+    if cls.startswith("static") and len(b["extent"]) > 2 and float(b["extent"][2]) < FLAT_HALF_HEIGHT:
+        return False                                    # flat props the expert drives over (ControlLoss dirt debris, 0.07 m)
     return cls.startswith("static") or cls in ("car", "walker", "bicycle", "motorcycle", "truck", "bus", "vehicle")
 
 
@@ -164,6 +178,30 @@ def _half_extents(b: dict) -> Tuple[float, float]:
     line 1109) before saving, so no class is swapped here; swapping again turned parked cars sideways on real logs (2026-11-01 check)."""
     e = b["extent"]
     return float(e[0]), float(e[1])
+
+
+CRUISE_FRACTION, CRUISE_MAX = 0.72, 20.0        # PDM-Lite cruises at min(0.72 x speed_limit, 20 m/s), not at the limit
+
+
+def red_light_ahead(meas: dict, boxes=()) -> bool:
+    """A red or yellow light that affects the ego is logged (PDM-Lite's IDM may log the queue's lead car, not the light, as the cause)."""
+    return bool(meas.get("light_hazard")) or any(b.get("class") == "traffic_light" and b.get("affects_ego")
+                                                and str(b.get("state", "")).lower() in ("red", "yellow") for b in boxes)
+
+
+def speed_limit_of(meas: dict, boxes=(), standing=frozenset()) -> float:
+    """The over-speed limit of one logged frame: the expert's target speed, except where PDM-Lite records that it slowed for a standing obstacle
+    (a static prop, or a vehicle whose id is in `standing`: still for the whole horizon), with no red light, stop sign, walker or junction
+    involved: then PDM-Lite's cruise speed, and the collision term judges the obstacle (review 2026-11-01 evening: the road limit for any actor
+    cause passed red-light queues through the oncoming lane, pedestrians at 4 m/s and junction yields)."""
+    ts = float(meas.get("target_speed", meas.get("speed", 0.0)))
+    cause = str(meas.get("speed_reduced_by_obj_type") or "")
+    if (meas.get("speed_limit") is None or meas.get("stop_sign_hazard") or meas.get("walker_hazard") or meas.get("junction")
+            or red_light_ahead(meas, boxes) or any(b.get("class") == "ego_info" and b.get("is_in_junction") for b in boxes)):
+        return ts
+    if cause.startswith("static") or (cause.startswith("vehicle") and meas.get("speed_reduced_by_obj_id") in standing):
+        return max(ts, min(CRUISE_FRACTION * float(meas["speed_limit"]), CRUISE_MAX))
+    return ts
 
 
 def _wrap(a):
@@ -178,18 +216,49 @@ class Scene:
     actor_boxes: np.ndarray                 # (H+1, M, 5) in the frame-0 ego frame; NaN where the actor is not logged at that step
     ego_half: Tuple[float, float]
     v0: float
-    target_speed: np.ndarray                # (H+1,) the expert's target speed at each future frame
+    target_speed: np.ndarray                # (H+1,) the over-speed limit at each future frame (speed_limit_of: the expert's target speed or the road's)
     ego_info: Optional[dict]
     s0: float = 0.0                         # the ego's projection onto the route
     d0: float = 0.0
+    mask_anchor: Optional[float] = None     # route offset of the lane `ego_info` describes (None: the ego's own, d0)
 
-    def collision_grids(self, cfg: QConfig, d_grid: np.ndarray, s_grid: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """(end, mid), each (H+1, n_d, n_s) bool: the ego at (s0 + s, d) overlaps an actor at step t's end / at the middle of step t-1 -> t."""
+    def _ego_boxes(self, cfg: QConfig, d_grid: np.ndarray, s_grid: np.ndarray) -> np.ndarray:
         S, D = np.meshgrid(self.s0 + s_grid, d_grid, indexing="ij")
         x, y, yaw = self.route.pose(S.ravel(), D.ravel())
         hl, hw = self.ego_half[0] + cfg.margin, self.ego_half[1] + cfg.margin
-        ego = np.stack([x, y, yaw, np.full_like(x, hl), np.full_like(x, hw)], -1)
-        r_ego = math.hypot(hl, hw)
+        return np.stack([x, y, yaw, np.full_like(x, hl), np.full_like(x, hw)], -1)
+
+    @staticmethod
+    def _overlap(ego: np.ndarray, act: np.ndarray) -> np.ndarray:
+        """(len(ego),) bool: each ego box overlaps any finite actor box (bounding-circle pre-check, then the exact test on candidate pairs)."""
+        act = act[np.isfinite(act[:, 0])]
+        hit = np.zeros(len(ego), dtype=bool)
+        if not len(act):
+            return hit
+        r_ego = math.hypot(ego[0, 3], ego[0, 4])
+        near = np.hypot(ego[:, None, 0] - act[None, :, 0], ego[:, None, 1] - act[None, :, 1]) <= r_ego + np.hypot(act[:, 3], act[:, 4])[None]
+        ci, ai = np.nonzero(near)
+        if len(ci):
+            hit[ci[boxes_overlap(ego[ci], act[ai])]] = True
+        return hit
+
+    def tail_grids(self, cfg: QConfig, d_grid: np.ndarray, s_grid: np.ndarray, n_steps: int) -> np.ndarray:
+        """(n_steps, n_d, n_s) bool: the ego at (s0 + s, d) overlaps an actor at H + j * dt (j = 1..n_steps), the actors moved on at the constant
+        velocity of their last logged step (standing where that step is unknown; gone where not logged at H)."""
+        H = self.actor_boxes.shape[0] - 1
+        a1, a0 = self.actor_boxes[H], self.actor_boxes[max(H - 1, 0)]
+        vel = np.where(np.isfinite(a0[:, :2]), a1[:, :2] - a0[:, :2], 0.0)          # metres per step
+        ego = self._ego_boxes(cfg, d_grid, s_grid)
+        out = np.zeros((n_steps, len(d_grid), len(s_grid)), dtype=bool)
+        for j in range(1, n_steps + 1):
+            act = a1.copy()
+            act[:, :2] = a1[:, :2] + j * vel
+            out[j - 1] = self._overlap(ego, act).reshape(len(s_grid), len(d_grid)).T
+        return out
+
+    def collision_grids(self, cfg: QConfig, d_grid: np.ndarray, s_grid: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """(end, mid), each (H+1, n_d, n_s) bool: the ego at (s0 + s, d) overlaps an actor at step t's end / at the middle of step t-1 -> t."""
+        ego = self._ego_boxes(cfg, d_grid, s_grid)
         shape = (self.actor_boxes.shape[0], len(d_grid), len(s_grid))
         end, mid = np.zeros(shape, dtype=bool), np.zeros(shape, dtype=bool)
         for t in range(1, self.actor_boxes.shape[0]):
@@ -198,15 +267,7 @@ class Scene:
             am = np.where(both[:, None], a1, a1)
             am = np.where(both[:, None], np.c_[(a0[:, :2] + a1[:, :2]) / 2, a0[:, 2] + _wrap(a1[:, 2] - a0[:, 2]) / 2, a1[:, 3:]], am)
             for grid, act in ((end, a1), (mid, am)):
-                act = act[np.isfinite(act[:, 0])]
-                if not len(act):
-                    continue
-                near = np.hypot(ego[:, None, 0] - act[None, :, 0], ego[:, None, 1] - act[None, :, 1]) <= r_ego + np.hypot(act[:, 3], act[:, 4])[None]
-                ci, ai = np.nonzero(near)                           # bounding-circle pre-check, then the exact test on the candidate pairs
-                hit = np.zeros(len(ego), dtype=bool)
-                if len(ci):
-                    hit[ci[boxes_overlap(ego[ci], act[ai])]] = True
-                grid[t] = hit.reshape(len(s_grid), len(d_grid)).T
+                grid[t] = self._overlap(ego, act).reshape(len(s_grid), len(d_grid)).T
         return end, mid
 
     def rollout_return(self, actions: Sequence[Tuple[int, int]], cfg: QConfig) -> Tuple[float, bool]:
@@ -224,7 +285,7 @@ class Scene:
                 return ret, True
             disc *= cfg.gamma
             d, v, s = d2, v2, s2
-        return ret, False
+        return ret + (disc * float(lat.tail[d, v, s]) if len(actions) == cfg.horizon else 0.0), False
 
 
 class _Lattice:
@@ -252,10 +313,43 @@ class _Lattice:
         self.coll_end = end                                                                                              # (H+1, n_d, n_s)
         # swept check: any colliding station in [s, s'] against the actors at mid-step, as a prefix sum along s (O(1) per transition)
         self.mid_cs = np.concatenate([np.zeros(mid.shape[:2] + (1,), dtype=np.int32), np.cumsum(mid, axis=2, dtype=np.int32)], axis=2)
+        anchor = self.d_grid[self.d0] if scene.mask_anchor is None else scene.mask_anchor
         self.d_cost = (cfg.w_lateral * np.abs(self.d_grid) / LANE_WIDTH
-                       + cfg.w_offroad * ~drivable_lateral_mask(self.d_grid - self.d_grid[self.d0], scene.ego_info))
+                       + cfg.w_offroad * ~drivable_lateral_mask(self.d_grid - anchor, scene.ego_info))
         self.limit = np.asarray(scene.target_speed, dtype=np.float64) + cfg.overspeed_margin
         self.cfg, self.n_s = cfg, len(self.s_grid)
+        # terminal value (nd, nv, ns): the ego drives on at min(v, limit_H) for tail_s seconds and stops before the first step at which it would
+        # overlap an actor moved on at constant velocity (an oncoming car keeps coming: review 2026-11-01 evening). The continuation may change
+        # lanes d -> d' too (else a car in lane 40 m behind an obstacle looks blocked for good and the labels send it into the oncoming lane at
+        # once): it stays in d for the |d' - d| / lat_rate seconds of the change, then drives in d'. tail(d) = the best d'; collision_penalty where
+        # an actor still reaches the stopped ego.
+        H, n_tail = cfg.horizon, int(round(cfg.tail_s / cfg.dt))
+        s_ext = np.arange(0.0, cfg.v_max * (cfg.horizon * cfg.dt + cfg.tail_s) + cfg.s_res + 1e-9, cfg.s_res)  # stations the tail can reach
+        grids = scene.tail_grids(cfg, self.d_grid, s_ext, n_tail)                                                      # (n_tail, nd, n_ext)
+        v_eff = np.minimum(self.v_grid, max(float(scene.target_speed[H]), 0.0))                                        # (nv,)
+        tau = cfg.dt * np.arange(1, n_tail + 1)
+        at = [grids[j][:, np.minimum(np.arange(self.n_s)[None, :] + np.floor(v_eff[:, None] * tau[j] / cfg.s_res + 0.5).astype(int),
+                                     len(s_ext) - 1)] for j in range(n_tail)]                                         # n_tail x (nd, nv, ns)
+        n_back = int(round(LANE_WIDTH / cfg.lat_rate / cfg.dt))                                                       # steps to drive back to the lane
+        best = np.full((len(self.d_grid), len(self.v_grid), self.n_s), -np.inf)
+        for jd in range(len(self.d_grid)):
+            t_sw = np.abs(self.d_grid - self.d_grid[jd]) / cfg.lat_rate                                                # (nd,)
+            first = np.full(best.shape, n_tail + 1)
+            for j in range(n_tail):
+                h = np.where((tau[j] <= t_sw)[:, None, None], at[j], at[j][jd][None])
+                first = np.where((first > n_tail) & h, j + 1, first)
+            prog = v_eff[None, :, None] * cfg.dt * (first - 1)
+            # stopping where it stands does not help against an actor coming at it (an oncoming car): if one still reaches the stopped ego within
+            # tail_s, the tail is a collision
+            t_stop = cfg.dt * (first - 1)
+            lane = np.where(t_stop <= t_sw[:, None, None], np.arange(len(self.d_grid))[:, None, None], jd)
+            st = np.minimum(np.arange(self.n_s)[None, None, :] + np.floor(prog / cfg.s_res + 0.5).astype(int), len(s_ext) - 1)
+            crash = np.zeros(best.shape, dtype=bool)
+            for j in range(n_tail):
+                crash |= (j + 1 >= first) & grids[j][lane, st]
+            val = np.where(crash, cfg.collision_penalty, cfg.w_progress * prog / (cfg.v_max * cfg.dt) - n_back * self.d_cost[jd])
+            best = np.maximum(best, val)
+        self.tail = cfg.gamma ** (n_tail / 2) * best
 
     def s_next(self, s, v, v2):
         return np.minimum(s + self.s_inc[v, v2], self.n_s - 1)
@@ -302,7 +396,7 @@ def solve_q(scene: Scene, cfg: QConfig, return_hits: bool = False):
     hits = np.zeros(q.shape, dtype=bool)
     for ad in range(len(cfg.lat_targets)):
         D2 = lat.next_d[ad]
-        value, flag = np.zeros((nd, nv * ns)), np.zeros((nd, nv * ns), dtype=bool)
+        value, flag = lat.tail.reshape(nd, nv * ns).copy(), np.zeros((nd, nv * ns), dtype=bool)
         for t, rows in per_t:
             best, bflag = np.full((nd, nv * ns), -np.inf), np.zeros((nd, nv * ns), dtype=bool)
             for idx, base, hit, moving in rows:
@@ -329,8 +423,8 @@ def solve_q(scene: Scene, cfg: QConfig, return_hits: bool = False):
                     break
                 disc *= cfg.gamma
                 d, v, s = d2, v2, s2
-            if not hit and cfg.hold < cfg.horizon:
-                ret, hit = ret + disc * value[d, v, s], bool(flag[d, v, s])
+            if not hit:
+                ret, hit = ret + disc * value[d, v, s], bool(flag[d, v, s])        # value = the terminal value when hold == horizon
             q[av, ad], hits[av, ad] = ret, hit
     return (q.astype(np.float32), hits) if return_hits else q.astype(np.float32)
 
@@ -366,6 +460,17 @@ def build_scene(frames: List[Tuple[dict, list]], k: int, cfg: QConfig) -> Option
     ego = next((b for b in boxes0 if b.get("class") == "ego_car"), None)
     ego_half = (float(ego["extent"][0]), float(ego["extent"][1])) if ego else (2.45, 0.92)
     ego_info = next((b for b in boxes0 if b.get("class") == "ego_info"), None)
+    anchor = None
+    if abs(d0) > LANE_WIDTH / 2:      # off the route lane (mid-bypass): ego_info describes the lane under the ego, whose "opposite" lanes include
+        for j in range(k - 1, max(k - 80, 0) - 1, -1):          # the route lane; take the latest earlier frame in the route lane (review 2026-11-01)
+            if frames[j] is None or "ego_matrix" not in frames[j][0]:
+                continue
+            rel = inv0 @ _mat(frames[j][0]["ego_matrix"])
+            dj = float(route.project(np.array([rel[0, 3]]), np.array([rel[1, 3]]))[1][0])
+            info_j = next((b for b in frames[j][1] if b.get("class") == "ego_info"), None)
+            if abs(dj) <= LANE_WIDTH / 2 and info_j is not None:
+                ego_info, anchor = info_j, dj
+                break
 
     tracks, statics, followers = {}, {}, set()
     for t in range(cfg.horizon + 1):
@@ -399,8 +504,13 @@ def build_scene(frames: List[Tuple[dict, list]], k: int, cfg: QConfig) -> Option
         with np.errstate(all="ignore"):
             near = np.nanmin(np.hypot(boxes[..., 0], boxes[..., 1]), axis=0) <= cfg.max_actor_range
         boxes = boxes[:, near]
-    tgt = np.array([float(frames[k + t][0].get("target_speed", frames[k + t][0].get("speed", 0.0))) for t in range(cfg.horizon + 1)])
-    return Scene(route, boxes, ego_half, float(meas0.get("speed", 0.0)), tgt, ego_info, s0, d0)
+    standing = {aid for aid, tr in tracks.items() if len(tr) > cfg.horizon // 2
+                and max(math.hypot(r[0] - q[0], r[1] - q[1]) for r in tr.values() for q in tr.values()) <= 0.5}
+    if any(red_light_ahead(*frames[k + t]) for t in range(cfg.horizon + 1)):   # a red light anywhere in the horizon: the expert's speed throughout
+        tgt = np.array([float(frames[k + t][0].get("target_speed", frames[k + t][0].get("speed", 0.0))) for t in range(cfg.horizon + 1)])
+    else:
+        tgt = np.array([speed_limit_of(frames[k + t][0], frames[k + t][1], standing) for t in range(cfg.horizon + 1)])
+    return Scene(route, boxes, ego_half, float(meas0.get("speed", 0.0)), tgt, ego_info, s0, d0, anchor)
 
 
 def load_q_labels(route_dir: str, tag: Optional[str]) -> dict:
@@ -414,11 +524,18 @@ def load_q_labels(route_dir: str, tag: Optional[str]) -> dict:
     if z["q"].shape[1:] != (len(want.speed_targets), len(want.lat_targets)):
         raise ValueError(f"{path}: Q labels of shape {z['q'].shape[1:]}, the policy's action grid is "
                          f"{(len(want.speed_targets), len(want.lat_targets))}: rebuild with build_q_labels.py --overwrite")
-    if "config" in z.files:
-        cfg = json.loads(str(z["config"]))
-        if [round(v, 4) for v in cfg.get("speed_targets", want.speed_targets)] != [round(v, 4) for v in want.speed_targets] or \
-                [round(v, 4) for v in cfg.get("lat_targets", want.lat_targets)] != [round(v, 4) for v in want.lat_targets]:
-            raise ValueError(f"{path}: built for another action grid ({cfg.get('speed_targets')}, {cfg.get('lat_targets')})")
+    if "config" not in z.files:
+        raise ValueError(f"{path}: no config stored with the labels: rebuild with build_q_labels.py --overwrite")
+    cfg = json.loads(str(z["config"]))
+    if [round(v, 4) for v in cfg.get("speed_targets", want.speed_targets)] != [round(v, 4) for v in want.speed_targets] or \
+            [round(v, 4) for v in cfg.get("lat_targets", want.lat_targets)] != [round(v, 4) for v in want.lat_targets]:
+        raise ValueError(f"{path}: built for another action grid ({cfg.get('speed_targets')}, {cfg.get('lat_targets')})")
+    # every other field changes the label values, not just their shape (a stale tag such as qcf_v2, hold 8, would otherwise mix in silently)
+    rnd = lambda v: [round(x, 6) for x in v] if isinstance(v, (list, tuple)) else round(v, 6) if isinstance(v, float) else v
+    bad = [k for k, v in dataclasses.asdict(want).items() if k not in cfg or rnd(cfg[k]) != rnd(v)]
+    if bad:
+        raise ValueError(f"{path}: built with another QConfig ({', '.join(f'{k}={cfg.get(k)} vs {getattr(want, k)}' for k in bad)}): "
+                         f"train only on labels built with the QConfig defaults (--set / --hold ablation tags are for label statistics)")
     q = z["q"].reshape(len(z["frame"]), -1).astype(np.float32)
     return {str(f): q[i] for i, f in enumerate(z["frame"]) if np.isfinite(q[i]).all()}
 
@@ -438,13 +555,13 @@ def check_q_label_coverage(samples: list, tag: Optional[str]) -> Optional[float]
     return cov
 
 
-def label_route(frames: List[Tuple[dict, list]], cfg: QConfig) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Q labels for every frame of a route: (n_frames, n_speed, n_lat) float32 with NaN where a frame has too few logged successors, the mask,
-    and the collision flags of each action's best sequence."""
+def label_route(frames: List[Tuple[dict, list]], cfg: QConfig, stride: int = 1) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Q labels for every `stride`-th frame of a route: (n_frames, n_speed, n_lat) float32 with NaN where a frame is skipped or has too few logged
+    successors, the mask, and the collision flags of each action's best sequence."""
     q = np.full((len(frames), len(cfg.speed_targets), len(cfg.lat_targets)), np.nan, dtype=np.float32)
     hit = np.zeros(q.shape, dtype=bool)
     ok = np.zeros(len(frames), dtype=bool)
-    for k in range(len(frames)):
+    for k in range(0, len(frames), max(1, stride)):
         scene = build_scene(frames, k, cfg)
         if scene is not None:
             q[k], hit[k] = solve_q(scene, cfg, return_hits=True)
