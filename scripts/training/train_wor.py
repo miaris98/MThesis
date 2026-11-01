@@ -21,6 +21,7 @@ if _REPO_ROOT not in sys.path:
 from src.config import paths
 from src.models.world_on_rails import WorldOnRailsPolicy, QwenWorldOnRailsPolicy
 from src.training.wor_trainer import WorldOnRailsTrainer
+from src.training.offline_rl import OfflineRLConfig
 from src.training.auto_batch_size import find_max_batch_size
 from src.training.gpu_cleanup import cleanup_stale_processes
 from src.training.seeding import seed_everything
@@ -168,7 +169,22 @@ def parse_args():
     parser.add_argument("--q_critic", type=int, default=0, help="TODO A71: add the Q-critic head (Q over 8 speed bins x 5 lateral offsets, policy token; qwen heads only). Read at evaluation only under WOR_QCRITIC")
     parser.add_argument("--q_critic_loss_weight", type=float, default=1.0, help="TODO A71: weight of the smooth-L1 Q-label loss when --q_critic 1")
     parser.add_argument("--q_labels", type=str, default=None, help="TODO A71: tag of the per-route counterfactual Q label files (<route>/<tag>.npz, scripts/training/build_q_labels.py)")
+    parser.add_argument("--offline_rl", type=str, default="none", choices=["none", "iql", "cql"], help="TODO A72: IQL / CQL on the logged transitions "
+                        "(src/training/offline_rl.py): adds a V head, loads frame k+1 with every sample. Needs --q_critic 1 --q_labels TAG (labels built "
+                        "with the A72 fields); --q_critic_loss_weight 0 for pure offline RL, > 0 keeps A71's counterfactual labels as an extra target. "
+                        "Evaluate with WOR_QCRITIC='beta=...' (IQL's extracted policy is the A71 decoder)")
+    parser.add_argument("--iql_tau", type=float, default=0.7, help="TODO A72: IQL expectile")
+    parser.add_argument("--rl_gamma", type=float, default=0.95, help="TODO A72: discount per 0.25 s step")
+    parser.add_argument("--cql_alpha", type=float, default=1.0, help="TODO A72: CQL penalty weight (--offline_rl cql)")
+    parser.add_argument("--target_polyak", type=float, default=0.005, help="TODO A72: Polyak rate of the target Q head")
+    parser.add_argument("--offline_rl_weight", type=float, default=1.0, help="TODO A72: weight of the offline-RL term in the training loss")
     return parser.parse_args()
+
+
+def check_offline_rl_args(args) -> None:
+    """TODO A72: IQL / CQL train the A71 Q head and read A71's label files (expert action + step reward), so both must be on."""
+    if args.offline_rl != "none" and not (args.q_critic and args.q_labels):
+        raise SystemExit("--offline_rl needs --q_critic 1 and --q_labels TAG: it trains the Q head on the expert transitions stored in the label files")
 
 
 def main():
@@ -184,6 +200,9 @@ def main():
                          "target-speed head (--target_speed_loss_weight > 0): act() reads the Q head only through the speed posterior")
     if args.q_labels:
         os.environ["WOR_Q_LABELS"] = args.q_labels             # TODO A71 (read when the dataset indexes routes)
+    check_offline_rl_args(args)
+    if args.offline_rl != "none":
+        os.environ["WOR_TRANSITIONS"] = "1"                    # TODO A72: every sample also carries the next logged frame
     if args.token_mode == "s2d" and args.pooled_cache:
         raise SystemExit("--token_mode s2d reads the stride-16 level and cannot use --pooled_cache (the cache holds the pooled stride-32 map)")
     if args.pooled_cache:
@@ -342,7 +361,8 @@ def main():
             s2d_patch=args.s2d_patch,
             token_mask=args.token_mask,
             qk_norm=bool(args.qk_norm),
-            use_q_critic=bool(args.q_critic)
+            use_q_critic=bool(args.q_critic),
+            use_v_head=args.offline_rl != "none"
         )
 
     # 2. Initialize Trainer
@@ -380,6 +400,8 @@ def main():
         speed_loss_kwargs={"lambda_over": args.speed_lambda_over, "lambda_under": args.speed_lambda_under},
         path_loss_weight=args.path_loss_weight if args.path_head else 0.0,
         q_critic_loss_weight=args.q_critic_loss_weight if args.q_critic else 0.0,
+        offline_rl=(OfflineRLConfig(mode=args.offline_rl, gamma=args.rl_gamma, tau=args.iql_tau, cql_alpha=args.cql_alpha, polyak=args.target_polyak,
+                                    weight=args.offline_rl_weight) if args.offline_rl != "none" else None),
         wp_loss_weight=args.wp_loss_weight,
         q_loss_weight=args.q_loss_weight,
         lateral_loss_weight=args.lateral_loss_weight,

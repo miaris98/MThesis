@@ -31,7 +31,7 @@ for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):     # 
 import numpy as np  # noqa: E402
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-from src.training.counterfactual_q import QConfig, label_route  # noqa: E402
+from src.training.counterfactual_q import logged_step_reward, QConfig, label_route  # noqa: E402
 
 
 def _usable_cpus() -> int:
@@ -115,7 +115,14 @@ def label_route_dir(route_dir: str, tag: str, cfg: QConfig, overwrite: bool = Fa
     q, ok, hit = label_route(frames, cfg, st)
     ids = np.array([n.split(".")[0] for n in names])
     tmp = out_path + ".tmp.npz"
-    np.savez_compressed(tmp, frame=ids, q=q, hit=hit, config=json.dumps(dataclasses.asdict(cfg)), stride=st)
+    # TODO A72: the expert's action and the reward of its logged step, for every frame with a successor (not only the strided Q frames)
+    a_exp = np.full(len(frames), -1, dtype=np.int16)
+    r_exp = np.full(len(frames), np.nan, dtype=np.float32)
+    for k in range(len(frames) - 1):
+        if frames[k] is not None and frames[k + 1] is not None:
+            ev, ed = expert_action_index(frames[k][0], cfg)
+            a_exp[k], r_exp[k] = ev * len(cfg.lat_targets) + ed, logged_step_reward(frames, k, cfg)
+    np.savez_compressed(tmp, frame=ids, q=q, hit=hit, config=json.dumps(dataclasses.asdict(cfg)), stride=st, a_expert=a_exp, r_expert=r_exp)
     os.replace(tmp, out_path)
     top3 = coll = any_safe = n_bypass = bypass_side = 0
     spread, distinct = [], []

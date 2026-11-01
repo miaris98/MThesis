@@ -27,7 +27,7 @@ from src.models.transformer.layers import RMSNorm, QwenTransformerBlock
 from src.models.world_on_rails.ray_geometry import (
     RAY_GEOMETRY_CHANNELS, append_ray_geometry)
 from src.config.camera import DEFAULT_CROP_BOTTOM_FRAC
-from src.models.world_on_rails.q_critic import QCriticHead, q_decode_speed, q_shift_lateral
+from src.models.world_on_rails.q_critic import QCriticHead, ValueHead, q_decode_speed, q_shift_lateral
 
 # Trunk sizes. The 10m/30m entries exist because the offline dataset is ~9,600 frames:
 # at 100m the trunk carries roughly 11,000 trainable parameters per training sample and
@@ -169,7 +169,8 @@ class QwenWorldOnRailsPolicy(nn.Module):
         s2d_patch: int = 3,
         token_mask: float = 0.0,
         qk_norm: bool = False,
-        use_q_critic: bool = False
+        use_q_critic: bool = False,
+        use_v_head: bool = False
     ):
         super().__init__()
         self.num_commands = num_commands
@@ -280,6 +281,9 @@ class QwenWorldOnRailsPolicy(nn.Module):
         # TODO A71: Q(s, speed bin, lateral offset) on the policy token, trained on the counterfactual labels and read by act() under WOR_QCRITIC
         self.use_q_critic = bool(use_q_critic)
         self.q_head = QCriticHead(self.embed_dim) if self.use_q_critic else None
+        # TODO A72: V(s) on the same token for the IQL / CQL bootstrap (offline_rl.py); forward then also returns the token for the target Q head
+        self.use_v_head = bool(use_v_head)
+        self.v_head = ValueHead(self.embed_dim) if self.use_v_head else None
 
         trunk_params = sum(p.numel() for p in self.trunk.parameters())
         seq_len = self.num_vision_tokens + 4
@@ -367,6 +371,9 @@ class QwenWorldOnRailsPolicy(nn.Module):
             out["path"] = self.path_head(policy_repr).view(B, self.path_points, 2)
         if self.q_head is not None:
             out["q_sa"] = self.q_head(policy_repr)
+        if self.v_head is not None:
+            out["v_s"] = self.v_head(policy_repr)
+            out["policy_repr"] = policy_repr
         if self.target_speed_head is not None:
             if self.target_speed_input == "policy":
                 ts_in = policy_repr

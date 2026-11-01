@@ -23,7 +23,7 @@ from torch.utils.data import Dataset
 
 from src.config.camera import preprocess_rgb
 from src.training.swerve import anticipated_targets, brake_onset_flags, route_shift, swerve_flags
-from src.training.counterfactual_q import QConfig, check_q_label_coverage, load_q_labels
+from src.training.counterfactual_q import QConfig, check_q_label_coverage, load_q_labels, load_q_transitions
 
 Q_ROW = len(QConfig().speed_targets) * len(QConfig().lat_targets)       # TODO A71: one flattened Q label (8 speed bins x 5 lateral offsets)
 
@@ -186,6 +186,7 @@ class WorldOnRailsDataset(Dataset):
 
         self.samples = []
         self.missing_rgb = 0
+        self.with_transitions = os.environ.get("WOR_TRANSITIONS") == "1"    # TODO A72: each item also carries the next logged frame
         if synthetic_samples > 0:
             self.samples = list(range(synthetic_samples))
             self.is_synthetic = True
@@ -310,6 +311,8 @@ class WorldOnRailsDataset(Dataset):
         _ant = anticipated_targets(_ts, _ant_k)
         _onset = brake_onset_flags(_ts, int(os.environ.get("WOR_BRAKE_WINDOW", "8")))
         _qlab = load_q_labels(route_dir, os.environ.get("WOR_Q_LABELS"))    # TODO A71: counterfactual Q labels by frame id ({} = none)
+        _qtr = load_q_transitions(route_dir, os.environ.get("WOR_Q_LABELS")) if self.with_transitions else {}   # TODO A72
+        _real = {}                                                          # TODO A72: frame index -> sample index of its real-camera sample
 
         for i in range(5, num_frames - pred_len - 2):
             cur = parsed[i]
@@ -347,8 +350,12 @@ class WorldOnRailsDataset(Dataset):
                 "swerve": bool(swerve[i]),
                 "brake_onset": bool(_onset[i]),
                 "path": cur["path"],
-                "qsa": _qlab.get(frame_id)        # labelled from the true ego pose: the recovery-camera sample below gets none
+                "qsa": _qlab.get(frame_id),       # labelled from the true ego pose: the recovery-camera sample below gets none
+                "exp": _qtr.get(frame_id)         # TODO A72: (expert action, reward of its logged step)
             })
+            _real[i] = len(self.samples) - 1
+            if i - 1 in _real:
+                self.samples[_real[i - 1]]["next"] = _real[i]               # TODO A72: the logged successor (frame i follows frame i - 1)
 
             # Recovery-augmentation sample: a second, genuinely re-rendered camera at this
             # same instant, offset laterally/in yaw from the true ego pose (see
@@ -495,6 +502,22 @@ class WorldOnRailsDataset(Dataset):
         return rgb, item["speed"], item["command"], np.array(item["waypoints"], dtype=np.float32)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        sample = self._getitem_one(idx)
+        if self.with_transitions:                                           # TODO A72: (s, a_exp, r, s') for IQL / CQL
+            item = self.samples[idx] if not self.is_synthetic else {}
+            nxt = item.get("next")
+            ns = self._getitem_one(nxt) if nxt is not None else sample      # a placeholder of the right shapes; has_next = 0 masks it
+            for k in ("rgb", "vision_features", "speed", "command", "route"):
+                if k in ns:
+                    sample["next_" + k] = ns[k]
+            exp = item.get("exp")
+            sample["has_next"] = torch.tensor(1.0 if nxt is not None else 0.0)
+            sample["exp_valid"] = torch.tensor(1.0 if exp is not None else 0.0)
+            sample["exp_a"] = torch.tensor(exp[0] if exp is not None else 0, dtype=torch.long)
+            sample["exp_r"] = torch.tensor(exp[1] if exp is not None else 0.0, dtype=torch.float32)
+        return sample
+
+    def _getitem_one(self, idx: int) -> Dict[str, torch.Tensor]:
         features = None
         if self.is_synthetic:
             # Synthetic tensor generation for fast verification

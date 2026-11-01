@@ -59,7 +59,7 @@ def load_trainable_state(model: nn.Module, state: Dict[str, torch.Tensor], froze
     missing = [k for k in missing if k not in ok_reshape]
     frozen = set(frozen_keys)
     missing = [k for k in missing if k not in frozen]
-    new_heads = [k for k in missing if k.startswith(("path_head.", "path_embed.", "q_head."))]   # TODO A15 / A71: heads a resumed arm adds on purpose
+    new_heads = [k for k in missing if k.startswith(("path_head.", "path_embed.", "q_head.", "v_head."))]   # TODO A15 / A71: heads a resumed arm adds on purpose
     if new_heads:
         print(f"--> {len(new_heads)} new-head tensors start from their own init (zero output): {', '.join(new_heads[:3])} ...", flush=True)
     missing = [k for k in missing if k not in new_heads]

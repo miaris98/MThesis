@@ -55,6 +55,19 @@ class QCriticHead(nn.Module):
         return self.net(x).view(x.shape[0], self.n_speed, self.n_lat)
 
 
+class ValueHead(nn.Module):
+    """TODO A72: (B, embed_dim) policy token -> (B,) V(s) for IQL / CQL bootstraps. Zero-initialised output, like the Q head."""
+
+    def __init__(self, embed_dim: int, hidden: int = 256):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(embed_dim, hidden), nn.GELU(), nn.Linear(hidden, 1))
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x).squeeze(-1)
+
+
 def q_critic_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """Smooth L1 over the frames whose label is finite; a frame with any NaN is masked out entirely. Zero (with a graph) when none is valid."""
     valid = torch.isfinite(target).flatten(1).all(-1).float()                   # masked without a host sync (no bool(valid.any()) per step)

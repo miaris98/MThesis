@@ -449,6 +449,43 @@ def _extended_route(frames, k: int, cfg: QConfig, inv0: np.ndarray) -> RouteFram
     return RouteFrame(pts, from_origin=False)
 
 
+def _route_lane_info(frames, k: int, route: RouteFrame, inv0: np.ndarray, d0: float, ego_info: Optional[dict]):
+    """(ego_info, mask anchor): off the route lane (mid-bypass) ego_info describes the lane under the ego, whose "opposite" lanes include the
+    route lane, so the latest earlier frame in the route lane is used (review 2026-11-01); anchor None = the ego's own lane."""
+    if abs(d0) <= LANE_WIDTH / 2:
+        return ego_info, None
+    for j in range(k - 1, max(k - 80, 0) - 1, -1):
+        if frames[j] is None or "ego_matrix" not in frames[j][0]:
+            continue
+        rel = inv0 @ _mat(frames[j][0]["ego_matrix"])
+        dj = float(route.project(np.array([rel[0, 3]]), np.array([rel[1, 3]]))[1][0])
+        info_j = next((b for b in frames[j][1] if b.get("class") == "ego_info"), None)
+        if abs(dj) <= LANE_WIDTH / 2 and info_j is not None:
+            return info_j, dj
+    return ego_info, None
+
+
+def logged_step_reward(frames: List[Tuple[dict, list]], k: int, cfg: QConfig) -> Optional[float]:
+    """TODO A72: A71's step reward for the expert's real step k -> k+1 (progress along route_original, over-speed against frame k+1's limit,
+    lateral and off-road cost at the pose reached); None without a logged successor. Collisions are not checked: the expert's logged path
+    does not collide (<= 0.6% of frames at margin 0, the 2026-11-01 check). The limit uses no standing-vehicle set (a vehicle cause keeps the
+    expert's target speed), the conservative side of speed_limit_of."""
+    if k + 1 >= len(frames) or frames[k] is None or frames[k + 1] is None or "ego_matrix" not in frames[k + 1][0]:
+        return None
+    meas0, boxes0 = frames[k]
+    inv0 = np.linalg.inv(_mat(meas0["ego_matrix"]))
+    route = RouteFrame(_route_points(meas0), from_origin=False)
+    (s0,), (d0,) = route.project(np.zeros(1), np.zeros(1))
+    rel = inv0 @ _mat(frames[k + 1][0]["ego_matrix"])
+    (s1,), (d1,) = route.project(np.array([rel[0, 3]]), np.array([rel[1, 3]]))
+    info, anchor = _route_lane_info(frames, k, route, inv0, d0, next((b for b in boxes0 if b.get("class") == "ego_info"), None))
+    off = ~drivable_lateral_mask(np.array([d1 - (d0 if anchor is None else anchor)]), info)[0]
+    v1 = float(frames[k + 1][0].get("speed", 0.0))
+    limit = speed_limit_of(frames[k + 1][0], frames[k + 1][1]) + cfg.overspeed_margin
+    return float(cfg.w_progress * (s1 - s0) / (cfg.v_max * cfg.dt) - cfg.w_overspeed * max(0.0, v1 - limit) / cfg.v_max
+                 - cfg.w_lateral * abs(d1) / LANE_WIDTH - cfg.w_offroad * float(off))
+
+
 def build_scene(frames: List[Tuple[dict, list]], k: int, cfg: QConfig) -> Optional[Scene]:
     """The scene of frame k from the logged (measurements, boxes) list of one route; None without `horizon` logged successors."""
     if k + cfg.horizon >= len(frames) or any(frames[j] is None for j in range(k, k + cfg.horizon + 1)):
@@ -460,17 +497,7 @@ def build_scene(frames: List[Tuple[dict, list]], k: int, cfg: QConfig) -> Option
     ego = next((b for b in boxes0 if b.get("class") == "ego_car"), None)
     ego_half = (float(ego["extent"][0]), float(ego["extent"][1])) if ego else (2.45, 0.92)
     ego_info = next((b for b in boxes0 if b.get("class") == "ego_info"), None)
-    anchor = None
-    if abs(d0) > LANE_WIDTH / 2:      # off the route lane (mid-bypass): ego_info describes the lane under the ego, whose "opposite" lanes include
-        for j in range(k - 1, max(k - 80, 0) - 1, -1):          # the route lane; take the latest earlier frame in the route lane (review 2026-11-01)
-            if frames[j] is None or "ego_matrix" not in frames[j][0]:
-                continue
-            rel = inv0 @ _mat(frames[j][0]["ego_matrix"])
-            dj = float(route.project(np.array([rel[0, 3]]), np.array([rel[1, 3]]))[1][0])
-            info_j = next((b for b in frames[j][1] if b.get("class") == "ego_info"), None)
-            if abs(dj) <= LANE_WIDTH / 2 and info_j is not None:
-                ego_info, anchor = info_j, dj
-                break
+    ego_info, anchor = _route_lane_info(frames, k, route, inv0, d0, ego_info)
 
     tracks, statics, followers = {}, {}, set()
     for t in range(cfg.horizon + 1):
@@ -513,12 +540,30 @@ def build_scene(frames: List[Tuple[dict, list]], k: int, cfg: QConfig) -> Option
     return Scene(route, boxes, ego_half, float(meas0.get("speed", 0.0)), tgt, ego_info, s0, d0, anchor)
 
 
+def load_q_transitions(route_dir: str, tag: Optional[str]) -> dict:
+    """TODO A72: {frame id: (flattened expert action, reward of its logged step)} from the same label file; frames without one are absent."""
+    z = _open_labels(route_dir, tag)
+    if z is None or "a_expert" not in z.files:
+        return {}
+    a, r = z["a_expert"], z["r_expert"]
+    return {str(f): (int(a[i]), float(r[i])) for i, f in enumerate(z["frame"]) if a[i] >= 0 and np.isfinite(r[i])}
+
+
 def load_q_labels(route_dir: str, tag: Optional[str]) -> dict:
     """{frame id: flattened Q row} from `<route_dir>/<tag>.npz` (written by scripts/training/build_q_labels.py); rows with a NaN are dropped."""
+    z = _open_labels(route_dir, tag)
+    if z is None:
+        return {}
+    q = z["q"].reshape(len(z["frame"]), -1).astype(np.float32)
+    return {str(f): q[i] for i, f in enumerate(z["frame"]) if np.isfinite(q[i]).all()}
+
+
+def _open_labels(route_dir: str, tag: Optional[str]):
+    """The validated label npz (None without one): shape, stored config and every QConfig field must match the defaults."""
     import os
     path = os.path.join(route_dir, f"{tag}.npz") if tag else ""
     if not tag or not os.path.exists(path):
-        return {}
+        return None
     z = np.load(path, allow_pickle=False)
     want = QConfig()
     if z["q"].shape[1:] != (len(want.speed_targets), len(want.lat_targets)):
@@ -536,8 +581,7 @@ def load_q_labels(route_dir: str, tag: Optional[str]) -> dict:
     if bad:
         raise ValueError(f"{path}: built with another QConfig ({', '.join(f'{k}={cfg.get(k)} vs {getattr(want, k)}' for k in bad)}): "
                          f"train only on labels built with the QConfig defaults (--set / --hold ablation tags are for label statistics)")
-    q = z["q"].reshape(len(z["frame"]), -1).astype(np.float32)
-    return {str(f): q[i] for i, f in enumerate(z["frame"]) if np.isfinite(q[i]).all()}
+    return z
 
 
 def check_q_label_coverage(samples: list, tag: Optional[str]) -> Optional[float]:
