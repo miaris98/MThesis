@@ -246,3 +246,31 @@ def test_train_script_takes_the_imagination_horizon():
     spec.loader.exec_module(twm)
     a = twm.parse_args(["--data_dir", "d", "--pooled_cache", "p", "--q_labels", "t", "--save_dir", "s", "--imag_horizon", "5"])
     assert a.imag_horizon == 5
+
+
+def test_policy_improvement_on_a_sub_batch_keeps_bc_on_every_state():
+    """pi_batch (2026-11-02): the h-step lookahead over 40 actions is ~90% of a step (3.99 s at batch 256 on the box), so the imagination
+    target runs on the first pi_batch states (the loader shuffles, so a random subset); BC still uses the whole batch."""
+    torch.manual_seed(0)
+    m = LatentWorldModel(SMALL)
+    s = m.encode(torch.randn(8, C, GH, GW))
+    a_exp = torch.arange(8) % 3
+    full, sub = WMLossConfig(horizon=2), WMLossConfig(horizon=2, pi_batch=4)
+    l_sub = policy_improvement_loss(m, s, a_exp, sub)
+    assert torch.allclose(l_sub["policy_imag"], policy_improvement_loss(m, s[:4], a_exp[:4], full)["policy_imag"], atol=1e-6)
+    assert torch.allclose(l_sub["policy_bc"], policy_improvement_loss(m, s, a_exp, full)["policy_bc"], atol=1e-6)
+    assert torch.allclose(policy_improvement_loss(m, s, a_exp, WMLossConfig(horizon=2, pi_batch=64))["total"],
+                          policy_improvement_loss(m, s, a_exp, full)["total"], atol=1e-6)      # pi_batch >= B: the whole batch
+
+
+def test_train_script_takes_pi_batch_and_tf32():
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location("twm4", Path(__file__).resolve().parents[1] / "scripts" / "training" / "train_world_model.py")
+    twm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(twm)
+    base = ["--data_dir", "d", "--pooled_cache", "p", "--q_labels", "t", "--save_dir", "s"]
+    a = twm.parse_args(base)
+    assert a.pi_batch == 0 and a.tf32 == 0                                         # defaults: the whole batch, plain fp32
+    a = twm.parse_args(base + ["--pi_batch", "64", "--tf32", "1"])
+    assert a.pi_batch == 64 and a.tf32 == 1

@@ -47,6 +47,8 @@ def parse_args(argv=None):
     ap.add_argument("--bc_weight", type=float, default=0.2)
     ap.add_argument("--imag_weight", type=float, default=1.0)
     ap.add_argument("--imag_horizon", type=int, default=5, help="imagined steps behind the policy target (1 = one-step lookahead)")
+    ap.add_argument("--pi_batch", type=int, default=0, help="states per batch with the lookahead target (0 = all; BC uses every state)")
+    ap.add_argument("--tf32", type=int, default=0, help="1 = TF32 matmuls (1.5x on the RTX 5000 Ada box, 2026-11-02)")
     ap.add_argument("--lr", type=float, default=1e-4, help="AdamW; B66/B67: <= 1e-4 for transformer RL heads")
     ap.add_argument("--weight_decay", type=float, default=0.01)
     ap.add_argument("--warmup_frac", type=float, default=0.05)
@@ -67,6 +69,7 @@ def main(argv=None):
     a = parse_args(argv)
     random.seed(a.seed)
     torch.manual_seed(a.seed)
+    torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = bool(a.tf32)
     os.makedirs(a.save_dir, exist_ok=True)
     prefixes = [p for p in a.pooled_cache.split(",") if p]
     full = LatentWindowDataset(a.data_dir, prefixes, a.q_labels, K=a.K)
@@ -89,7 +92,8 @@ def main(argv=None):
     target.load_state_dict(model.state_dict())
     for p in target.parameters():
         p.requires_grad_(False)
-    lcfg = WMLossConfig(gamma=a.gamma, penalty=a.penalty, bc_weight=a.bc_weight, imag_weight=a.imag_weight, horizon=a.imag_horizon)
+    lcfg = WMLossConfig(gamma=a.gamma, penalty=a.penalty, bc_weight=a.bc_weight, imag_weight=a.imag_weight, horizon=a.imag_horizon,
+                        pi_batch=a.pi_batch)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=a.weight_decay)
     total_steps = max(1, a.epochs * len(train_loader))
     warm = max(1, int(a.warmup_frac * total_steps))

@@ -42,6 +42,7 @@ class WMLossConfig:
     penalty: float = 1.0                # MOPO lambda in {1, 5}
     temperature: float = 1.0
     horizon: int = 1                    # imagined steps behind the policy target (TODO: h = 5, then the value bootstrap)
+    pi_batch: int = 0                   # states per batch that get the lookahead target (0 = all); BC always uses every state
 
 
 def _masked(x: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
@@ -114,11 +115,14 @@ def imagined_return(model: LatentWorldModel, s: torch.Tensor, horizon: int, gamm
 
 
 def policy_improvement_loss(model: LatentWorldModel, s: torch.Tensor, a_exp: torch.Tensor, cfg: WMLossConfig) -> Dict[str, torch.Tensor]:
+    """The lookahead target on the first cfg.pi_batch states (the loader shuffles: a random subset; the h-step lookahead over 40 actions
+    is ~90% of a training step), BC on all of them."""
+    n = cfg.pi_batch if 0 < cfg.pi_batch < s.shape[0] else s.shape[0]
     with torch.no_grad():
-        q, _ = lookahead_q(model, s.detach(), cfg.gamma, cfg.penalty, cfg.horizon)
+        q, _ = lookahead_q(model, s[:n].detach(), cfg.gamma, cfg.penalty, cfg.horizon)
         tgt = F.softmax(q / cfg.temperature, -1)
     logp = F.log_softmax(model.policy_logits(s), -1)
-    imag = (tgt * (torch.log(tgt.clamp(min=1e-12)) - logp)).sum(-1).mean()
+    imag = (tgt * (torch.log(tgt.clamp(min=1e-12)) - logp[:n])).sum(-1).mean()
     bc = F.nll_loss(logp, a_exp.long())
     return {"policy_imag": imag, "policy_bc": bc, "total": cfg.imag_weight * imag + cfg.bc_weight * bc}
 

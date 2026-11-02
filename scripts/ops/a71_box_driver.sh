@@ -74,7 +74,7 @@ a73)  # TODO A73: pooled cache of E15's frozen encoder (E15's image settings), w
   fi
   PREFIX=$(ls /workspace/pooled_e15/*.json | head -1); PREFIX=${PREFIX%.json}
   SIZE=""; [ "${A73_TRUNK:-qwen}" = qwen ] && SIZE="--size 30m"
-  $PY -u scripts/training/train_world_model.py --data_dir $D --pooled_cache $PREFIX --q_labels qcf_v4 --K 5 --trunk ${A73_TRUNK:-qwen} $SIZE     --epochs ${A73_EPOCHS:-10} --batch_size 256 --lr 1e-4 --penalty ${A73_PENALTY:-1} --num_workers ${NW:-14}     --save_dir /workspace/checkpoints/A73_${A73_TRUNK:-qwen} > /workspace/a71/a73_${A73_TRUNK:-qwen}.log 2>&1
+  $PY -u scripts/training/train_world_model.py --data_dir $D --pooled_cache $PREFIX --q_labels qcf_v4 --K 5 --trunk ${A73_TRUNK:-qwen} $SIZE     --epochs ${A73_EPOCHS:-3} --batch_size 256 --lr 1e-4 --penalty ${A73_PENALTY:-1} --pi_batch ${A73_PI_BATCH:-64} --tf32 1 --num_workers ${NW:-14}     --save_dir /workspace/checkpoints/A73_${A73_TRUNK:-qwen} > /workspace/a71/a73_${A73_TRUNK:-qwen}.log 2>&1
   mark "A73_TRAIN_EXIT $?"
   CK=$(ls /workspace/checkpoints/A73_${A73_TRUNK:-qwen}/wm_epoch_*.pth | tail -1)
   $PY scripts/analysis/a73_world_model_gate.py --ckpt $CK --out /workspace/a71/a73_gate_${A73_TRUNK:-qwen}.json > /workspace/a71/a73_gate.log 2>&1
