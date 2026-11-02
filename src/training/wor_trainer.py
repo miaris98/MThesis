@@ -52,6 +52,16 @@ def autocast(enabled: bool = True):
     return _autocast(enabled=enabled, dtype=torch.bfloat16) if torch.cuda.is_available() else _autocast(enabled=enabled)
 
 
+def critic_module(model):
+    """TODO A71-W: the A71 Q head of either network (`q_sa_head` on the WoR network, whose `q_head` is the SpatialQHead; `q_head` on Qwen)."""
+    m = getattr(model, "q_sa_head", None)
+    if m is not None:
+        return m
+    m = getattr(model, "q_head", None)
+    from src.models.world_on_rails.q_critic import QCriticHead
+    return m if isinstance(m, QCriticHead) else None
+
+
 class WorldOnRailsTrainer:
     """
     Trainer for World on Rails Policy Distillation.
@@ -151,10 +161,11 @@ class WorldOnRailsTrainer:
         self.offline_rl = offline_rl
         self.q_target = None
         if offline_rl is not None:
-            if getattr(model, "q_head", None) is None or getattr(model, "v_head", None) is None:
+            self.q_critic_module = critic_module(model)
+            if self.q_critic_module is None or getattr(model, "v_head", None) is None:
                 raise ValueError("offline RL needs the Q head and the V head (use_q_critic=True, use_v_head=True)")
             import copy
-            self.q_target = copy.deepcopy(model.q_head).to(device)
+            self.q_target = copy.deepcopy(self.q_critic_module).to(device)
             for p_ in self.q_target.parameters():
                 p_.requires_grad_(False)
         self.speed_loss_kwargs = dict(speed_loss_kwargs or {})   # TODO A39: lambda_over / lambda_under of the asymmetric ordinal term
@@ -432,7 +443,7 @@ class WorldOnRailsTrainer:
                 grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.grad_clip)
                 self.optimizer.step()
             if self.q_target is not None:
-                polyak_update(self.q_target, self.model.q_head, self.offline_rl.polyak)     # TODO A72
+                polyak_update(self.q_target, self.q_critic_module, self.offline_rl.polyak)  # TODO A72
 
             # The LR schedule advances per optimizer step, not per epoch, because
             # warmup over ~5% of a 50-epoch run is 2.5 epochs - far too coarse to

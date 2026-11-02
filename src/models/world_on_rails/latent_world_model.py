@@ -8,7 +8,8 @@ embeddings are what make it rise on actions the data does not contain). Reward a
 actions. No pixel reconstruction (MILE weights images at 0): the latent target is the next frame's representation by an EMA encoder (LAW).
 
 trunk = "qwen": the project's QwenTransformerBlock at a _MODEL_SIZES size (A73-Q; "30m" = 8 blocks x 512, the CARLA/Atari network), or
-explicit small dims for tests; "mlp": per-token MLP blocks with a token-mean mixer (A73-W, the conv-head stand-in).
+explicit small dims for tests; "conv": residual 3x3 conv blocks over the 4 x 4 grid, the action added at every cell (A73-W, the WoR-family
+network); "mlp": per-token MLP blocks with a token-mean mixer (a cheap baseline).
 """
 from __future__ import annotations
 
@@ -28,7 +29,7 @@ class WorldModelConfig:
     feat_channels: int = 1512
     grid: Tuple[int, int] = (4, 4)
     n_actions: int = N_ACTIONS
-    trunk: str = "qwen"                                 # "qwen" | "mlp"
+    trunk: str = "qwen"                                 # "qwen" (A73-Q) | "conv" (A73-W) | "mlp"
     size: Optional[str] = None                          # a qwen_wor_policy._MODEL_SIZES key; overrides the dims below
     embed_dim: int = 512
     repr_depth: int = 2
@@ -58,13 +59,30 @@ class _MLPBlock(nn.Module):
         return x + self.ffn(h + self.mix(h.mean(1, keepdim=True)))
 
 
+class _ConvBlock(nn.Module):
+    """A73-W: a residual 3x3 conv block over the (gh, gw) grid of state tokens (B, gh * gw, D)."""
+
+    def __init__(self, dim: int, grid: Tuple[int, int]):
+        super().__init__()
+        self.grid = grid
+        self.body = nn.Sequential(nn.GroupNorm(8 if dim % 8 == 0 else 1, dim), nn.Conv2d(dim, dim, 3, padding=1), nn.GELU(),
+                                  nn.Conv2d(dim, dim, 3, padding=1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, N, D = x.shape
+        g = x.transpose(1, 2).reshape(B, D, *self.grid)
+        return x + self.body(g).reshape(B, D, N).transpose(1, 2)
+
+
 def _blocks(cfg: WorldModelConfig, depth: int) -> nn.Sequential:
+    if cfg.trunk == "conv":
+        return nn.Sequential(*[_ConvBlock(cfg.embed_dim, cfg.grid) for _ in range(depth)])
     if cfg.trunk == "qwen":
         return nn.Sequential(*[QwenTransformerBlock(cfg.embed_dim, num_heads=cfg.num_heads, ffn_dim=cfg.ffn_dim, qk_norm=cfg.qk_norm)
                                for _ in range(depth)])
     if cfg.trunk == "mlp":
         return nn.Sequential(*[_MLPBlock(cfg.embed_dim, cfg.ffn_dim) for _ in range(depth)])
-    raise ValueError(f"trunk must be 'qwen' or 'mlp', got {cfg.trunk!r}")
+    raise ValueError(f"trunk must be 'qwen', 'mlp' or 'conv', got {cfg.trunk!r}")
 
 
 class LatentWorldModel(nn.Module):
@@ -98,9 +116,13 @@ class LatentWorldModel(nn.Module):
 
     def step(self, s: torch.Tensor, a: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """(next state = ensemble mean (B, T, D), every head's next state (E, B, T, D), reward (B,)) for actions a (B,) long."""
-        a_tok = self.action_embed(a.long()).unsqueeze(1) + self.pos[:, self.n_tokens:]
-        h = self.dyn_norm(self.dyn(torch.cat([s, a_tok], 1)))
-        hs, ha = h[:, :self.n_tokens], h[:, self.n_tokens]
+        a_emb = self.action_embed(a.long())
+        if self.cfg.trunk == "conv":                    # a conv grid has no slot for an extra token: the action is added at every cell
+            hs = self.dyn_norm(self.dyn(s + a_emb.unsqueeze(1)))
+            ha = a_emb
+        else:
+            h = self.dyn_norm(self.dyn(torch.cat([s, a_emb.unsqueeze(1) + self.pos[:, self.n_tokens:]], 1)))
+            hs, ha = h[:, :self.n_tokens], h[:, self.n_tokens]
         s_all = torch.stack([s + head(hs + emb(a.long()).unsqueeze(1)) for head, emb in zip(self.ens, self.ens_action)])
         r = self.reward_head(torch.cat([hs.mean(1), ha], -1)).squeeze(-1)
         return s_all.mean(0), s_all, r

@@ -156,7 +156,9 @@ def load_wor_model(
             target_speed_input=resolved_ts_input,
             use_rail_q=resolved_rail_q,
             use_ray_geometry=resolved_ray_geo,
-            crop_bottom_frac=resolved_crop
+            crop_bottom_frac=resolved_crop,
+            use_q_critic=bool(_resolve("use_q_critic", None, False)),    # TODO A71-W
+            use_v_head=bool(_resolve("use_v_head", None, False))         # TODO A72-W
         )
     else:
         model = QwenWorldOnRailsPolicy(

@@ -5,6 +5,7 @@
 #   eval    lanes: E15 | a71q1 off | a71q1 on (Q decode), 104 lead + obstacle routes at Low, the 5 crash routes at Epic
 #   train   E15 epoch 15 -> 20 with the Q head on qcf_v4, E15's recipe
 #   train_a72  TODO A72: the same fine-tune with IQL / CQL on the expert transitions (batch 128: every sample also loads frame k+1)
+#   train_w TODO A71-W / A72-W: the WoR network from scratch with the critic (W_RL none|iql|cql); A73-W = a73 with A73_TRUNK=conv
 #   a73     TODO A73: pooled cache, latent world model, offline gate (no closed loop until A71 / A72 show the value signal helps)
 #   check   offline Q-head check of the trained epochs
 set -uo pipefail
@@ -56,6 +57,12 @@ train_a72)  # TODO A72: same resume and recipe as train, plus IQL / CQL on the e
   mark "TRAIN_A72_${A72_MODE:-iql}_START"
   WOR_Q_MIN_COVERAGE=0.2 $PY -u scripts/training/train_wor.py --data_dir $D --save_dir /workspace/checkpoints/A72_${A72_MODE:-iql} --run_label a72_${A72_MODE:-iql}     --policy_arch qwen30m --backbone regnety_032 --weights_path $E15/frozen_backbone.pth --pretrained 1 --freeze_backbone 1     --img_size 288x768 --crop_bottom_frac 0.0 --vision_grid 4 --route_overlay 1 --route_points 4     --use_augmented_camera 1 --target_speed_loss_weight 0.2 --target_speed_input policy --lateral_loss_weight 3.0 --wp_loss_weight 1.0     --batch_size ${A72_BS:-128} --lr_heads 3e-4 --lr_backbone 1e-4 --grad_clip 5.0 --warmup_frac 0.05 --val_split 0.15 --seed 0     --epochs 50 --stop_epoch 20 --save_freq 1 --val_every 1 --resume_from $E15/model_epoch_015.pth     --q_critic 1 --q_labels qcf_v4 --q_critic_loss_weight ${A72_QLW:-0.5} --offline_rl ${A72_MODE:-iql} --iql_tau 0.7 --rl_gamma 0.95 --cql_alpha 1.0     --num_workers ${NW:-14} --use_mlflow 1 --kill_stale 0 --experiment_name A72_${A72_MODE:-iql} > /workspace/a71/train_a72_${A72_MODE:-iql}.log 2>&1
   mark "TRAIN_A72_EXIT $?" ;;
+train_w)  # TODO A71-W / A72-W: the WoR network (cnn arch) from scratch with the critic (W_RL=none|iql|cql), W_EPOCHS (default 20 = the TODO)
+  pgrep -af "train_wor.py.*a7x_w_${W_RL:-none}" && { mark "TRAIN_W_ALREADY_RUNNING"; exit 1; }
+  RL=""; [ "${W_RL:-none}" != none ] && RL="--offline_rl ${W_RL} --iql_tau 0.7 --rl_gamma 0.95 --cql_alpha 1.0"
+  mark "TRAIN_W_${W_RL:-none}_START"
+  WOR_Q_MIN_COVERAGE=0.2 $PY -u scripts/training/train_wor.py --data_dir $D --save_dir /workspace/checkpoints/A7x_w_${W_RL:-none} --run_label a7x_w_${W_RL:-none}     --policy_arch cnn --backbone regnety_032 --weights_path $E15/frozen_backbone.pth --pretrained 1 --freeze_backbone 1     --img_size 288x768 --crop_bottom_frac 0.0 --route_overlay 1 --route_points 4 --use_augmented_camera 1     --target_speed_loss_weight 0.2 --target_speed_input policy --lateral_loss_weight 3.0 --wp_loss_weight 1.0     --batch_size ${W_BS:-128} --lr_heads 3e-4 --lr_backbone 1e-4 --grad_clip 5.0 --warmup_frac 0.05 --val_split 0.15 --seed 0     --epochs 50 --stop_epoch ${W_EPOCHS:-20} --save_freq 1 --val_every 1 --q_critic 1 --q_labels qcf_v4 --q_critic_loss_weight 1.0 $RL     --num_workers ${NW:-14} --use_mlflow 1 --kill_stale 0 --experiment_name A7x_w > /workspace/a71/train_w_${W_RL:-none}.log 2>&1
+  mark "TRAIN_W_EXIT $?" ;;
 a73_cache)  # TODO A73: only the pooled cache (needs no labels: run it while the labels build elsewhere)
   ls /workspace/pooled_e15/*.json > /dev/null 2>&1 && { mark A73_CACHE_EXISTS; exit 0; }
   mark A73_CACHE_START

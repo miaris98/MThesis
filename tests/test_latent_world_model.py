@@ -37,8 +37,8 @@ def _toy_batch(B=32, K=5, seen_actions=(0, 1, 2, 3), seed=0):
     return torch.stack(feats, 1), acts, rewards, torch.ones(B, K)
 
 
-def test_shapes_for_both_trunks():
-    for trunk in ("qwen", "mlp"):
+def test_shapes_for_every_trunk():
+    for trunk in ("qwen", "mlp", "conv"):
         cfg = WorldModelConfig(**{**SMALL.__dict__, "trunk": trunk})
         m = LatentWorldModel(cfg)
         s = m.encode(torch.randn(3, C, GH, GW))
@@ -191,3 +191,26 @@ def test_gate_runs_on_a_trained_checkpoint_with_held_out_routes(tmp_path):
               "--num_workers", "0", "--val_frac", "0.25", "--save_dir", str(out), "--use_mlflow", "0", "--device", "cpu"])
     res = gate_main(["--ckpt", str(out / "wm_epoch_001.pth"), "--out", str(tmp_path / "gate.json"), "--num_workers", "0"])
     assert res["windows"] > 0 and len(res["latent_vs_copy"]) == 3 and "gate_pass" in res and (tmp_path / "gate.json").exists()
+
+
+def test_conv_trunk_a73w_learns_and_its_ensemble_disagrees_on_unseen_actions():
+    """A73-W: conv dynamics on the pooled 4x4 map (the WoR-family network) instead of transformer blocks."""
+    from torch import nn
+    torch.manual_seed(0)
+    cfg = WorldModelConfig(**{**SMALL.__dict__, "trunk": "conv"})
+    m, tgt = LatentWorldModel(cfg), LatentWorldModel(cfg)
+    assert any(isinstance(x, nn.Conv2d) for x in m.modules())
+    tgt.load_state_dict(m.state_dict())
+    opt = torch.optim.AdamW(m.parameters(), lr=1e-3)
+    feats, acts, rew, valid = _toy_batch(B=64)
+    first = float(unroll_losses(m, tgt, feats, acts, rew, valid, WMLossConfig())["latent"].detach())
+    for _ in range(300):
+        loss = unroll_losses(m, tgt, feats, acts, rew, valid, WMLossConfig())
+        opt.zero_grad()
+        loss["total"].backward()
+        opt.step()
+        update_target(tgt, m, 0.05)
+    with torch.no_grad():
+        assert float(unroll_losses(m, tgt, feats, acts, rew, valid, WMLossConfig())["latent"]) < 0.5 * first
+        _, u = lookahead_q(m, m.encode(feats[:, 0]), gamma=0.95, penalty=0.0)
+        assert u[:, 4:].mean() > 2.0 * u[:, :4].mean()

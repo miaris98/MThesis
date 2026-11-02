@@ -34,7 +34,7 @@ def parse_args(argv=None):
     ap.add_argument("--pooled_cache", required=True, help="comma-separated pooled-cache prefixes")
     ap.add_argument("--q_labels", required=True, help="label tag with the A72 transition fields (a_expert, r_expert)")
     ap.add_argument("--K", type=int, default=5)
-    ap.add_argument("--trunk", default="qwen", choices=["qwen", "mlp"])
+    ap.add_argument("--trunk", default="qwen", choices=["qwen", "conv", "mlp"], help="qwen = A73-Q, conv = A73-W")
     ap.add_argument("--size", default=None, help="qwen_wor_policy._MODEL_SIZES key (30m = the CARLA/Atari network); overrides the dims")
     ap.add_argument("--embed_dim", type=int, default=512)
     ap.add_argument("--repr_depth", type=int, default=2)

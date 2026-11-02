@@ -145,7 +145,9 @@ class WorldOnRailsPolicy(nn.Module):
         target_speed_input: str = "policy",
         use_rail_q: bool = True,
         use_ray_geometry: bool = False,
-        crop_bottom_frac: float = DEFAULT_CROP_BOTTOM_FRAC
+        crop_bottom_frac: float = DEFAULT_CROP_BOTTOM_FRAC,
+        use_q_critic: bool = False,
+        use_v_head: bool = False
     ):
         super().__init__()
         self.num_commands = num_commands
@@ -221,6 +223,12 @@ class WorldOnRailsPolicy(nn.Module):
             self.target_speed_head = TargetSpeedHead(ts_dim)
         else:
             self.target_speed_head = None
+        # TODO A71-W / A72-W: the A71 critic and the A72 V head on SpatialQHead's pooled fusion vector (128-d, what the target-speed head reads).
+        # `q_head` is already the SpatialQHead here, so the critic is `q_sa_head`.
+        from src.models.world_on_rails.q_critic import QCriticHead, ValueHead
+        self.use_q_critic, self.use_v_head = bool(use_q_critic), bool(use_v_head)
+        self.q_sa_head = QCriticHead(128) if self.use_q_critic else None
+        self.v_head = ValueHead(128) if self.use_v_head else None
 
     def embed_state(
         self,
@@ -325,6 +333,11 @@ class WorldOnRailsPolicy(nn.Module):
         if self.target_speed_head is not None:
             out["target_speed_logits"] = self.target_speed_head(
                 fused_vec if self.target_speed_input == "policy" else state_emb)
+        if self.q_sa_head is not None:
+            out["q_sa"] = self.q_sa_head(fused_vec)
+        if self.v_head is not None:
+            out["v_s"] = self.v_head(fused_vec)
+            out["policy_repr"] = fused_vec
         return out
 
     @torch.no_grad()
@@ -408,6 +421,11 @@ class WorldOnRailsPolicy(nn.Module):
             target_speed_kmh = 3.6 * float(
                 self.target_speed_head.expected_speed(
                     out["target_speed_logits"])[0].item())
+            from src.models.world_on_rails.q_critic import q_decode_speed, q_shift_lateral
+            probs = out["target_speed_logits"][0].float().softmax(-1).cpu().numpy()
+            target_speed_kmh, probs = q_decode_speed(self, out, probs, target_speed_kmh)     # TODO A71-W: no-op unless WOR_QCRITIC is set
+            self.last_debug = {"probs": probs, "waypoints": wps, "target_kmh": target_speed_kmh, "force_brake": False}
+            wps = q_shift_lateral(self, wps, route_tensor[0] if route_tensor is not None else None)
             # Published so the eval HUD and telemetry report the live decision rather
             # than the unchanging default (see eval_wor.py's target_speed_kmh read).
             self.controller.target_speed = target_speed_kmh

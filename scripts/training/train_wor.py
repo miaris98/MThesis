@@ -181,6 +181,13 @@ def parse_args():
     return parser.parse_args()
 
 
+def check_q_critic_args(args) -> None:
+    """TODO A71 / A71-W: the critic needs its labels and the target-speed head (act() reads it through the speed posterior); either network."""
+    if args.q_critic and (not args.q_labels or args.target_speed_loss_weight <= 0):
+        raise SystemExit("--q_critic 1 needs --q_labels TAG (scripts/training/build_q_labels.py writes the labels) and the target-speed head "
+                         "(--target_speed_loss_weight > 0): act() reads the Q head only through the speed posterior")
+
+
 def check_offline_rl_args(args) -> None:
     """TODO A72: IQL / CQL train the A71 Q head and read A71's label files (expert action + step reward), so both must be on."""
     if args.offline_rl != "none" and not (args.q_critic and args.q_labels):
@@ -195,9 +202,7 @@ def main():
     os.environ["WOR_ANTICIPATE_S"] = str(args.anticipate_s)    # TODO A38 step 1 (read when the dataset indexes routes)
     os.environ["WOR_BRAKE_FRAC"] = str(args.brake_frac)        # TODO A38 step 2 (read by the train loader)
     os.environ["WOR_BRAKE_WINDOW"] = str(args.brake_window)
-    if args.q_critic and (args.policy_arch == "cnn" or not args.q_labels or args.target_speed_loss_weight <= 0):
-        raise SystemExit("--q_critic 1 needs a qwen --policy_arch, --q_labels TAG (scripts/training/build_q_labels.py writes the labels) and the "
-                         "target-speed head (--target_speed_loss_weight > 0): act() reads the Q head only through the speed posterior")
+    check_q_critic_args(args)
     if args.q_labels:
         os.environ["WOR_Q_LABELS"] = args.q_labels             # TODO A71 (read when the dataset indexes routes)
     check_offline_rl_args(args)
@@ -335,12 +340,11 @@ def main():
             use_rail_q=bool(args.use_rail_q),
             use_ray_geometry=bool(args.ray_geometry),
             crop_bottom_frac=args.crop_bottom_frac,
-            use_path_head=bool(args.path_head),
-            path_cascade=bool(args.path_cascade),
-            token_mode=args.token_mode,
-            s2d_patch=args.s2d_patch,
-            token_mask=args.token_mask
+            use_q_critic=bool(args.q_critic),                    # TODO A71-W
+            use_v_head=args.offline_rl != "none"                 # TODO A72-W
         )
+        if args.path_head or args.token_mode != "pool" or args.token_mask > 0:
+            raise SystemExit("--path_head / --token_mode / --token_mask are Qwen-head options; the cnn arch has none of them")
     else:
         policy = QwenWorldOnRailsPolicy(
             backbone_name=args.backbone,
