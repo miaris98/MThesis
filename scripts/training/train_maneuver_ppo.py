@@ -100,6 +100,7 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--poll_s", type=float, default=20.0)
     ap.add_argument("--use_mlflow", type=int, default=1)
+    ap.add_argument("--run_name", default="", help="MLflow run name (default: <run folder>_<out folder>, e.g. run1_learner)")
     a = ap.parse_args()
 
     cfg = PPOConfig(gamma=a.gamma, lam=a.lam, epochs=a.epochs, minibatch=a.minibatch, lr=a.lr, kl_coef=a.kl_coef, ent_coef=a.ent_coef,
@@ -136,7 +137,7 @@ def main():
             os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
             mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "file:" + str(mlruns_dir())))
             mlflow.set_experiment("A74_maneuver_ppo")
-            mlflow.start_run(run_name=os.path.basename(os.path.normpath(a.out)))
+            mlflow.start_run(run_name=a.run_name or "_".join(os.path.normpath(a.out).replace("\\", "/").split("/")[-2:]))
             mlflow.log_params({k: str(v) for k, v in vars(a).items()})
             ml = mlflow
         except Exception as e:
