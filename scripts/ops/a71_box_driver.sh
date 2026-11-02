@@ -16,7 +16,7 @@ PY=/venv/main/bin/python
 D=/workspace/dataset/wor_trajectories
 DENSE="Accident|Obstacle|HazardAtSideLane|OpensDoor|Construction|InvadingTurn|ParkedObstacle"
 NC=$(cat /workspace/MThesis/scripts/ops/a71_routes_lead_obstacle_104.txt)
-EPIC=27515,25854,25896,25955,24816
+EPIC=27515,25854,25896,25955,24816,26435   # 26435: Town03 Low segfault (S-137), 2026-11-02
 E15=/workspace/checkpoints/E15
 case $1 in
 setup)
