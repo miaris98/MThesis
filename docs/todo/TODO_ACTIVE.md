@@ -285,8 +285,10 @@ values from the logs without improving the closed loop. A74 learns *when to devi
 - No maneuver did better while moving or stuck. Cause: creep was min(E15 target, 5.4 km/h), so with E15 at 0 every maneuver stayed at
   0 km/h. Fixed in 2e729df: creep drives at 5.4 km/h along the route.
 
-**probe2 (from 17:55):** obstacle routes only, no exploration while moving, and a random maneuver held 4 s whenever the car has stood still
->= 4 s. It asks whether any maneuver gets E15 unstuck, and at what collision cost. Result: pending.
+**probe2 (from 17:55 Athens, 286 obstacle routes):** obstacle routes only, no exploration while moving, random maneuver held 4 s whenever stuck >= 4 s.
+- **Unstuck within 4 s:** +0.0 creep 11.6% (n=735), -3.5 creep 10.0% (n=737), +3.5 creep 9.5% (n=661), vs E15's 2.4% (4-5x increase).
+- **Route outcomes:** RC 82.6 +- 2.5 (vs run1's 79.1 +- 2.6), route completion (RC >= 99) 58% vs 50% (+8% completed routes). Collisions/route 3.03 vs 2.44 (+0.59 due to blind random maneuvers), dropping multiplier to 0.395 and DS to 32.7 +- 2.8 (vs run1's 36.7 +- 2.9).
+- **Verdict for run2:** Creep reliably breaks standstill deadlocks, but uniform random exploration incurs collisions on the blocked side. A trained PPO head conditioning on front-camera features when stuck will select the open lane, capturing the +8% completion gain without the blind collision penalty.
 
 **Next:** if a maneuver unsticks E15 at an acceptable collision cost, run2 trains with:
 - decisions only when stuck (while moving, no maneuver beat E15);
