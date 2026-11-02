@@ -193,6 +193,8 @@ class WorB2DAgent(AutonomousAgent):
             hero, self._route_locations, self._route_idx,
             route_points=self._inner.route_points)
 
+        if os.environ.get("WOR_RL"):
+            self._rl_pre_step(hero, timestamp)                  # TODO A74: last tick's reward first, then act() picks this tick's maneuver
         control = self._inner.run_step({
             "rgb_front": rgb,
             "speed": input_data["speed"],  # (frame, {'speed': m/s}) - already the trained unit
@@ -210,6 +212,37 @@ class WorB2DAgent(AutonomousAgent):
                 self._clips_failed = True
                 print(f"[A44] clip recorder disabled for this route: {e!r}", flush=True)
         return control
+
+    def _rl_pre_step(self, hero, timestamp):
+        """TODO A74 (WOR_RL): on a route's first tick attach a maneuver controller to the policy and a collision sensor to the ego (rewards
+        only; the policy still sees the camera alone); every tick, credit the reward of the transition the previous maneuver caused
+        (maneuver_rl.RLEpisode) before act() picks this tick's maneuver."""
+        import queue
+        from src.models.world_on_rails.maneuver_rl import RLEpisode, controller_from_env
+        if getattr(self, "_rl_off", False):
+            return
+        if getattr(self, "_rl_ep", None) is None:
+            net = self._inner.net
+            if not hasattr(net, "embed_dim"):
+                raise RuntimeError(f"WOR_RL needs the qwen policy's maneuver hook; {type(net).__name__} has none")
+            made = controller_from_env(net.embed_dim, seed=(os.getpid() * 1000003 + hero.id) % (2 ** 32))
+            if made is None:                                     # WOR_RL="0": off, the plain decode
+                self._rl_off = True
+                return
+            ctl, cfg = made
+            net._rl = ctl
+            xy = np.array([[loc.x, loc.y] for loc in self._route_locations], dtype=np.float64)
+            self._rl_ep = RLEpisode(ctl, cfg, xy, self._route_tag)
+            self._rl_q = queue.Queue()
+            world = CarlaDataProvider.get_world()
+            self._rl_sensor = world.spawn_actor(world.get_blueprint_library().find("sensor.other.collision"), carla.Transform(), attach_to=hero)
+            self._rl_sensor.listen(lambda ev, q=self._rl_q: q.put((ev.other_actor.type_id, ev.other_actor.id)))
+            print(f"[A74] maneuver RL on: {cfg}", flush=True)
+        coll = []
+        while not self._rl_q.empty():
+            coll.append(self._rl_q.get_nowait())
+        loc = hero.get_location()
+        self._rl_ep.tick(loc.x, loc.y, float(timestamp), coll)
 
     # ---- A44 collision-clip recorder (B2D_CLIPS_DIR); off by default ------------------------------------------------------------
     # A 6 s ring buffer at 4 Hz (frame, speed, control, speed posterior, target speed, waypoints) written as one npz per collision / long stand-still,
@@ -310,6 +343,14 @@ class WorB2DAgent(AutonomousAgent):
                              f"{control.throttle:.2f}", f"{control.brake:.2f}", f"{control.steer:.3f}"])
 
     def destroy(self):
+        if getattr(self, "_rl_ep", None) is not None:          # TODO A74: write the route's episode for the learner
+            try:
+                self._rl_sensor.stop(); self._rl_sensor.destroy()
+            except Exception:
+                pass
+            print(f"[A74] episode {self._rl_ep.finish()}", flush=True)
+            self._inner.net._rl = None
+            self._rl_ep = None
         if getattr(self, "_clips", None) is not None:
             try:
                 self._clip_sensor.stop(); self._clip_sensor.destroy()

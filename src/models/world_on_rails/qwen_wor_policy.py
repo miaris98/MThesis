@@ -29,6 +29,7 @@ from src.models.world_on_rails.ray_geometry import (
 from src.config.camera import DEFAULT_CROP_BOTTOM_FRAC
 from src.models.world_on_rails.q_critic import QCriticHead, ValueHead, q_decode_speed, q_shift_lateral
 from src.models.world_on_rails.world_model_decode import world_model_q
+from src.models.world_on_rails.maneuver_rl import rl_maneuver
 
 # Trunk sizes. The 10m/30m entries exist because the offline dataset is ~9,600 frames:
 # at 100m the trunk carries roughly 11,000 trainable parameters per training sample and
@@ -350,6 +351,8 @@ class QwenWorldOnRailsPolicy(nn.Module):
             vision_tok = vision_tok * cols.expand(-1, gh, -1).reshape(feats.shape[0], gh * gw, 1)
 
         waypoints, rail_q, policy_repr = self.trunk(vision_tok, speed_tok, route_tok, cmd_tok)
+        if not self.training:
+            self._last_policy_repr = policy_repr.detach()       # TODO A74: the token the maneuver head reads (maneuver_rl.py)
 
         # B and the device come from feats, not rgb: rgb is None on the cached-feature path.
         B = feats.shape[0]
@@ -485,6 +488,11 @@ class QwenWorldOnRailsPolicy(nn.Module):
                 print("[A15] steering from the predicted path (WOR_PATH_STEER=1)", flush=True)
                 self._path_steer_logged = True
 
+        if getattr(self, "_rl", None) is not None:                                               # TODO A74: the maneuver head (agent wrapper attaches it per route)
+            wps, target_speed_kmh = rl_maneuver(self, wps, route, target_speed_kmh, speed_mps)
+            self.controller.target_speed = target_speed_kmh
+            if getattr(self, "last_debug", None) is not None:
+                self.last_debug.update(target_kmh=target_speed_kmh, waypoints=wps, maneuver=self._rl.decisions[-1]["action"] if self._rl.decisions else None)
         wps = q_shift_lateral(self, wps, route)                                                  # TODO A71: no-op unless a lateral offset was chosen
         steer, throttle, brake = self.controller.control_from_waypoints(
             waypoints=wps,
