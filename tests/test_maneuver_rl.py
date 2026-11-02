@@ -194,6 +194,43 @@ def test_prior_kl_is_zero_at_the_start_and_ppo_moves_toward_the_advantaged_actio
     assert p1 > p0, "positive advantage on a maneuver must raise its probability"
 
 
+def _explored(adv: float, n: int = 512, eps: float = 0.01, margin: float = 7.0):
+    """A batch of eps-explored deviations as the agents log them: the behaviour log-prob is the exploration mixture's (~2.4x the head's own)."""
+    torch.manual_seed(0)
+    head = ManeuverHead(8).reset_to_default(margin)
+    feats = torch.randn(n, 8)
+    a = MANEUVERS.index((3.5, "bc"))
+    with torch.no_grad():
+        p = head(feats)[0].softmax(-1)[:, a]
+    behav = ((1.0 - eps) * p + eps / (len(MANEUVERS) - 1)).log()
+    return head, feats, torch.full((n,), a, dtype=torch.long), behav, torch.full((n,), adv), torch.zeros(n)
+
+
+def test_an_explored_deviation_with_a_negative_advantage_loses_probability():
+    """Smoke 2026-11-02: a ratio taken against the mixture starts at ~0.42 for an explored deviation, below 1 - clip, where the clip zeroes
+    every negative-advantage gradient: the head could only ever learn to deviate more. The trust region is the head's own distribution."""
+    head, feats, acts, behav, adv, ret = _explored(adv=-1.0)
+    a = int(acts[0])
+    p0 = head(feats)[0].softmax(-1)[:, a].mean().item()
+    ppo_update(head, feats, acts, behav, adv, ret, prior_log_probs(7.0), PPOConfig(epochs=4, minibatch=128, lr=3e-3, kl_coef=0.0, ent_coef=0.0))
+    p1 = head(feats)[0].softmax(-1)[:, a].mean().item()
+    assert p1 < p0, "a bad explored deviation must lose probability"
+
+
+def test_approx_kl_measures_the_update_not_the_exploration():
+    head, feats, acts, behav, adv, ret = _explored(adv=0.0)
+    stats = ppo_update(head, feats, acts, behav, adv, ret, prior_log_probs(7.0), PPOConfig(epochs=1, minibatch=512, lr=0.0))
+    assert stats["approx_kl"] == pytest.approx(0.0, abs=1e-6)
+    assert 0.0 < stats["is_weight"] < 1.0                     # explored deviations are over-represented in the batch
+
+
+def test_update_stops_once_the_policy_moved_past_target_kl():
+    head, feats, acts, behav, adv, ret = _explored(adv=1.0)
+    stats = ppo_update(head, feats, acts, behav, adv, ret, prior_log_probs(7.0),
+                       PPOConfig(epochs=8, minibatch=64, lr=0.5, kl_coef=0.0, ent_coef=0.0, target_kl=0.01))
+    assert stats["early_stop"] == 1 and stats["steps"] < 8 * 8
+
+
 def test_episodes_round_trip_through_the_rollout_directory(tmp_path):
     for i in range(3):
         ctl = _controller(eps=0.0, eps_stuck=0.0, seed=i)

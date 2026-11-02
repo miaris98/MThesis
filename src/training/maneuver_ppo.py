@@ -1,8 +1,8 @@
 """TODO A74 (2026-11-02): the PPO learner's pieces for the maneuver head (src/models/world_on_rails/maneuver_rl.py).
 
 The agents write one npz per route (token, action, behaviour log-prob, value, reward, dt); the learner turns them into advantages with GAE
-discounted per elapsed decision unit (a committed maneuver spans `commit / period` units) and runs clipped PPO on the head alone. The
-policy is anchored to the fixed prior the head starts from (E15 with p > 0.99) by a KL penalty, the way RLHF anchors to its reference: the
+discounted per elapsed decision unit (a committed maneuver spans `commit / period` units) and runs clipped PPO on the head alone, with the
+trust region decoupled from the behaviour policy (the agents sample from the head mixed with exploration). The policy is anchored to the fixed prior the head starts from (E15 with p > 0.99) by a KL penalty, the way RLHF anchors to its reference: the
 head moves away from E15 only where the closed-loop return pays for it. Advantages are not normalised here (the learner script decides).
 """
 from __future__ import annotations
@@ -32,6 +32,8 @@ class PPOConfig:
     ent_coef: float = 0.001
     kl_coef: float = 0.02                # KL(pi || E15 prior) per decision
     max_grad_norm: float = 1.0
+    target_kl: float = 0.02              # stop the epochs once KL(pi_prox || pi) on a minibatch passes 1.5x this (0 = never)
+    is_clip: float = 2.0                 # cap on the importance weight pi_prox / behaviour
 
 
 def prior_log_probs(margin: float = 7.0) -> torch.Tensor:
@@ -56,27 +58,43 @@ def gae(rewards: np.ndarray, values: np.ndarray, dt: np.ndarray, gamma: float, l
     return adv, adv + np.asarray(values, dtype=np.float64)
 
 
-def ppo_update(head: ManeuverHead, feats: torch.Tensor, actions: torch.Tensor, old_logp: torch.Tensor, adv: torch.Tensor,
+def ppo_update(head: ManeuverHead, feats: torch.Tensor, actions: torch.Tensor, behav_logp: torch.Tensor, adv: torch.Tensor,
                returns: torch.Tensor, prior_logp: torch.Tensor, cfg: PPOConfig, optimizer=None) -> Dict[str, float]:
-    """Clipped PPO epochs over one batch; lr = 0 computes the statistics without stepping."""
+    """Clipped PPO epochs over one batch; lr = 0 computes the statistics without stepping.
+
+    behav_logp is what the agents logged: the log-prob under the exploration mixture of a head up to max_lag updates old. A ratio taken
+    against it starts at ~0.4 for an eps-explored deviation, below 1 - clip, where the clip zeroes every negative-advantage gradient. So the
+    ratio is taken against the head's own distribution at the start of this update (the proximal policy) and the sampling is corrected by
+    the importance weight pi_prox / behaviour (decoupled PPO, Hilton et al. 2021, "Batch size-invariance for policy optimization")."""
     opt = optimizer if optimizer is not None else (torch.optim.Adam(head.parameters(), lr=cfg.lr) if cfg.lr > 0 else None)
     dev = next(head.parameters()).device
-    feats, actions, old_logp, adv, returns = (x.to(dev) for x in (feats, actions, old_logp, adv, returns))
+    feats, actions, behav_logp, adv, returns = (x.to(dev) for x in (feats, actions, behav_logp, adv, returns))
     prior_logp = prior_logp.to(dev)
-    head.train()
     n = len(actions)
-    sums = {"loss": 0.0, "policy": 0.0, "value_loss": 0.0, "kl_prior": 0.0, "entropy": 0.0, "clip_frac": 0.0, "approx_kl": 0.0}
-    steps = 0
+    head.eval()
+    with torch.no_grad():
+        prox_all = torch.cat([head(feats[i:i + 8192])[0].log_softmax(-1) for i in range(0, n, 8192)])
+        prox_logp = prox_all.gather(1, actions[:, None]).squeeze(1)
+        w = (prox_logp - behav_logp).exp().clamp(max=cfg.is_clip)
+    head.train()
+    sums = {"loss": 0.0, "policy": 0.0, "value_loss": 0.0, "kl_prior": 0.0, "entropy": 0.0, "clip_frac": 0.0, "approx_kl": 0.0,
+            "is_weight": 0.0}
+    steps, stop = 0, False
     for _ in range(cfg.epochs):
         perm = torch.randperm(n, device=dev)
         for i in range(0, n, cfg.minibatch):
             idx = perm[i:i + cfg.minibatch]
             logits, v = head(feats[idx])
             logp_all = logits.log_softmax(-1)
+            with torch.no_grad():
+                approx_kl = float((prox_all[idx].exp() * (prox_all[idx] - logp_all)).sum(-1).mean())
+            if cfg.target_kl > 0 and steps > 0 and approx_kl > 1.5 * cfg.target_kl:
+                stop = True
+                break
             logp = logp_all.gather(1, actions[idx, None]).squeeze(1)
-            ratio = (logp - old_logp[idx]).exp()
+            ratio = (logp - prox_logp[idx]).exp()
             a = adv[idx]
-            surr = torch.min(ratio * a, ratio.clamp(1.0 - cfg.clip, 1.0 + cfg.clip) * a).mean()
+            surr = (w[idx] * torch.min(ratio * a, ratio.clamp(1.0 - cfg.clip, 1.0 + cfg.clip) * a)).mean()
             pi = logp_all.exp()
             kl_prior = (pi * (logp_all - prior_logp)).sum(-1).mean()
             ent = -(pi * logp_all).sum(-1).mean()
@@ -91,10 +109,14 @@ def ppo_update(head: ManeuverHead, feats: torch.Tensor, actions: torch.Tensor, o
                 sums["loss"] += float(loss); sums["policy"] += float(surr); sums["value_loss"] += float(vloss)
                 sums["kl_prior"] += float(kl_prior); sums["entropy"] += float(ent)
                 sums["clip_frac"] += float(((ratio - 1.0).abs() > cfg.clip).float().mean())
-                sums["approx_kl"] += float((old_logp[idx] - logp).mean())
+                sums["approx_kl"] += approx_kl; sums["is_weight"] += float(w[idx].mean())
             steps += 1
+        if stop:
+            break
     head.eval()
-    return {k: v / max(steps, 1) for k, v in sums.items()}
+    out = {k: v / max(steps, 1) for k, v in sums.items()}
+    out.update({"steps": steps, "early_stop": int(stop)})
+    return out
 
 
 def load_episodes(directory: str) -> List[Dict]:

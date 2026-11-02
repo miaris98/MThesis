@@ -96,12 +96,14 @@ def main():
     ap.add_argument("--lam", type=float, default=0.95)
     ap.add_argument("--kl_coef", type=float, default=0.02)
     ap.add_argument("--ent_coef", type=float, default=0.001)
+    ap.add_argument("--target_kl", type=float, default=0.02, help="stop an update's epochs once KL(pi_prox || pi) passes 1.5x this")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--poll_s", type=float, default=20.0)
     ap.add_argument("--use_mlflow", type=int, default=1)
     a = ap.parse_args()
 
-    cfg = PPOConfig(gamma=a.gamma, lam=a.lam, epochs=a.epochs, minibatch=a.minibatch, lr=a.lr, kl_coef=a.kl_coef, ent_coef=a.ent_coef)
+    cfg = PPOConfig(gamma=a.gamma, lam=a.lam, epochs=a.epochs, minibatch=a.minibatch, lr=a.lr, kl_coef=a.kl_coef, ent_coef=a.ent_coef,
+                    target_kl=a.target_kl)
     os.makedirs(a.rollouts, exist_ok=True)
     embed_dim = a.embed_dim
     while embed_dim <= 0:
@@ -152,12 +154,16 @@ def main():
         torch.save({"opt": opt.state_dict(), "iter": it, "decisions": total}, state_path + ".tmp")
         os.replace(state_path + ".tmp", state_path)
         new = not os.path.exists(log_path)
+        fields = sorted(stats)
+        if not new:                                                     # a run resumed by newer code keeps its first header
+            with open(log_path, newline="") as f:
+                fields = next(csv.reader(f), fields)
         with open(log_path, "a", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=sorted(stats))
+            w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
             if new:
                 w.writeheader()
             w.writerow(stats)
-        print(json.dumps({k: round(v, 4) if isinstance(v, float) else v for k, v in stats.items()}), flush=True)
+        print(json.dumps({k: float(f"{v:.4g}") if isinstance(v, float) else v for k, v in stats.items()}), flush=True)
         if ml is not None:
             ml.log_metrics({k: float(v) for k, v in stats.items() if isinstance(v, (int, float))}, step=it)
         it += 1
