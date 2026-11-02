@@ -55,8 +55,31 @@ def test_speed_modes():
     creep = MANEUVERS.index((0.0, "creep"))
     assert apply_maneuver(stop, _wps(), _route(), 30.0)[1] == 0.0
     assert apply_maneuver(creep, _wps(), _route(), 30.0)[1] == CREEP_KMH
-    assert apply_maneuver(creep, _wps(), _route(), 2.0)[1] == 2.0            # creep never speeds E15 up
+    assert apply_maneuver(creep, _stopped(), _route(), 0.0)[1] == CREEP_KMH   # creep starts a car E15 holds at 0 (run1: no maneuver could)
     assert apply_maneuver(stop, _wps(), _route(), None)[1] == 0.0            # a policy without a speed head still stops
+
+
+def _stopped():
+    return np.zeros((5, 2), np.float32)                                      # E15 stopping: every waypoint at the car
+
+
+def test_creep_lays_a_forward_plan_when_e15_stops():
+    """A74 run1 (2026-11-02): with E15 stopped, its waypoints sit at the car, so creep must also give the controller a path to drive."""
+    wps, kmh = apply_maneuver(MANEUVERS.index((0.0, "creep")), _stopped(), _route(), 0.0)
+    assert kmh == CREEP_KMH
+    assert np.allclose(wps[:, 0], CREEP_KMH / 3.6 * 0.25 * np.arange(1, 6), atol=1e-4) and np.allclose(wps[:, 1], 0.0, atol=1e-4)
+
+
+def test_creep_keeps_a_plan_that_already_moves_faster():
+    wps, kmh = apply_maneuver(MANEUVERS.index((0.0, "creep")), _wps(), _route(), 30.0)
+    assert kmh == CREEP_KMH and np.allclose(wps, _wps())
+
+
+def test_a_lane_change_from_standstill_goes_forward_and_sideways():
+    wps, kmh = apply_maneuver(MANEUVERS.index((-3.5, "creep")), _stopped(), _route(), 0.0)
+    assert kmh == CREEP_KMH
+    assert np.all(np.diff(wps[:, 0]) > 0)                                    # forward along the route
+    assert np.all(wps[:, 1] < 0) and wps[-1, 1] >= -3.5 - 1e-6               # toward the left lane (-y), never past its offset
 
 
 def test_lateral_maneuvers_move_the_waypoints_toward_the_chosen_lane():
@@ -326,3 +349,25 @@ def test_policy_act_applies_the_controller_and_is_unchanged_without_it():
     m._rl = Stop()
     steer, throttle, brake = m.act(rgb, 5.0, device="cpu", route=route)
     assert throttle == 0.0 and brake > 0.0, "a stop maneuver must brake whatever E15 wanted"
+
+
+def test_creep_moves_a_car_that_e15_holds_at_a_standstill(monkeypatch):
+    """A74 run1 (2026-11-02): with E15's target at 0 every maneuver kept the car at 0 km/h, so the head could never learn to get unstuck."""
+    import copy
+    import src.models.world_on_rails.qwen_wor_policy as qp
+    torch.manual_seed(0)
+    m = qp.QwenWorldOnRailsPolicy(backbone_name="resnet18", pretrained=False, model_size="10m", vision_grid=4, use_target_speed=True,
+                                  route_points=4).eval()
+    monkeypatch.setattr(qp, "q_decode_speed", lambda self, out, probs, t: (0.0, probs))   # E15 wants to stop
+    rgb = np.random.RandomState(0).rand(96, 256, 3).astype(np.float32)
+    _, throttle, _ = copy.deepcopy(m).act(rgb, 0.0, device="cpu", route=_route())
+    assert throttle == 0.0, "E15 alone holds the car"
+
+    class Creep:
+        decisions = []
+
+        def step(self, feat, speed_mps):
+            return MANEUVERS.index((-3.5, "creep"))
+    m._rl = Creep()
+    _, throttle, brake = m.act(rgb, 0.0, device="cpu", route=_route())
+    assert throttle > 0.0 and brake == 0.0, "creep must move a car E15 holds at 0"

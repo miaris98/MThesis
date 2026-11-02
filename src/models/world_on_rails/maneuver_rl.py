@@ -30,7 +30,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from src.models.world_on_rails.q_critic import shift_toward_lateral
+from src.models.world_on_rails.q_critic import WP_DT, shift_toward_lateral
 
 LAT_CHOICES = (-3.5, 0.0, 3.5)                      # target offset from the route, m (+ = right, q_shift_lateral's convention); one lane = 3.5 m
 SPEED_MODES = ("bc", "creep", "stop")
@@ -44,14 +44,33 @@ COLLISION_FACTORS = {"walker": 0.5, "vehicle": 0.6, "layout": 0.65}   # the lead
 def apply_maneuver(action: int, wps, route, target_kmh: Optional[float], lat_rate: float = LAT_RATE):
     """(waypoints, target km/h) after a maneuver. The default maneuver returns its inputs untouched (the same objects)."""
     lat, mode = MANEUVERS[int(action)]
-    if lat != 0.0 and route is not None:
-        r = np.asarray(route.detach().cpu() if isinstance(route, torch.Tensor) else route, dtype=np.float64).reshape(-1, 2)
+    r = None if route is None else np.asarray(route.detach().cpu() if isinstance(route, torch.Tensor) else route, dtype=np.float64).reshape(-1, 2)
+    if mode == "creep" and r is not None:
+        wps = creep_plan(wps, r)
+    if lat != 0.0 and r is not None:
         wps = shift_toward_lateral(wps, r, lat, lat_rate)
     if mode == "stop":
         target_kmh = 0.0
     elif mode == "creep":
-        target_kmh = CREEP_KMH if target_kmh is None else min(float(target_kmh), CREEP_KMH)
+        # a fixed pace, not a cap: A74 run1 (2026-11-02) capped E15's target at 5.4, so with E15 holding the car at 0 no maneuver could move
+        # it (on obstacle routes 44k stuck decisions, and no deviation beat E15's next-20 s return)
+        target_kmh = CREEP_KMH
     return wps, target_kmh
+
+
+def creep_plan(wps, route: np.ndarray, kmh: float = CREEP_KMH):
+    """The waypoints of a car creeping along the route: waypoint k ((k + 1) * WP_DT s ahead) at least kmh * t_k further along the route than
+    the ego, each at its own offset from the route. E15's plan is returned as is (the same object) when it already moves at least that fast."""
+    from src.training.counterfactual_q import RouteFrame
+    rf = RouteFrame(route, from_origin=False)
+    w = np.asarray(wps, dtype=np.float64).reshape(-1, 2)
+    s, d = rf.project(w[:, 0], w[:, 1])
+    s_ego = rf.project(np.zeros(1), np.zeros(1))[0][0]
+    s_min = s_ego + kmh / 3.6 * WP_DT * (np.arange(len(w)) + 1)
+    if np.all(s >= s_min - 1e-6):
+        return wps
+    x, y, _ = rf.pose(np.maximum(s, s_min), d)
+    return np.stack([x, y], -1).astype(np.float32)
 
 
 class ManeuverHead(nn.Module):
