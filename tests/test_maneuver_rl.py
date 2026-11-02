@@ -15,7 +15,8 @@ import pytest
 import torch
 
 from src.models.world_on_rails.maneuver_rl import (
-    DEFAULT_ACTION, MANEUVERS, CREEP_KMH, ManeuverController, ManeuverHead, RewardTracker, RouteTracker, apply_maneuver, rl_maneuver)
+    DEFAULT_ACTION, MANEUVERS, CREEP_KMH, ManeuverController, ManeuverHead, RewardTracker, RouteTracker, apply_maneuver, parse_rl_env,
+    rl_maneuver)
 from src.training.maneuver_ppo import PPOConfig, gae, load_episodes, ppo_update, prior_log_probs
 
 
@@ -229,6 +230,13 @@ def test_update_stops_once_the_policy_moved_past_target_kl():
     stats = ppo_update(head, feats, acts, behav, adv, ret, prior_log_probs(7.0),
                        PPOConfig(epochs=8, minibatch=64, lr=0.5, kl_coef=0.0, ent_coef=0.0, target_kl=0.01))
     assert stats["early_stop"] == 1 and stats["steps"] < 8 * 8
+
+
+def test_rl_env_takes_semicolons_from_a_queue_job_flag():
+    """queue_A9c.sh splits a CKE job's flags on ',', so a ';' inside a value stands for ',' (as for WOR_QCRITIC)."""
+    cfg = parse_rl_env("head=/w/h.pth;mode=eval;log=/w/val")
+    assert (cfg["head"], cfg["mode"], cfg["log"]) == ("/w/h.pth", "eval", "/w/val")
+    assert parse_rl_env("head=/w/h.pth,mode=eval") == parse_rl_env("head=/w/h.pth;mode=eval")
 
 
 def test_episodes_round_trip_through_the_rollout_directory(tmp_path):

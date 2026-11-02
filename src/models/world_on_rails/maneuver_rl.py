@@ -174,11 +174,11 @@ class ManeuverController:
 
 
 def parse_rl_env(spec: Optional[str]) -> Optional[Dict]:
-    """WOR_RL="head=...,mode=train,period=5,..." -> dict; unset / "" / "0" -> None."""
+    """WOR_RL="head=...,mode=train,period=5,..." -> dict; unset / "" / "0" -> None. A ';' stands for ',' (queue_A9c.sh CKE job flags)."""
     if not spec or spec.strip() in ("", "0"):
         return None
     cfg = {"head": None, "mode": "train", "period": 5, "commit": 40, "eps": 0.01, "eps_stuck": 0.1, "stuck_s": 4.0, "margin": 7.0, "log": None}
-    for part in spec.split(","):
+    for part in spec.replace(";", ",").split(","):
         if not part.strip():
             continue
         k, _, v = part.partition("=")
