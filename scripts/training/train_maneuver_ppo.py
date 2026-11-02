@@ -81,7 +81,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--rollouts", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--embed_dim", type=int, required=True, help="the policy token's width (QwenWorldOnRailsPolicy.embed_dim)")
+    ap.add_argument("--embed_dim", type=int, default=0,
+                    help="the policy token's width (QwenWorldOnRailsPolicy.embed_dim); 0 = read it from the first episode (the agents start "
+                         "from a fresh head at E15 until the learner has published one)")
     ap.add_argument("--batch_decisions", type=int, default=4096)
     ap.add_argument("--max_decisions", type=int, default=300_000)
     ap.add_argument("--max_lag", type=int, default=3)
@@ -101,7 +103,18 @@ def main():
 
     cfg = PPOConfig(gamma=a.gamma, lam=a.lam, epochs=a.epochs, minibatch=a.minibatch, lr=a.lr, kl_coef=a.kl_coef, ent_coef=a.ent_coef)
     os.makedirs(a.rollouts, exist_ok=True)
-    head = init_head(a.out, a.embed_dim, a.margin, a.seed)
+    embed_dim = a.embed_dim
+    while embed_dim <= 0:
+        if os.path.exists(os.path.join(a.out, "head_latest.pth")):
+            embed_dim = int(torch.load(os.path.join(a.out, "head_latest.pth"), map_location="cpu", weights_only=False)["in_dim"])
+        else:
+            eps = load_episodes(a.rollouts)
+            if eps:
+                embed_dim = int(eps[0]["feat"].shape[1])
+            else:
+                time.sleep(a.poll_s)
+    print(f"policy token width {embed_dim}", flush=True)
+    head = init_head(a.out, embed_dim, a.margin, a.seed)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     head.to(dev)
     opt = torch.optim.Adam(head.parameters(), lr=a.lr)
