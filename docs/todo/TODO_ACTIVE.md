@@ -17,6 +17,23 @@ The status block below is the only snapshot in this file: replace it, don't appe
 
 ## New CARLA items, 2026-11-01: A71-A73 (RL on the logged dataset; CARLA used only to evaluate) - Next, top CARLA priority (user, 2026-11-01: "create these as the next top todos ... try both wor and qwen")
 
+**Results, 2026-11-02 (E: `live_20261102_a7x`): none of the three beats E15; the RL work moved to A74 (closed-loop PPO on E15, below A73).**
+- **Baseline:** E15 = the mean of 3 runs on the 103 lead + obstacle routes at Low, DS 66.3 (46 obstacle routes: 44.4), plus the 6-route Epic
+  column. All arms ran on one eval host (two boxes on 161.115.4.196).
+- **A71-Q1** (E15 + Q head, fine-tuned on the pooled cache): decoder off 59.7, -6.6 [-10.8, -2.5]; on 54.6, -11.7 [-17.1, -6.2] (obstacle
+  -3.4 [-8.2, +1.4], other -18.3 [-27.1, -9.6]). No go.
+- **A72-IQL:** off 60.5, -5.8 [-10.3, -1.3]; on 54.6, -11.7 [-16.3, -7.0]; on vs off -5.9 [-10.2, -1.5]; on vs A71-on 0.0 [-5.3, +5.3].
+  No go: the decoder costs ~6 DS on top of a fine-tune that already costs ~6.
+- **A73-Q** (world model, epoch 3, 4,032 windows): the offline gate failed. The k-step latent error is 2.67, 1.97, 1.68, 1.55 and 1.48
+  times the copy baseline (k = 1-5), so the dynamics are worse than "nothing changes". The reward head is fine (correlation 0.80, std ratio
+  0.79), and the ensemble disagreement ratio is 8.0. No closed-loop run.
+- **Ops:**
+  - The training box showed 48 threads but had an 11.5-core CPU quota.
+  - venv_carla has no tensorboard, so the `src.training` import crashed A71-on's lane change (fixed a1e64a2).
+  - The leaderboard grows ~0.3 GB per route per lane (`mem_guard.sh`).
+  - A crash-resume re-runs every route after the crashed record (`fix_resume.sh`).
+  - Route 26435 segfaults at Low, so it is in the Epic column.
+
 **Why.**
 - The thesis is about deep RL in complex environments, but every CARLA result so far is behaviour cloning: Q targets are zero and `--q_loss_weight 0` everywhere.
 - Online RL in CARLA is too slow for the budget: about 4-12 RL steps/s per lane. CaRL-scale PPO (300 M steps) would take about 4 box-months.
@@ -246,6 +263,41 @@ Not built: imagined-rollout actor training beyond the one-step lookahead, and th
 - model exploitation;
 - the logs hold almost only expert actions (A71's counterfactual actions help);
 - the most engineering of the three items.
+
+### A74. Closed-loop RL on top of E15: a 9-maneuver head trained with PPO in CARLA - **Running (probe), 2026-11-02**
+
+**Why (user, 2026-11-02: "i need a reinforcement leanring approach to beat the E15").** E15 is behaviour cloning, and A71-A73 learned
+values from the logs without improving the closed loop. A74 learns *when to deviate* from E15 from the closed-loop reward itself.
+
+**Design (commits 039b7a8, dd831ef, 2262865; fixes 2f40f3b, de95eed, 2e729df).**
+- **Head:** on the frozen trunk's 512-d policy token, 9 maneuvers = lateral {left lane, stay, right lane} x speed {E15's own, creep
+  5.4 km/h, stop}. The default (stay, E15's speed) is E15 bit for bit. The head starts at E15 with p = 0.993 (margin 7). A non-default
+  maneuver is held 2 s. Exploration is eps 0.01, or 0.1 after 4 s standing still.
+- **Reward:** route progress x the leaderboard's collision factors, a penalty per collision, and an off-lane cost.
+- **Routes:** PDM-Lite's Town12/13 data-collection routes (never the 220 eval routes), half obstacle scenarios, 222 held out.
+- **Learner:** PPO with a KL anchor to the E15 prior, decoupled from the exploration mixture (ratio against the head at the start of the
+  update, importance weight for the exploration) and a target-KL stop.
+- **Infrastructure:** the learner runs on the PC (state on E:) and the CARLA lanes on any number of boxes (`scripts/ops/a74_relay.sh`).
+
+**run1 (15:40-17:58 Athens, 131k decisions, 28 updates, 21 lanes on 3 boxes): no usable policy.**
+- The head deviates greedily in 0 of 117k states, and p(E15) rose to a median 0.9988.
+- On obstacle routes, 44% of all decisions were stuck, and E15 was moving again within 4 s after only 2.4% of its stuck steps.
+- No maneuver did better while moving or stuck. Cause: creep was min(E15 target, 5.4 km/h), so with E15 at 0 every maneuver stayed at
+  0 km/h. Fixed in 2e729df: creep drives at 5.4 km/h along the route.
+
+**probe2 (from 17:55):** obstacle routes only, no exploration while moving, and a random maneuver held 4 s whenever the car has stood still
+>= 4 s. It asks whether any maneuver gets E15 unstuck, and at what collision cost. Result: pending.
+
+**Next:** if a maneuver unsticks E15 at an acceptable collision cost, run2 trains with:
+- decisions only when stuck (while moving, no maneuver beat E15);
+- a longer commit;
+- a faster learner (run1 moved ~3e-5 KL per update against a target of 0.02).
+
+**Ops (2026-11-02):**
+- 12 lanes on the 128-thread 4x3090 ran ~330 threads per evaluator until the OMP / MKL threads were capped at 4 (load 89 -> 32).
+- 12 simultaneous CARLA starts lost one server, so lanes now start 15 s apart.
+- EPYC 7B12 lanes run at about half a Ryzen 9 9950X lane's speed.
+- VRAM is what limits lanes: 3.0-5.2 GB per CARLA server.
 
 ---
 
