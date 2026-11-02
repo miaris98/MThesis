@@ -9,8 +9,8 @@ Losses over the K-step unroll on predicted latents:
     reward  Huber(r_hat_k, r_k)
     value   Huber(V(s_hat_k), G_k), G_k = sum_j gamma^(j-k) r_j + gamma^(K-k) V_ema(z_K) (n-step return on real rewards)
     bc      CE(pi(s_hat_k), a_k) (expert data: ROSMO keeps a BC term)
-Policy improvement (policy_improvement_loss): a one-step lookahead in the model over all 40 actions,
-    Q_hat(s, a) = r_hat(s, a) - penalty * u(s, a) + gamma V(s'(a)),  u = ensemble spread of s'(a) (MOPO / LOMPO conservatism),
+Policy improvement (policy_improvement_loss): a lookahead in the model over all 40 first actions, then horizon - 1 greedy-policy steps,
+    Q_hat(s, a) = sum_k gamma^k (r_hat_k - penalty * u_k) + gamma^h V(s_h),  u = ensemble spread of the next state (MOPO / LOMPO conservatism),
     loss = imag_weight * KL(softmax(Q_hat / T) || pi) + bc_weight * CE(pi, a_exp).
 """
 from __future__ import annotations
@@ -41,6 +41,7 @@ class WMLossConfig:
     bc_weight: float = 0.2              # ROSMO alpha
     penalty: float = 1.0                # MOPO lambda in {1, 5}
     temperature: float = 1.0
+    horizon: int = 1                    # imagined steps behind the policy target (TODO: h = 5, then the value bootstrap)
 
 
 def _masked(x: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
@@ -81,15 +82,22 @@ def update_target(target: nn.Module, model: nn.Module, tau: float) -> None:
         t.mul_(1.0 - tau).add_(s.detach(), alpha=tau)
 
 
-def lookahead_q(model: LatentWorldModel, s: torch.Tensor, gamma: float, penalty: float):
-    """(Q_hat (B, A), ensemble spread u (B, A)) of a one-step lookahead over every action from states s (B, T, D)."""
+def lookahead_q(model: LatentWorldModel, s: torch.Tensor, gamma: float, penalty: float, horizon: int = 1):
+    """(Q_hat (B, A), first-step ensemble spread u (B, A)) from states s (B, T, D): each action first, then horizon - 1 steps of the model's greedy
+    policy, every reward penalised by the ensemble spread, then gamma^horizon V."""
     B, A = s.shape[0], model.cfg.n_actions
-    s_rep = s.repeat_interleave(A, 0)
+    st = s.repeat_interleave(A, 0)
     a = torch.arange(A, device=s.device).repeat(B)
-    s_mean, s_all, r = model.step(s_rep, a)
-    u = s_all.std(0).mean((1, 2))
-    q = r - penalty * u + gamma * model.value(s_mean)
-    return q.view(B, A), u.view(B, A)
+    q, disc, u0 = torch.zeros(B * A, device=s.device), 1.0, None
+    for k in range(max(1, horizon)):
+        st, s_all, r = model.step(st, a)
+        u = s_all.std(0).mean((1, 2))
+        u0 = u if u0 is None else u0
+        q = q + disc * (r - penalty * u)
+        disc *= gamma
+        a = model.policy_logits(st).argmax(-1)
+    q = q + disc * model.value(st)
+    return q.view(B, A), u0.view(B, A)
 
 
 def imagined_return(model: LatentWorldModel, s: torch.Tensor, horizon: int, gamma: float, penalty: float) -> torch.Tensor:
@@ -107,7 +115,7 @@ def imagined_return(model: LatentWorldModel, s: torch.Tensor, horizon: int, gamm
 
 def policy_improvement_loss(model: LatentWorldModel, s: torch.Tensor, a_exp: torch.Tensor, cfg: WMLossConfig) -> Dict[str, torch.Tensor]:
     with torch.no_grad():
-        q, _ = lookahead_q(model, s.detach(), cfg.gamma, cfg.penalty)
+        q, _ = lookahead_q(model, s.detach(), cfg.gamma, cfg.penalty, cfg.horizon)
         tgt = F.softmax(q / cfg.temperature, -1)
     logp = F.log_softmax(model.policy_logits(s), -1)
     imag = (tgt * (torch.log(tgt.clamp(min=1e-12)) - logp)).sum(-1).mean()

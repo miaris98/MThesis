@@ -46,6 +46,7 @@ def parse_args(argv=None):
     ap.add_argument("--penalty", type=float, default=1.0, help="MOPO lambda on the ensemble spread")
     ap.add_argument("--bc_weight", type=float, default=0.2)
     ap.add_argument("--imag_weight", type=float, default=1.0)
+    ap.add_argument("--imag_horizon", type=int, default=5, help="imagined steps behind the policy target (1 = one-step lookahead)")
     ap.add_argument("--lr", type=float, default=1e-4, help="AdamW; B66/B67: <= 1e-4 for transformer RL heads")
     ap.add_argument("--weight_decay", type=float, default=0.01)
     ap.add_argument("--warmup_frac", type=float, default=0.05)
@@ -88,7 +89,7 @@ def main(argv=None):
     target.load_state_dict(model.state_dict())
     for p in target.parameters():
         p.requires_grad_(False)
-    lcfg = WMLossConfig(gamma=a.gamma, penalty=a.penalty, bc_weight=a.bc_weight, imag_weight=a.imag_weight)
+    lcfg = WMLossConfig(gamma=a.gamma, penalty=a.penalty, bc_weight=a.bc_weight, imag_weight=a.imag_weight, horizon=a.imag_horizon)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=a.weight_decay)
     total_steps = max(1, a.epochs * len(train_loader))
     warm = max(1, int(a.warmup_frac * total_steps))

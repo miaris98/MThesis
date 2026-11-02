@@ -28,6 +28,7 @@ from src.models.world_on_rails.ray_geometry import (
     RAY_GEOMETRY_CHANNELS, append_ray_geometry)
 from src.config.camera import DEFAULT_CROP_BOTTOM_FRAC
 from src.models.world_on_rails.q_critic import QCriticHead, ValueHead, q_decode_speed, q_shift_lateral
+from src.models.world_on_rails.world_model_decode import world_model_q
 
 # Trunk sizes. The 10m/30m entries exist because the offline dataset is ~9,600 frames:
 # at 100m the trunk carries roughly 11,000 trainable parameters per training sample and
@@ -340,6 +341,8 @@ class QwenWorldOnRailsPolicy(nn.Module):
             feats = F.pixel_unshuffle(self.encoder.forward_pyramid(rgb)[-2], self.s2d_patch)
         else:
             feats = vision_features if vision_features is not None else self.encoder(rgb)
+        if not self.training:
+            self._last_feats = feats.detach()                   # TODO A73: the frozen map the world-model decode reads (world_model_decode.py)
         vision_tok, speed_tok, route_tok, cmd_tok, cmd_idx = self._tokenize_state(feats, speed, command, route)
         if self.training and self.token_mask > 0 and self.vision_grid_hw[0] > 0:
             gh, gw = self.vision_grid_hw
@@ -436,6 +439,7 @@ class QwenWorldOnRailsPolicy(nn.Module):
                 route_tensor = route_tensor.unsqueeze(0)
 
         out = self.forward(rgb_tensor, speed_tensor, cmd_tensor, route_tensor)
+        out = world_model_q(self, out)                                                           # TODO A73: no-op unless WOR_WORLDMODEL + WOR_QCRITIC
         wps_tensor = out["selected_waypoints"][0].cpu()
         try:
             wps = wps_tensor.numpy()

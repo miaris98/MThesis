@@ -214,3 +214,35 @@ def test_conv_trunk_a73w_learns_and_its_ensemble_disagrees_on_unseen_actions():
         assert float(unroll_losses(m, tgt, feats, acts, rew, valid, WMLossConfig())["latent"]) < 0.5 * first
         _, u = lookahead_q(m, m.encode(feats[:, 0]), gamma=0.95, penalty=0.0)
         assert u[:, 4:].mean() > 2.0 * u[:, :4].mean()
+
+
+def test_h_step_lookahead_matches_a_manual_rollout_and_h1_is_the_one_step_rule():
+    """A73: policy improvement over imagined rollouts (h = 5 in the TODO): Q_h(s, a) = first step with a, then h - 1 greedy-policy steps, each
+    reward penalised by the ensemble spread, then gamma^h V."""
+    torch.manual_seed(0)
+    m = LatentWorldModel(SMALL).eval()
+    s = m.encode(torch.randn(3, C, GH, GW))
+    with torch.no_grad():
+        q1, _ = lookahead_q(m, s, gamma=0.9, penalty=0.5)
+        q1b, _ = lookahead_q(m, s, gamma=0.9, penalty=0.5, horizon=1)
+        assert torch.allclose(q1, q1b)
+        q3, _ = lookahead_q(m, s, gamma=0.9, penalty=0.5, horizon=3)
+        a = torch.tensor([7, 7, 7])
+        st, ret, disc = s, torch.zeros(3), 1.0
+        for k in range(3):
+            st2, s_all, r = m.step(st, a)
+            ret = ret + disc * (r - 0.5 * s_all.std(0).mean((1, 2)))
+            disc *= 0.9
+            st = st2
+            a = m.policy_logits(st).argmax(-1)
+        assert torch.allclose(q3[:, 7], ret + disc * m.value(st), atol=1e-5)
+
+
+def test_train_script_takes_the_imagination_horizon():
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location("twm3", Path(__file__).resolve().parents[1] / "scripts" / "training" / "train_world_model.py")
+    twm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(twm)
+    a = twm.parse_args(["--data_dir", "d", "--pooled_cache", "p", "--q_labels", "t", "--save_dir", "s", "--imag_horizon", "5"])
+    assert a.imag_horizon == 5
