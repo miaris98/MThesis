@@ -55,6 +55,15 @@ The status block below is the only snapshot in this file: replace it, don't appe
 - Challenges: two reviews found label/decoder flaws each round; the 16-thread 5880 Ada box was CPU-bound for labels; the label box was rented and destroyed unused; the E15 baseline lane reached 12/104 routes before the user stopped for the night (no unattended overnight runs). Box total ~$1.40.
 - Next (box run): a71_box_driver.sh setup -> labels (or a71_label_box.sh on a CPU box) -> train -> check (pick lat_margin from decode_* calibration) -> eval_e15 + eval_q on the 104 routes; train_a72 and a73 on the same labels.
 
+**2026-11-02 code (commits 156b83e, dc89b2d, 75d052b, 8713230; not yet run on a box).**
+- A71-W / A72-W: `WorldOnRailsPolicy(use_q_critic, use_v_head)` gets the Q-critic and V heads on its fused vector (`q_sa_head`, `v_head`), `act()`
+  runs the same A71 decode; the trainer's offline-RL terms and the Polyak target work on whichever critic module the network has; box step
+  `a71_box_driver.sh train_w` (`W_RL=none|iql|cql`, cnn arch from scratch, 20 epochs). Fixed on the way: `train_wor.py --policy_arch cnn`
+  crashed before training (Qwen-only kwargs passed to the conv policy). 7 tests (`tests/test_wor_q_arms.py`).
+- `counterfactual_q.py` (613 lines) split into `counterfactual_q.py` (435) / `q_scene.py` (scene build) / `q_label_io.py` (label files,
+  coverage, `label_route`); names re-exported, the 123 label/decoder tests unchanged and passing.
+- Box driver: `NO_DATA=1` (eval box) / `NO_CARLA=1` (train box) setup switches, `a73_cache` step (E15's frozen backbone, 288x768, grid 4).
+
 **Idea.** Other actors are "on rails": the logs are replayed and never react to the ego car. Only the ego car is simulated, with a fitted kinematic model. A dynamic-programming pass over a discrete action set gives Q(s, a) for every logged frame. The policy is trained toward softmax(Q / T). This is the method of our baseline (WoR) applied to our data and our network.
 
 **Repo state.**
@@ -133,7 +142,7 @@ actions), a V head on the Qwen policy token, `WOR_TRANSITIONS=1` (each sample al
 of its logged step, stored by `build_q_labels.py` for every frame), `train_wor.py --offline_rl iql|cql`, box step `a71_box_driver.sh train_a72`.
 Only the expert's own transitions have a next frame, so TD runs on those; the other 39 actions are shaped by the CQL penalty and A71's labels
 (`--q_critic_loss_weight`, 0.5 in the box step). Evaluation reuses the A71 decoder: IQL's extracted policy pi_BC exp(beta A) equals
-pi_BC exp(beta Q). 12 tests (`tests/test_offline_rl.py`).
+pi_BC exp(beta Q). 12 tests (`tests/test_offline_rl.py`). A72-W (WoR conv head + V head, `train_w W_RL=iql|cql`) coded 2026-11-02, see A71.
 
 **Idea.** Train a critic with an offline-RL loss on transitions labelled with A71's reward. Then push the policy toward high-advantage actions.
 
@@ -178,6 +187,16 @@ validation), `scripts/analysis/a73_world_model_gate.py` (k-step latent error vs 
 `a71_box_driver.sh a73`. Found while testing: with the action only in the shared trunk the ensemble spread was *lower* on unseen actions (0.075
 vs 0.085); per-member action embeddings give 6.3-7.5x higher spread on unseen actions over 4 seeds. 9 tests (`tests/test_latent_world_model.py`).
 Not built: imagined-rollout actor training beyond the one-step lookahead, and the closed-loop agent.
+
+**Code (2026-11-02, commits dc89b2d, 8713230).**
+- A73-W: `--trunk conv` (conv dynamics over the 4x4 grid, action embedding added at every cell).
+- Imagined-rollout actor: `lookahead_q(..., horizon)` takes each of the 40 first actions, then horizon - 1 greedy-policy steps, every reward
+  penalised by the ensemble spread, then gamma^h V; `train_world_model.py --imag_horizon 5` (default; 1 = the old one-step target).
+- Closed loop: `src/models/world_on_rails/world_model_decode.py`. With `WOR_QCRITIC` and `WOR_WORLDMODEL=<wm_epoch.pth>`, `act()` replaces (or,
+  for E15, supplies) `q_sa` with the world model's h-step lookahead from the policy's own frozen encoder map pooled to the model's grid, and the
+  A71 decoder drives with it. E15's waypoints and speed head are unchanged, so A73 runs on E15 without retraining. `WOR_WM_HORIZON` /
+  `WOR_WM_PENALTY` override the checkpoint's values; a feature-width mismatch is an error. 3 tests (`tests/test_world_model_decode.py`),
+  15 world-model tests in total.
 
 **Idea.** Learn dynamics, reward and value in the frozen regnety feature space from the logs. Improve the policy with short imagined rollouts or Gumbel search, with a conservatism penalty so the policy cannot exploit model errors. This reuses the Atari agent's components, which would give the thesis one RL method on both benchmarks.
 
