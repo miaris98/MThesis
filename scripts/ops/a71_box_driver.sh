@@ -18,6 +18,10 @@ DENSE="Accident|Obstacle|HazardAtSideLane|OpensDoor|Construction|InvadingTurn|Pa
 NC=$(cat /workspace/MThesis/scripts/ops/a71_routes_lead_obstacle_104.txt)
 EPIC=27515,25854,25896,25955,24816,26435   # 26435: Town03 Low segfault (S-137), 2026-11-02
 E15=/workspace/checkpoints/E15
+# train / train_a72 read the frozen encoder's pooled map from a cache when one with the recovery-camera frames exists (2026-11-02: the
+# training box had an 11.5-CPU quota, so live JPEG decoding starved the GPU). Exact for this recipe (frozen backbone, qwen head, no colour
+# augmentation; tests/test_pooled_cache.py). POOLED= (empty) forces live images.
+POOLED=${POOLED-$(ls /workspace/pooled_e15_aug/*.json 2>/dev/null | head -1 | sed 's/\.json$//')}
 case $1 in
 setup)
   mark SETUP_START
@@ -50,12 +54,12 @@ train)
     --batch_size 256 --lr_heads 3e-4 --lr_backbone 1e-4 --grad_clip 5.0 --warmup_frac 0.05 --val_split 0.15 --seed 0 \
     --epochs 50 --stop_epoch 20 --save_freq 1 --val_every 1 --resume_from $E15/model_epoch_015.pth \
     --q_critic 1 --q_labels qcf_v4 --q_critic_loss_weight 1.0 --num_workers ${NW:-14} --use_mlflow 1 --kill_stale 0 \
-    --experiment_name A71_q1 > /workspace/a71/train_q1.log 2>&1
+    ${POOLED:+--pooled_cache $POOLED} --experiment_name A71_q1 > /workspace/a71/train_q1.log 2>&1
   mark "TRAIN_EXIT $?" ;;
 train_a72)  # TODO A72: same resume and recipe as train, plus IQL / CQL on the expert transitions (A72_MODE iql|cql; A72_QLW keeps A71's labels)
   pgrep -af "train_wor.py.*a72_${A72_MODE:-iql}" && { mark "TRAIN_A72_ALREADY_RUNNING"; exit 1; }
   mark "TRAIN_A72_${A72_MODE:-iql}_START"
-  WOR_Q_MIN_COVERAGE=0.2 $PY -u scripts/training/train_wor.py --data_dir $D --save_dir /workspace/checkpoints/A72_${A72_MODE:-iql} --run_label a72_${A72_MODE:-iql}     --policy_arch qwen30m --backbone regnety_032 --weights_path $E15/frozen_backbone.pth --pretrained 1 --freeze_backbone 1     --img_size 288x768 --crop_bottom_frac 0.0 --vision_grid 4 --route_overlay 1 --route_points 4     --use_augmented_camera 1 --target_speed_loss_weight 0.2 --target_speed_input policy --lateral_loss_weight 3.0 --wp_loss_weight 1.0     --batch_size ${A72_BS:-128} --lr_heads 3e-4 --lr_backbone 1e-4 --grad_clip 5.0 --warmup_frac 0.05 --val_split 0.15 --seed 0     --epochs 50 --stop_epoch 20 --save_freq 1 --val_every 1 --resume_from $E15/model_epoch_015.pth     --q_critic 1 --q_labels qcf_v4 --q_critic_loss_weight ${A72_QLW:-0.5} --offline_rl ${A72_MODE:-iql} --iql_tau 0.7 --rl_gamma 0.95 --cql_alpha 1.0     --num_workers ${NW:-14} --use_mlflow 1 --kill_stale 0 --experiment_name A72_${A72_MODE:-iql} > /workspace/a71/train_a72_${A72_MODE:-iql}.log 2>&1
+  WOR_Q_MIN_COVERAGE=0.2 $PY -u scripts/training/train_wor.py --data_dir $D --save_dir /workspace/checkpoints/A72_${A72_MODE:-iql} --run_label a72_${A72_MODE:-iql}     --policy_arch qwen30m --backbone regnety_032 --weights_path $E15/frozen_backbone.pth --pretrained 1 --freeze_backbone 1     --img_size 288x768 --crop_bottom_frac 0.0 --vision_grid 4 --route_overlay 1 --route_points 4     --use_augmented_camera 1 --target_speed_loss_weight 0.2 --target_speed_input policy --lateral_loss_weight 3.0 --wp_loss_weight 1.0     --batch_size ${A72_BS:-128} --lr_heads 3e-4 --lr_backbone 1e-4 --grad_clip 5.0 --warmup_frac 0.05 --val_split 0.15 --seed 0     --epochs 50 --stop_epoch 20 --save_freq 1 --val_every 1 --resume_from $E15/model_epoch_015.pth     --q_critic 1 --q_labels qcf_v4 --q_critic_loss_weight ${A72_QLW:-0.5} --offline_rl ${A72_MODE:-iql} --iql_tau 0.7 --rl_gamma 0.95 --cql_alpha 1.0     --num_workers ${NW:-14} --use_mlflow 1 --kill_stale 0 ${POOLED:+--pooled_cache $POOLED} --experiment_name A72_${A72_MODE:-iql} > /workspace/a71/train_a72_${A72_MODE:-iql}.log 2>&1
   mark "TRAIN_A72_EXIT $?" ;;
 train_w)  # TODO A71-W / A72-W: the WoR network (cnn arch) from scratch with the critic (W_RL=none|iql|cql), W_EPOCHS (default 20 = the TODO)
   pgrep -af "train_wor.py.*a7x_w_${W_RL:-none}" && { mark "TRAIN_W_ALREADY_RUNNING"; exit 1; }
