@@ -3,12 +3,15 @@
 # E15 in /workspace/checkpoints/E15). usage: scripts/ops/a74_rl_box.sh STEP      status lines -> /workspace/a74/status
 #   routes   training batches from carla_garage's PDM-Lite routes (build_a74_routes.py; never the 220 evaluation routes)
 #   learner  the PPO learner (train_maneuver_ppo.py; resumable: rerun it after a stop)
-#   lanes    A74_LANES RL lanes (ports 2000, 2400, 2800, ...); each runs batch after batch through run_bench2drive.sh with WOR_RL set, one
-#            fresh evaluator per batch (resets the leaderboard's memory growth), until STOP or the learner is done
-#   val      the current head, greedy, on the held-out val.xml (one lane, port 3200): the learning curve on routes never trained on
+#   lanes    A74_LANES RL lanes (ports 2000, 2400, 2800, ...; lane k on GPU k % A74_GPUS); each runs batch after batch through
+#            run_bench2drive.sh with WOR_RL set, one fresh evaluator per batch (resets the leaderboard's memory growth), until STOP or the
+#            learner is done. Lane k starts at batch k + A74_BOFF and steps by A74_LANES: boxes feeding one learner get disjoint offsets
+#   val      the current head, greedy, on the held-out val.xml (one lane, the port after the last lane): the learning curve on routes never
+#            trained on
 #   stop     lanes finish their current batch and exit; the learner keeps its state
 # env: A74_RUN (run1), A74_LANES (3), A74_BATCHES (400), A74_PER_BATCH (25), A74_SEED (0), A74_BATCH (4096 decisions per update),
-#      A74_MAX (300000 decisions), A74_EPS (0.01), A74_EPS_STUCK (0.1)
+#      A74_MAX (300000 decisions), A74_EPS (0.01), A74_EPS_STUCK (0.1), A74_GPUS (1), A74_BOFF (0)
+# The learner can also run elsewhere (scripts/ops/a74_relay.sh: learner on the PC, episodes and heads relayed); then skip the learner step.
 set -uo pipefail
 A=/workspace/a74; RUN=${A74_RUN:-run1}; R=$A/$RUN
 mkdir -p $R/logs; S=$A/status
@@ -36,27 +39,29 @@ lanes)
   done
   mark "LANES_START ${A74_LANES:-3}" ;;
 lane)
-  k=$2; L=${A74_LANES:-3}; port=$(( 2000 + 400 * k )); tm=$(( 8000 + 400 * k )); nb=$(ls $A/routes/batch_*.xml | wc -l)
+  k=$2; L=${A74_LANES:-3}; g=$(( k % ${A74_GPUS:-1} )); port=$(( 2000 + 400 * k )); tm=$(( 8000 + 400 * k ))
+  nb=$(ls $A/routes/batch_*.xml | wc -l)
   export WOR_RL="head=$R/learner/head_latest.pth,mode=train,log=$R/rollouts,period=5,commit=40,eps=${A74_EPS:-0.01},eps_stuck=${A74_EPS_STUCK:-0.1},stuck_s=4"
-  b=$k
+  b=$(( k + ${A74_BOFF:-0} ))
   while [ ! -f $R/STOP ] && ! grep -q A74_LEARNER_DONE $R/learner.log 2>/dev/null; do
     f=$A/routes/batch_$(printf %04d $(( b % nb ))).xml
     label=a74_${RUN}_l${k}_b$(printf %04d $b)
     t0=$(date +%s)
-    CUDA_VISIBLE_DEVICES=0 bash scripts/eval/run_bench2drive.sh $label qwen30m $E15 $f $port $tm 0 > $R/logs/$label.log 2>&1
+    CUDA_VISIBLE_DEVICES=$g bash scripts/eval/run_bench2drive.sh $label qwen30m $E15 $f $port $tm $g > $R/logs/$label.log 2>&1
     mark "LANE $k batch $b exit $? $(( $(date +%s) - t0 )) s, episodes $(ls $R/rollouts/*.npz 2>/dev/null | wc -l) waiting"
     clear_carla_ports $port
     b=$(( b + L ))
   done
   mark "LANE $k stopped" ;;
 val)
+  vp=$(( 2000 + 400 * ${A74_LANES:-3} )); vt=$(( 8000 + 400 * ${A74_LANES:-3} ))
   H=${2:-$R/learner/head_latest.pth}; it=$($PY -c "import torch,sys; print(torch.load(sys.argv[1], weights_only=False)['meta'].get('iter', 0))" $H)
   label=a74_${RUN}_val_iter$(printf %04d $it)
   cp $H $R/learner/val_head_iter$(printf %04d $it).pth
   WOR_RL="head=$R/learner/val_head_iter$(printf %04d $it).pth,mode=eval,log=$R/val_rollouts" CUDA_VISIBLE_DEVICES=0 \
-    bash scripts/eval/run_bench2drive.sh $label qwen30m $E15 $A/routes/val.xml 3200 11200 0 > $R/logs/$label.log 2>&1
+    bash scripts/eval/run_bench2drive.sh $label qwen30m $E15 $A/routes/val.xml $vp $vt 0 > $R/logs/$label.log 2>&1
   mark "VAL iter $it exit $?"
-  clear_carla_ports 3200 ;;
+  clear_carla_ports $vp ;;
 stop)
   touch $R/STOP; mark STOP ;;
 esac
