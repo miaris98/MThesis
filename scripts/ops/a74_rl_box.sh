@@ -10,7 +10,7 @@
 #            trained on
 #   stop     lanes finish their current batch and exit; the learner keeps its state
 # env: A74_RUN (run1), A74_LANES (3), A74_BATCHES (400), A74_PER_BATCH (25), A74_SEED (0), A74_BATCH (4096 decisions per update),
-#      A74_MAX (300000 decisions), A74_EPS (0.01), A74_EPS_STUCK (0.1), A74_GPUS (1), A74_BOFF (0)
+#      A74_MAX (300000 decisions), A74_EPS (0.01), A74_EPS_STUCK (0.1), A74_GPUS (1), A74_BOFF (0), A74_STAGGER_S (15)
 # The learner can also run elsewhere (scripts/ops/a74_relay.sh: learner on the PC, episodes and heads relayed); then skip the learner step.
 set -uo pipefail
 A=/workspace/a74; RUN=${A74_RUN:-run1}; R=$A/$RUN
@@ -36,6 +36,7 @@ lanes)
   rm -f $R/STOP
   for k in $(seq 0 $(( ${A74_LANES:-3} - 1 ))); do
     setsid nohup bash scripts/ops/a74_rl_box.sh lane $k > $R/lane_$k.out 2>&1 < /dev/null &
+    sleep ${A74_STAGGER_S:-15}     # 12 CARLA servers started at once: one died in start-up ("GameThread timed out waiting for RenderThread")
   done
   mark "LANES_START ${A74_LANES:-3}" ;;
 lane)
