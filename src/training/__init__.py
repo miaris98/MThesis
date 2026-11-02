@@ -13,9 +13,14 @@ stay importable even when the online CARLA RL path cannot be imported on the hos
 No code in this project imports `PPOTrainer`/`RolloutBuffer` via `from src.training
 import ...` - every consumer imports directly from `src.training.ppo_trainer` /
 `src.training.rollout_buffer` - so this is a pure safety net, not a behavior change.
+
+`WorldOnRailsTrainer` and the dataset helpers are lazy for the same reason (2026-11-02):
+the closed-loop agent imports `src.training.counterfactual_q` (numpy only) for the A71
+lane shift, and an eager trainer import pulled in src.logging -> tensorboard, which the
+CARLA eval venv does not have. A71-on crashed routes on its first confirmed lane change.
 """
-from src.training.wor_trainer import WorldOnRailsTrainer
-from src.training.wor_dataset import WorldOnRailsDataset, create_wor_dataloader
+_LAZY = {"WorldOnRailsTrainer": "src.training.wor_trainer", "WorldOnRailsDataset": "src.training.wor_dataset",
+         "create_wor_dataloader": "src.training.wor_dataset"}
 
 __all__ = [
     "RolloutBuffer",
@@ -33,4 +38,7 @@ def __getattr__(name: str):
     if name == "RolloutBuffer":
         from src.training.rollout_buffer import RolloutBuffer
         return RolloutBuffer
+    if name in _LAZY:
+        import importlib
+        return getattr(importlib.import_module(_LAZY[name]), name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

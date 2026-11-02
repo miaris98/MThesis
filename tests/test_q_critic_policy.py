@@ -145,6 +145,33 @@ def test_lateral_shift_is_anchored_to_the_route_and_ramped():
     assert np.all(d_after - d_before < 0.0), "every waypoint moves left of the route, none to the right"
 
 
+def test_lateral_shift_runs_without_the_training_stack():
+    """2026-11-02: A71-on crashed routes in the CARLA venv, which has no tensorboard. The first confirmed lane change imported RouteFrame
+    through src/training/__init__.py, which loaded the trainer, then src.logging, then tensorboard. The agent's import closure must stay
+    numpy-only: with tensorboard unimportable the shift still runs and the trainer is never loaded."""
+    import subprocess
+    import sys
+    code = ("import sys; sys.modules['tensorboard'] = None\n"
+            "import numpy as np\n"
+            "from src.models.world_on_rails.q_critic import shift_toward_lateral\n"
+            "out = shift_toward_lateral(np.array([[2.0, 0.0], [4.0, 0.0]], np.float32), np.array([[2.5, 0.0], [7.5, 0.0], [12.5, 0.0]]),"
+            " d_target=1.75, lat_rate=1.75)\n"
+            "assert out.shape == (2, 2) and out[1, 1] > 0.0\n"
+            "assert 'src.training.wor_trainer' not in sys.modules and 'src.logging.experiment_logger' not in sys.modules\n"
+            "print('SHIFT_OK')\n")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    r = subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True, text=True, env={**os.environ, "PYTHONPATH": root})
+    assert r.returncode == 0 and "SHIFT_OK" in r.stdout, r.stderr[-1500:]
+
+
+def test_training_package_still_exports_its_classes():
+    """The lazy package init keeps `from src.training import WorldOnRailsTrainer` (and the dataset helpers) working."""
+    from src.training import WorldOnRailsDataset, WorldOnRailsTrainer, create_wor_dataloader
+    from src.training.wor_dataset import WorldOnRailsDataset as D
+    from src.training.wor_trainer import WorldOnRailsTrainer as T
+    assert WorldOnRailsTrainer is T and WorldOnRailsDataset is D and callable(create_wor_dataloader)
+
+
 def test_lateral_choice_is_held_for_hold_ticks(monkeypatch):
     torch.manual_seed(0)
     m = QwenWorldOnRailsPolicy(**KW, use_q_critic=True).eval()
