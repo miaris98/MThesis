@@ -10,7 +10,8 @@
 #            trained on
 #   stop     lanes finish their current batch and exit; the learner keeps its state
 # env: A74_RUN (run1), A74_LANES (3), A74_BATCHES (400), A74_PER_BATCH (25), A74_SEED (0), A74_BATCH (4096 decisions per update),
-#      A74_MAX (300000 decisions), A74_EPS (0.01), A74_EPS_STUCK (0.1), A74_GPUS (1), A74_BOFF (0), A74_STAGGER_S (15)
+#      A74_MAX (300000 decisions), A74_EPS (0.01), A74_EPS_STUCK (0.1), A74_GPUS (1), A74_BOFF (0), A74_STAGGER_S (15),
+#      A74_THREADS (4: OpenMP / MKL threads per evaluator)
 # The learner can also run elsewhere (scripts/ops/a74_relay.sh: learner on the PC, episodes and heads relayed); then skip the learner step.
 set -uo pipefail
 A=/workspace/a74; RUN=${A74_RUN:-run1}; R=$A/$RUN
@@ -41,6 +42,9 @@ lanes)
   mark "LANES_START ${A74_LANES:-3}" ;;
 lane)
   k=$2; L=${A74_LANES:-3}; g=$(( k % ${A74_GPUS:-1} )); port=$(( 2000 + 400 * k )); tm=$(( 8000 + 400 * k ))
+  # the evaluator's OpenMP / MKL pools default to every hardware thread: 12 lanes on the 128-thread 4x3090 ran ~330 threads and 6-11 cores
+  # each (load 89), starving the CARLA servers (2026-11-02)
+  export OMP_NUM_THREADS=${A74_THREADS:-4} MKL_NUM_THREADS=${A74_THREADS:-4} OPENBLAS_NUM_THREADS=${A74_THREADS:-4}
   nb=$(ls $A/routes/batch_*.xml | wc -l)
   export WOR_RL="head=$R/learner/head_latest.pth,mode=train,log=$R/rollouts,period=5,commit=40,eps=${A74_EPS:-0.01},eps_stuck=${A74_EPS_STUCK:-0.1},stuck_s=4"
   b=$(( k + ${A74_BOFF:-0} ))
