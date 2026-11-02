@@ -25,11 +25,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from atari_qwen.models.conv_transformer import ConvTransformerTrunk, CONV_TRANSFORMER_SIZES
 from atari_qwen.models.gtrxl_layers import GTrXLBlock
 from src.models.transformer.layers import QwenTransformerBlock, RMSNorm
 
 # TODO B61: (dim, depth, heads, ffn_dim) of the token mixer; "30m" = qwen30m in qwen_wor_policy._MODEL_SIZES
-MIXER_SIZES = {"small": (128, 2, 4, 512), "30m": (512, 8, 8, 1536)}
+MIXER_SIZES = {
+    "small": (128, 2, 4, 512),
+    "30m": (512, 8, 8, 1536),
+    "nano": (64, 2, 2, 128),
+    "micro": (128, 2, 4, 256),
+    "mini": (128, 4, 4, 384),
+}
 
 
 # ------------------------------------------------------------------------------------------------
@@ -253,10 +260,10 @@ class EZV2Model(nn.Module):
                  mixer_pos: str = "abs", mixer_size: Optional[str] = None, mixer_qk_norm: bool = False,
                  mixer_where: str = "both", mixer_no_pos: bool = False):
         super().__init__()
-        assert trunk in ("resnet", "gtrxl", "qwen")
+        assert trunk in ("resnet", "gtrxl", "qwen", "conv_transformer")
         assert mixer_where in ("both", "repr", "pred")
-        assert mixer_where != "pred" or trunk == "qwen", "TODO B69: the policy-token trunk is built from the Qwen block"
-        pred_trunk = trunk == "qwen" and mixer_where == "pred"
+        assert mixer_where != "pred" or trunk in ("qwen", "conv_transformer"), "TODO B69: the policy-token trunk is built from Qwen or ConvTransformer"
+        pred_trunk = trunk in ("qwen", "conv_transformer") and mixer_where == "pred"
         self.action_dim, self.C, self.hw, self.trunk = action_dim, num_channels, state_hw, trunk
         # TODO B22: SimNorm group size on the latent (0 = off, the EZ-V2 default). 8 = TD-MPC2's value.
         self.simnorm = simnorm
@@ -305,10 +312,22 @@ class EZV2Model(nn.Module):
             kw = dict(heads=heads, bg_init=mixer_bg_init, out_init_std=mixer_out_init_std, pos_mode=mixer_pos, block=trunk, ffn_dim=ffn,
                       qk_norm=mixer_qk_norm)
         if pred_trunk:
-            # TODO B69: no token mixer in the representation or the dynamics; the Qwen trunk is the prediction function
             self.repr_mixer = self.dyn_mixer = None
-            self.pred_mixer = PolicyTokenTrunk(num_channels, hw2, mixer_dim, mixer_depth, heads, ffn or 4 * mixer_dim, action_dim, S,
-                                               qk_norm=mixer_qk_norm, no_pos=mixer_no_pos)
+            if trunk == "conv_transformer":
+                if mixer_size in CONV_TRANSFORMER_SIZES:
+                    c = CONV_TRANSFORMER_SIZES[mixer_size]
+                    m_dim, m_depth, m_heads, m_ffn = c["dim"], c["depth"], c["heads"], c["ffn_dim"]
+                else:
+                    m_dim, m_depth, m_heads, m_ffn = 256, 4, 4, 768
+                self.pred_mixer = ConvTransformerTrunk(
+                    channels=num_channels, hw=hw2, dim=m_dim, depth=m_depth,
+                    heads=m_heads, ffn_dim=m_ffn, num_actions=action_dim, support_size=S,
+                    window_size=3, qk_norm=mixer_qk_norm
+                )
+            else:
+                # TODO B69: no token mixer in the representation or the dynamics; the Qwen trunk is the prediction function
+                self.pred_mixer = PolicyTokenTrunk(num_channels, hw2, mixer_dim, mixer_depth, heads, ffn or 4 * mixer_dim, action_dim, S,
+                                                   qk_norm=mixer_qk_norm, no_pos=mixer_no_pos)
         elif trunk != "resnet":
             self.repr_mixer = TokenMixer(num_channels, hw2, mixer_dim, mixer_depth, **kw)
             # TODO B68 D1: "repr" keeps the mixer in the representation only (the CARLA trunk's role: encode the observation); the

@@ -237,13 +237,13 @@ def augment(x: torch.Tensor, pad: int = 4) -> torch.Tensor:
 
 
 def mixer_param_groups(model: nn.Module, weight_decay: float):
-    """TODO B66: AdamW groups of the mixer as CARLA builds them for the same Qwen network (src/training/wor_optim.py,
-    decay_gates_and_norms=0): weight decay on matrices, none on biases, RMSNorm gains, alpha gates, positional tables and the
-    B69 policy token (CARLA's NO_DECAY_SUFFIXES)."""
+    """AdamW groups of the mixer: weight decay on matrices, none on biases, RMSNorm gains,
+    alpha gates, positional tables and the policy token."""
     decay, no_decay = [], []
+    has_mixer_prefix = any("mixer" in n for n, _ in model.named_parameters())
     for n, q in model.named_parameters():
-        if "mixer" in n:
-            (no_decay if q.ndim <= 1 or n.endswith((".pos", ".rel_table", ".policy_token")) else decay).append(q)
+        if not has_mixer_prefix or "mixer" in n:
+            (no_decay if q.ndim <= 1 or n.endswith(("pos", "rel_table", "policy_token", "spatial_rel_table", "rel_pos")) else decay).append(q)
     return [{"params": decay, "weight_decay": weight_decay}, {"params": no_decay, "weight_decay": 0.0}]
 
 
@@ -496,7 +496,7 @@ def train(args):
     if args.mixer_optimizer in ("adamw", "adamw_carla"):
         # TODO B37: scale-invariant optimiser for the GTrXL mixer only (SGD moved its q/k/v by lr x a gradient orders of magnitude below the rest of
         # the net: |Wq| stayed at init); conv trunk and heads keep EZ-V2's SGD recipe.
-        assert mix_params, "--mixer-optimizer adamw needs --trunk gtrxl or qwen"
+        assert mix_params, "--mixer-optimizer adamw needs --trunk gtrxl, qwen or conv_transformer"
         rest_params = [q for n, q in model.named_parameters() if "mixer" not in n]
         opt = torch.optim.SGD(rest_params, lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
         if args.mixer_optimizer == "adamw":
@@ -993,8 +993,8 @@ def train(args):
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--env-id", default="BreakoutNoFrameskip-v4")
-    ap.add_argument("--trunk", default="resnet", choices=["resnet", "gtrxl", "qwen"])
-    ap.add_argument("--mixer-size", default=None, choices=["small", "30m"],
+    ap.add_argument("--trunk", default="resnet", choices=["resnet", "gtrxl", "qwen", "conv_transformer"])
+    ap.add_argument("--mixer-size", default=None, choices=["small", "30m", "nano", "micro", "mini"],
                     help="TODO B61: named mixer shape (small = 128x2, 4 heads, as GTrXL; 30m = qwen30m 512x8, 8 heads, FFN 1536); "
                          "unset keeps the GTrXL mixer's 128x2")
     ap.add_argument("--mixer-no-pos", action="store_true",
