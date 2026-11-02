@@ -8,9 +8,12 @@ PY=/venv/main/bin/python
 D=/workspace/dataset/wor_trajectories
 DENSE="Accident|Obstacle|HazardAtSideLane|OpensDoor|Construction|InvadingTurn|ParkedObstacle"
 mark START
-$PY -m pip install -q requests huggingface_hub mlflow > /workspace/a71/pip.log 2>&1
-$PY scripts/setup/download_pdm_lite.py --towns Town01,Town02,Town03,Town04,Town05,Town10,Town12,Town13 --include-huge --reserve-gb 30 --dest $D \
-  > /workspace/a71/data.log 2>&1 && mark DATA_DONE || { mark DATA_FAILED; exit 1; }
+# src.training's __init__ imports the trainer -> logger -> torch.utils.tensorboard: the same packages as the box driver's setup (2026-11-02)
+$PY -m pip install -q requests huggingface_hub mlflow tensorboard timm opencv-python-headless > /workspace/a71/pip.log 2>&1
+grep -q DATA_DONE $S || { $PY scripts/setup/download_pdm_lite.py --towns Town01,Town02,Town03,Town04,Town05,Town10,Town12,Town13 --include-huge \
+  --reserve-gb 30 --dest $D > /workspace/a71/data.log 2>&1 && mark DATA_DONE || { mark DATA_FAILED; exit 1; }; }
+$PY -c "import sys; sys.path.insert(0, 'scripts/training'); import build_q_labels" > /workspace/a71/import_check.log 2>&1 \
+  || { mark "IMPORT_FAILED $(tail -1 /workspace/a71/import_check.log)"; exit 1; }
 CPUS=$($PY -c "import sys; sys.path.insert(0,'scripts/training'); from build_q_labels import _usable_cpus; print(_usable_cpus())")
 RAMW=$(( $(awk '/MemAvailable/{print $2}' /proc/meminfo) / 450000 ))          # ~450 MB per worker
 W=$(( CPUS < RAMW ? CPUS : RAMW )); mark "WORKERS $W (cpus $CPUS, ram cap $RAMW)"
