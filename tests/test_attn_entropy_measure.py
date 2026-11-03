@@ -40,3 +40,22 @@ def test_measure_fails_loudly_on_a_checkpoint_that_does_not_match_its_args(tmp_p
     import pytest
     with pytest.raises(RuntimeError):
         measure(ck, rp, n=4)
+
+
+def test_gate_attention_is_the_shared_measure_and_leaves_bn_alone():
+    """The trainer's in-run log and the offline gate both call gate_attention on RAW observation stacks. Batch-norm running stats and the
+    training flag must not move, or the diagnostic would change the run it measures (2026-11-03 agreement fix)."""
+    from scripts.analysis.attn_entropy_measure import gate_attention
+    torch.manual_seed(0)
+    m = EZV2Model(4, obs_channels=12, support=DiscreteSupport(), trunk="conv_transformer", norm="batch", state_hw=6,
+                  mixer_out_init_std=0.0, mixer_bg_init=0.0, simnorm=0, mixer_pos="rope", mixer_size="mini",
+                  mixer_qk_norm=False, mixer_where="pred", mixer_no_pos=False)
+    m.train()
+    obs = torch.rand(8, 12, 96, 96)
+    bn_before = {k: v.clone() for k, v in m.state_dict().items() if "running" in k}
+    layers, policy = gate_attention(m, obs)
+    assert m.training is True
+    assert all(torch.equal(bn_before[k], v) for k, v in m.state_dict().items() if "running" in k)
+    assert len(layers) == 4 and all(0.0 <= h <= 1.0 for h in layers)
+    again, _ = gate_attention(m, obs)
+    assert list(layers) == list(again)

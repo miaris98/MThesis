@@ -27,14 +27,25 @@ def measure(ck_path, replay_path, n=256, seed=0):
     t = rng.integers(3, T, size=n)
     e = rng.integers(0, frames.shape[1], size=n)
     obs = torch.from_numpy(np.stack([frames[t - o, e] for o in (3, 2, 1, 0)], 1).reshape(n, 12, 96, 96)).float().div_(255.0)
+    layers, pols = gate_attention(m, obs)
+    return ck["updates"], ck["env_steps"], layers, pols
+
+
+@torch.no_grad()
+def gate_attention(model, obs: torch.Tensor, chunk: int = 64):
+    """Mean normalised attention entropy per layer and for the policy query, over RAW observation stacks (float in [0, 1], (n, 12, H, W)).
+    The trainer's in-run log and the offline gate both call this, so they measure the same thing. Eval mode while measuring (batch-norm
+    running stats untouched); the training flag is restored."""
+    was_training = model.training
+    model.eval()
     layers, pols = [], []
-    with torch.no_grad():
-        for i in range(0, n, 64):
-            s, _, _ = m.initial_inference(obs[i:i + 64])
-            rep = m.pred_mixer.attention_entropy(s.float())
-            layers.append(rep["per_layer"])
-            pols.append(rep["policy_row"])
-    return ck["updates"], ck["env_steps"], np.mean(layers, 0), np.mean(pols, 0)
+    for i in range(0, len(obs), chunk):
+        s, _, _ = model.initial_inference(obs[i:i + chunk])
+        rep = model.pred_mixer.attention_entropy(s.float())
+        layers.append(rep["per_layer"])
+        pols.append(rep["policy_row"])
+    model.train(was_training)
+    return np.mean(layers, 0), np.mean(pols, 0)
 
 
 if __name__ == "__main__":

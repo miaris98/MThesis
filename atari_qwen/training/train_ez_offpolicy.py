@@ -908,7 +908,11 @@ def train(args):
             # key; the gate needs H > 0.8). Logged per layer and for the [POLICY] query, so a collapsing layer shows before the policy does.
             attn_ent = None
             if args.trunk == "conv_transformer" and getattr(model, "pred_mixer", None) is not None:
-                attn_ent = model.pred_mixer.attention_entropy(s.detach().float()[:32])
+                # the same measure as the offline gate (scripts/analysis/attn_entropy_measure.gate_attention), on RAW root observations: the
+                # augment() shift is a training-time input, and measuring it made the in-run log disagree with the gate (2026-11-03)
+                from scripts.analysis.attn_entropy_measure import gate_attention
+                gl, gp = gate_attention(model, obs_all[:32, 0].detach().float())
+                attn_ent = {"per_layer": [float(x) for x in gl], "policy_row": [float(x) for x in gp]}
             attn_str = "" if attn_ent is None else (
                 "attn H " + "/".join(f"{h:.2f}" for h in attn_ent["per_layer"]) + f" pol {np.mean(attn_ent['policy_row']):.2f} | ")
             tot = max(sum(tm.values()), 1e-9)
