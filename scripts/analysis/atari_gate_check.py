@@ -48,7 +48,10 @@ def gate_verdict(lines) -> tuple:
 
 
 if __name__ == "__main__":
+    failed = False
     for path in sys.argv[1:]:
         with open(path, encoding="utf-8", errors="replace") as f:
             ok, reasons = gate_verdict(f.read().splitlines())
+        failed = failed or not ok
         print(("PASS " if ok else "FAIL ") + path + ("" if ok else ": " + "; ".join(reasons)))
+    sys.exit(1 if failed else 0)
