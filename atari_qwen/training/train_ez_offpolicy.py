@@ -904,6 +904,13 @@ def train(args):
         if stepped and (env_steps - last_log >= 1000 or (env_steps >= args.total_steps and updates % 1000 == 0)):
             last_log = env_steps
             el = time.time() - t0
+            # Gate 1 diagnostic (2026-11-03): normalised attention entropy of the prediction trunk on 32 states of the last update (1 uniform, 0 one
+            # key; the gate needs H > 0.8). Logged per layer and for the [POLICY] query, so a collapsing layer shows before the policy does.
+            attn_ent = None
+            if args.trunk == "conv_transformer" and getattr(model, "pred_mixer", None) is not None:
+                attn_ent = model.pred_mixer.attention_entropy(s.detach().float()[:32])
+            attn_str = "" if attn_ent is None else (
+                "attn H " + "/".join(f"{h:.2f}" for h in attn_ent["per_layer"]) + f" pol {np.mean(attn_ent['policy_row']):.2f} | ")
             tot = max(sum(tm.values()), 1e-9)
             ret = float(np.mean(recent_returns[-20:])) if recent_returns else 0.0
             mixer_w = (sum(q.detach().norm() ** 2 for n, q in model.named_parameters()
@@ -921,7 +928,7 @@ def train(args):
                   + (f"explore {explore_steps} | " if args.stagnation_explore > 0 else "")
                   + ("cache hit s/v {:.2f}/{:.2f} | ".format(*cache_hits) if rcache is not None else "") +
                   f"time c/t/u {100 * tm['collect'] / tot:.0f}/{100 * tm['targets'] / tot:.0f}/"
-                  f"{100 * tm['update'] / tot:.0f}% | {el / 60:.1f} min", flush=True)
+                  f"{100 * tm['update'] / tot:.0f}% | " + attn_str + f"{el / 60:.1f} min", flush=True)
             if play["steps"]:
                 ps = play_summary(play)
                 print("[play] " + " | ".join(f"{k} {v}" for k, v in ps.items() if k != "metrics"), flush=True)
@@ -940,7 +947,10 @@ def train(args):
                  **({"train/reanalysis_cache_hit": cache_hits[0], "train/bootstrap_cache_hit": cache_hits[1]} if rcache is not None else {}),
                  "train/value_target_mean": float(val_t[:, 0].mean()),
                  "train/policy_target_entropy": float(-(pol_t[:, 0] * np.log(pol_t[:, 0] + 1e-8)).sum(-1).mean()),
-                 "train/explore_steps": explore_steps},
+                 "train/explore_steps": explore_steps,
+                 **({f"diag/attn_entropy_L{i}": h for i, h in enumerate(attn_ent["per_layer"])} |
+                    {f"diag/attn_entropy_policy_L{i}": h for i, h in enumerate(attn_ent["policy_row"])} |
+                    {"diag/attn_entropy_mean": float(np.mean(attn_ent["per_layer"]))} if attn_ent is not None else {})},
                 env_steps)
         done_all = updates >= total_updates
         if ((env_steps >= next_eval and env_steps <= args.total_steps) or done_all) and args.eval_mode == "deferred":

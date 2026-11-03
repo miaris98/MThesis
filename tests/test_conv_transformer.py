@@ -1021,3 +1021,39 @@ def test_memory_footprint_scaling():
     mb = total_bytes / (1024 * 1024)
     # small preset (~4.1M params * 4 bytes ≈ 16.4 MB)
     assert mb < 25.0, f"Trunk memory footprint unexpectedly large: {mb:.2f} MB"
+
+
+# --- Gate 1 diagnostic (2026-11-03): attention entropy, the gate's H > 0.8 check ------------------------------------------
+
+def test_normalized_entropy_is_one_for_uniform_and_zero_for_one_key():
+    from atari_qwen.models.conv_transformer import normalized_entropy
+    allowed = torch.tensor([[1., 1., 1., 0.], [1., 0., 0., 1.]])
+    uniform = torch.tensor([[1 / 3, 1 / 3, 1 / 3, 0.], [0.5, 0., 0., 0.5]])
+    one_hot = torch.tensor([[1., 0., 0., 0.], [0., 0., 0., 1.]])
+    assert torch.allclose(normalized_entropy(uniform, allowed), torch.ones(2), atol=1e-5)
+    assert torch.allclose(normalized_entropy(one_hot, allowed), torch.zeros(2), atol=1e-6)
+
+
+def test_block_returns_its_attention_weights_on_request():
+    torch.manual_seed(0)
+    trunk = ConvTransformerTrunk(channels=64, hw=36, dim=128, depth=2, heads=4, ffn_dim=256, num_actions=4, support_size=601)
+    blk = trunk.blocks[0]
+    x = torch.randn(3, 37, 128)                                  # policy token + 36 cells
+    y_plain = blk(x)
+    y, w = blk(x, return_attn=True)
+    assert torch.allclose(y, y_plain), "asking for weights must not change the output"
+    assert w.shape == (3, 4, 37, 37)
+    assert torch.allclose(w.sum(-1), torch.ones(3, 4, 37), atol=1e-5)
+
+
+def test_attention_entropy_reports_each_layer_and_the_policy_row():
+    torch.manual_seed(0)
+    trunk = ConvTransformerTrunk(channels=64, hw=36, dim=128, depth=3, heads=4, ffn_dim=256, num_actions=4, support_size=601)
+    s = torch.randn(5, 64, 6, 6)
+    report = trunk.attention_entropy(s)
+    assert len(report["per_layer"]) == 3 and len(report["policy_row"]) == 3
+    assert all(0.0 <= h <= 1.0 + 1e-6 for h in report["per_layer"] + report["policy_row"])
+    assert trunk.training is True, "the diagnostic must restore the training flag"
+    # at random init every layer spreads its attention over the window (about 0.8 of the maximum, not exactly uniform: the relative bias and
+    # the projections are random), so a healthy trunk stays well above 0 and a collapsed one falls towards 0
+    assert min(report["per_layer"]) > 0.7

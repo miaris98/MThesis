@@ -35,6 +35,14 @@ CONV_TRANSFORMER_SIZES: Dict[str, Dict[str, int]] = {
 }
 
 
+def normalized_entropy(p: torch.Tensor, allowed: torch.Tensor) -> torch.Tensor:
+    """Shannon entropy of each attention row over the keys it may see, divided by log(number of those keys): 1 is uniform, 0 is one key.
+    `allowed` is 1 where a key is visible (broadcast against p's last two dims)."""
+    k = allowed.sum(-1).clamp(min=2).to(p.dtype)
+    ent = -(p * torch.log(p.clamp(min=1e-12))).masked_fill(allowed == 0, 0.0).sum(-1)
+    return ent / torch.log(k)
+
+
 class RelativePositionBias2D(nn.Module):
     """2D Relative Positional Bias table for an (H, W) spatial token grid.
     
@@ -261,17 +269,17 @@ class ConvTransformerBlock(nn.Module):
             conv_out = conv_out_2d.flatten(2).transpose(1, 2)
             return self.dw_proj(conv_out)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_attn: bool = False):
         # Branch 1: Depthwise Convolution
         x = x + self.alpha_conv * self._forward_conv(self.norm_conv(x))
         
-        # Branch 2: Local Neighborhood Attention
-        attn_out, _ = self.attn(self.norm_attn(x))
+        # Branch 2: Local Neighborhood Attention (weights only on request: the diagnostics read them)
+        attn_out, w = self.attn(self.norm_attn(x), return_weights=return_attn)
         x = x + self.alpha_attn * attn_out
         
         # Branch 3: SwiGLU FFN
         x = x + self.alpha_ffn * self.ffn(self.norm_ffn(x))
-        return x
+        return (x, w) if return_attn else x
 
 
 class ConvTransformerTrunk(nn.Module):
@@ -341,4 +349,22 @@ class ConvTransformerTrunk(nn.Module):
             h = blk(h)
         policy_repr = self.norm_out(h)[:, 0]  # Read from [POLICY] token
         return self.value_head(policy_repr), self.policy_head(policy_repr)
+
+    @torch.no_grad()
+    def attention_entropy(self, s: torch.Tensor) -> dict:
+        """Diagnostic (Gate 1, 2026-11-03): normalised attention entropy per layer, averaged over batch, heads and queries (1 = uniform over
+        the keys a query may see, 0 = one key), plus the same for the [POLICY] query alone. Eval mode, no gradients; the training flag is
+        restored."""
+        was_training = self.training
+        self.eval()
+        h = self.tokens(s)
+        per_layer, policy_row = [], []
+        for blk in self.blocks:
+            h, w = blk(h, return_attn=True)
+            allowed = (blk.attn.window_mask[0] == 0).to(w.dtype)
+            H = normalized_entropy(w, allowed)                       # (B, heads, N)
+            per_layer.append(float(H.mean()))
+            policy_row.append(float(H[:, :, 0].mean()))
+        self.train(was_training)
+        return {"per_layer": per_layer, "policy_row": policy_row}
 
