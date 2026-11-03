@@ -1116,7 +1116,17 @@ def parse_args(argv=None):
                     help="use channels_last memory format for faster Tensor Core convolutions on Ampere+")
     ap.add_argument("--async-checkpoint", action=argparse.BooleanOptionalAction, default=True,
                     help="save checkpoints and replay buffers in a background thread to prevent training stalls")
-    return ap.parse_args(argv)
+    a = ap.parse_args(argv)
+    check_flag_contract(a)
+    return a
+
+
+def check_flag_contract(args) -> None:
+    """Flag rules checked at parse time, before any environment or model is built (a rule found after that cost a box launch on 2026-11-03)."""
+    if args.reanalyze_merge and not args.reanalyze_cache:
+        raise ValueError("--reanalyze-merge needs --reanalyze-cache and --priority-alpha 0")
+    if args.reanalyze_merge and args.priority_alpha != 0:
+        raise ValueError("--reanalyze-merge needs --reanalyze-cache and --priority-alpha 0 (got --priority-alpha %s)" % args.priority_alpha)
 
 
 if __name__ == "__main__":
