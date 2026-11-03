@@ -1000,7 +1000,7 @@ def train(args):
     return best
 
 
-def parse_args(argv=None):
+def build_parser():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--env-id", default="BreakoutNoFrameskip-v4")
     ap.add_argument("--trunk", default="resnet", choices=["resnet", "gtrxl", "qwen", "conv_transformer"])
@@ -1116,7 +1116,11 @@ def parse_args(argv=None):
                     help="use channels_last memory format for faster Tensor Core convolutions on Ampere+")
     ap.add_argument("--async-checkpoint", action=argparse.BooleanOptionalAction, default=True,
                     help="save checkpoints and replay buffers in a background thread to prevent training stalls")
-    a = ap.parse_args(argv)
+    return ap
+
+
+def parse_args(argv=None):
+    a = build_parser().parse_args(argv)
     check_flag_contract(a)
     return a
 
