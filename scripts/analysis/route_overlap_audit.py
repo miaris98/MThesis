@@ -94,15 +94,23 @@ def read_positions(route_dir, stride=2):
     return out
 
 
-def audit_data_dir(data_dir, ev, path_radius, min_overlap_m):
-    """Every downloaded Town12/13 route folder (its name starts with the town) -> trajectory flags."""
+def audit_data_dir(data_dir, ev, path_radius, min_overlap_m, trigger_radius=30.0):
+    """Every downloaded Town12/13 route folder (its name starts with the town, its parent folder is the scenario type) -> flags: the
+    trajectory check above, plus `same_type_near_eval_trigger` when the drive passes within `trigger_radius` of an evaluation trigger of
+    the same scenario type (the same event at the same place)."""
     rows = []
     for m in sorted(glob.glob(os.path.join(data_dir, "**", "measurements"), recursive=True)):
         rd = os.path.dirname(m)
-        town = os.path.basename(rd).split("_")[0]
+        town, typ = os.path.basename(rd).split("_")[0], os.path.basename(os.path.dirname(rd))
         if town not in {r["town"] for r in ev}:
             continue
-        rows.append({"dir": rd, "town": town, **flag_trajectory(town, read_positions(rd), ev, path_radius, min_overlap_m)})
+        pos = read_positions(rd)
+        f = flag_trajectory(town, pos, ev, path_radius, min_overlap_m)
+        trig = sorted({r["id"] for r in ev if r["town"] == town for t, x, y in r["scenarios"]
+                       if t == typ and any(math.hypot(px - x, py - y) <= trigger_radius for px, py in pos)})
+        f["same_type_near_eval_trigger"] = trig
+        f["leak"] = f["leak"] or bool(trig)
+        rows.append({"dir": rd, "town": town, "type": typ, **f})
     return rows
 
 
@@ -118,7 +126,7 @@ def main():
     a = ap.parse_args()
     ev = load_eval_routes(a.eval_xml)
     if a.data_dir:
-        rows = audit_data_dir(a.data_dir, ev, a.path_radius, a.min_overlap_m)
+        rows = audit_data_dir(a.data_dir, ev, a.path_radius, a.min_overlap_m, a.trigger_radius)
         leak = [r for r in rows if r["leak"]]
         print(f"{len(ev)} evaluation routes, {len(rows)} Town12/13 route folders, {len(leak)} leak "
               f"(>= {a.min_overlap_m} m within {a.path_radius} m of one evaluation route)")

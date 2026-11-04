@@ -84,6 +84,20 @@ def test_data_dir_audit_reads_pos_global_and_town_from_the_folder(tmp_path):
     rows = {r["dir"].replace("\\", "/").rsplit("/", 1)[-1]: r for r in audit_data_dir(str(tmp_path / "data"), ev, 10.0, 30.0)}
     assert set(rows) == {"Town13_Rep0_1044_0_route0", "Town13_Rep0_9_0_route0"}  # Town01 is not an evaluation town here
     assert rows["Town13_Rep0_1044_0_route0"]["leak"] and not rows["Town13_Rep0_9_0_route0"]["leak"]
+    assert rows["Town13_Rep0_1044_0_route0"]["same_type_near_eval_trigger"] == ["1"]  # an Accident drive past eval route 1's Accident
+
+
+def test_same_type_trigger_pass_is_flagged_even_without_path_overlap(tmp_path):
+    import gzip, json
+    from scripts.analysis.route_overlap_audit import audit_data_dir
+    ev = load_eval_routes(_write(tmp_path, "b2d.xml", EVAL_XML))
+    m = tmp_path / "data" / "Accident" / "Town13_Rep0_7_0_route0" / "measurements"
+    m.mkdir(parents=True)
+    for i, y in enumerate(range(-40, 41, 2)):  # crosses eval route 1 at its Accident trigger (50, 0): a few metres of path, same event
+        with gzip.open(m / f"{i:04d}.json.gz", "wt") as fh:
+            json.dump({"pos_global": [50.0, float(y)]}, fh)
+    (row,) = audit_data_dir(str(tmp_path / "data"), ev, 10.0, 30.0)
+    assert row["leak"] and row["eval_ids"] == [] and row["same_type_near_eval_trigger"] == ["1"]
 
 
 def test_scenario_on_the_eval_path_is_flagged_even_with_another_type(tmp_path):
