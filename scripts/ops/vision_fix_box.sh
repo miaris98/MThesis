@@ -75,7 +75,7 @@ cache)
     wait
   done
   ls /workspace/pooled_ov1/*.json /workspace/pooled_ov0/*.json > /dev/null && mark CACHE_DONE || mark CACHE_FAILED ;;
-train|train_cached|train_s2d|train_pair)
+train|train_cached|train_s2d|seed1)
   # train = all four on one 2-GPU box; 2026-11-04 split: train_s2d on its own box (a 5090, ~3x the A6000's live-encoder rate: 617 vs
   # 172-191 frames/s), train_cached = the three cached arms over both GPUs of the A6000 box
   grep -q AUDIT_DONE $S || { echo "audit first"; exit 1; }
@@ -94,9 +94,10 @@ train|train_cached|train_s2d|train_pair)
   case $1 in
   train)        ( run 0 vf_s2d "$S2D" ) & ( run 1 vf_ctrl "$CTRL"; run 1 vf_clean "$CLEAN"; run 1 vf_path "$PATHA" ) & ;;
   train_s2d)    ( run ${S2D_GPU:-0} vf_s2d "$S2D" ) & ;;
-  # 2026-11-04 (approved): a second process per A6000 GPU. The two queued arms start beside the two running ones (GPU utilization was
-  # 45-56% with one process each; a cached run is latency-bound). Start only after the queued subshells are stopped, or they run twice.
-  train_pair)   ( run 0 vf_path "$PATHA" ) & ( run 1 vf_ctrl_s1 "$CTRL --seed 1" ) & ;;
+  # 2026-11-04 (approved: a second process per A6000 GPU). The queue had already moved on (fix 4 and the baseline's second seed started
+  # when the first pair finished), so the second process per GPU is seed-1 replicates of the two arms that have one seed: the protocol
+  # wants 3 trained seeds before a finalist (seed noise ~4 DS). Each ~40-60 min; ~2 processes per GPU keeps both busy.
+  seed1)        ( run 0 vf_path_s1 "$PATHA --seed 1" ) & ( run 1 vf_clean_s1 "$CLEAN --seed 1" ) & ;;
   # three 1-hour jobs on two GPUs leave one GPU idle for an hour unless it gets a fourth job: the baseline's second seed (the noise
   # estimate the protocol needs: seed noise is ~4 DS). Same makespan as before (about 2 hours), no extra box time.
   train_cached) ( run 0 vf_ctrl "$CTRL"; run 0 vf_path "$PATHA" ) & ( run 1 vf_clean "$CLEAN"; run 1 vf_ctrl_s1 "$CTRL --seed 1" ) & ;;  # the user's order: fix 2 before fix 4
