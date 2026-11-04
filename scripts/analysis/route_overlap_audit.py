@@ -15,6 +15,7 @@ import gzip
 import json
 import math
 import os
+import re
 import xml.etree.ElementTree as ET
 
 
@@ -101,7 +102,10 @@ def audit_data_dir(data_dir, ev, path_radius, min_overlap_m, trigger_radius=30.0
     rows = []
     for m in sorted(glob.glob(os.path.join(data_dir, "**", "measurements"), recursive=True)):
         rd = os.path.dirname(m)
-        town, typ = os.path.basename(rd).split("_")[0], os.path.basename(os.path.dirname(rd))
+        typ = os.path.basename(os.path.dirname(rd))
+        # the town is a path component (download layout Town13/data/<Scenario>/Route<N>_Rep<k>) or the folder-name prefix (Town13_Rep0_...)
+        parts = os.path.relpath(rd, data_dir).replace("\\", "/").split("/")
+        town = next((p.split("_")[0] for p in parts if re.match(r"^Town\d+(_|$)", p)), "")
         if town not in {r["town"] for r in ev}:
             continue
         pos = read_positions(rd)

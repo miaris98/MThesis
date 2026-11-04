@@ -87,6 +87,20 @@ def test_data_dir_audit_reads_pos_global_and_town_from_the_folder(tmp_path):
     assert rows["Town13_Rep0_1044_0_route0"]["same_type_near_eval_trigger"] == ["1"]  # an Accident drive past eval route 1's Accident
 
 
+def test_real_pdm_lite_layout_takes_the_town_from_the_path(tmp_path):
+    # the downloaded archives unpack to Town13/data/<Scenario>/Route<N>_Rep<k>: the folder name carries no town (2026-11-04, box check)
+    import gzip, json
+    from scripts.analysis.route_overlap_audit import audit_data_dir
+    ev = load_eval_routes(_write(tmp_path, "b2d.xml", EVAL_XML))
+    m = tmp_path / "data" / "Town13" / "data" / "Accident" / "Route11_Rep0" / "measurements"
+    m.mkdir(parents=True)
+    for i, x in enumerate(range(0, 61, 2)):
+        with gzip.open(m / f"{i:04d}.json.gz", "wt") as fh:
+            json.dump({"pos_global": [float(x), 1.0]}, fh)
+    (row,) = audit_data_dir(str(tmp_path / "data"), ev, 10.0, 30.0)
+    assert row["town"] == "Town13" and row["type"] == "Accident" and row["leak"]
+
+
 def test_same_type_trigger_pass_is_flagged_even_without_path_overlap(tmp_path):
     import gzip, json
     from scripts.analysis.route_overlap_audit import audit_data_dir
