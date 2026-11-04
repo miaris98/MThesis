@@ -35,8 +35,12 @@ setup)
   ( curl -sL -o /workspace/tfpp_pretrained.zip https://s3.eu-central-1.amazonaws.com/avg-projects-2/garage_2/models/pretrained_models.zip && \
     mkdir -p /workspace/tfpp_pretrained && unzip -q -o /workspace/tfpp_pretrained.zip "pretrained_models/all_towns/model_0030_0.pth" -d /workspace/tfpp_pretrained && \
     mark TFPP_DONE || mark TFPP_FAILED ) &
-  ( bash scripts/ops/provision_carla_no_hf.sh > /workspace/vf/carla_prov.log 2>&1
-    VIRTUAL_ENV=/workspace/venv_carla uv pip install -q tensorboard mlflow pytest >> /workspace/vf/carla_prov.log 2>&1; mark CARLA_PROV_END ) &
+  if [ "${NO_CARLA:-0}" = 1 ]; then  # 2026-11-04: training-only box (the s2d arm on a 5090): the trainer runs in /venv/main
+    ( $PY -m pip install -q timm mlflow tensorboard opencv-python-headless pytest >> /workspace/vf/pip.log 2>&1; mark CARLA_PROV_END ) &
+  else
+    ( bash scripts/ops/provision_carla_no_hf.sh > /workspace/vf/carla_prov.log 2>&1
+      VIRTUAL_ENV=/workspace/venv_carla uv pip install -q tensorboard mlflow pytest >> /workspace/vf/carla_prov.log 2>&1; mark CARLA_PROV_END ) &
+  fi
   wait; mark SETUP_END ;;
 audit)
   # the evaluation routes (bench2drive220.xml, shipped to /workspace/vf by the deploy step); leaks move to /workspace/dataset_excluded (kept, not deleted)
@@ -71,20 +75,29 @@ cache)
     wait
   done
   ls /workspace/pooled_ov1/*.json /workspace/pooled_ov0/*.json > /dev/null && mark CACHE_DONE || mark CACHE_FAILED ;;
-train)
+train|train_cached|train_s2d)
+  # train = all four on one 2-GPU box; 2026-11-04 split: train_s2d on its own box (a 5090, ~3x the A6000's live-encoder rate: 617 vs
+  # 172-191 frames/s), train_cached = the three cached arms over both GPUs of the A6000 box
   grep -q AUDIT_DONE $S || { echo "audit first"; exit 1; }
-  P1=$(ls /workspace/pooled_ov1/*.json | head -1); P1=${P1%.json}; P0=$(ls /workspace/pooled_ov0/*.json | head -1); P0=${P0%.json}
+  [ -x $PYC ] || PYC=$PY
   run() {  # GPU LABEL extra-args (one run, foreground)
     CUDA_VISIBLE_DEVICES=$1 $PYC -u scripts/training/train_wor.py $COMMON $3 --run_label $2 --save_dir /workspace/checkpoints/$2 \
       > /workspace/vf/$2.log 2>&1; mark "TRAIN_END $2 rc=$?"
   }
-  # fix 3 first (the user's order); live encoder, so it takes the longest and gets its own GPU
-  ( run 0 vf_s2d "--route_overlay 1 --token_mode s2d --s2d_patch 3 --token_mask 0.2 --vision_grid 6x16 --encoder_channels_last 1 --num_workers $(( $(nproc) / 2 - 4 ))" ) &
-  ( run 1 vf_ctrl "--route_overlay 1 --vision_grid 4 --num_workers 8 --pooled_cache $P1"
-    run 1 vf_clean "--route_overlay 0 --vision_grid 4 --num_workers 8 --pooled_cache $P0"
-    run 1 vf_path "--route_overlay 1 --vision_grid 4 --num_workers 8 --pooled_cache $P1 --path_head 1 --path_cascade 1" ) &
+  S2D="--route_overlay 1 --token_mode s2d --s2d_patch 3 --token_mask 0.2 --vision_grid 6x16 --encoder_channels_last 1 --num_workers $(( $(nproc) / NG - 4 ))"
+  if [ "$1" != train_s2d ]; then
+    P1=$(ls /workspace/pooled_ov1/*.json | head -1); P1=${P1%.json}; P0=$(ls /workspace/pooled_ov0/*.json | head -1); P0=${P0%.json}
+    CTRL="--route_overlay 1 --vision_grid 4 --num_workers 8 --pooled_cache $P1"
+    CLEAN="--route_overlay 0 --vision_grid 4 --num_workers 8 --pooled_cache $P0"
+    PATHA="--route_overlay 1 --vision_grid 4 --num_workers 8 --pooled_cache $P1 --path_head 1 --path_cascade 1"
+  fi
+  case $1 in
+  train)        ( run 0 vf_s2d "$S2D" ) & ( run 1 vf_ctrl "$CTRL"; run 1 vf_clean "$CLEAN"; run 1 vf_path "$PATHA" ) & ;;
+  train_s2d)    ( run ${S2D_GPU:-0} vf_s2d "$S2D" ) & ;;
+  train_cached) ( run 0 vf_ctrl "$CTRL"; run 0 vf_path "$PATHA" ) & ( run 1 vf_clean "$CLEAN" ) & ;;  # the user's order: fix 2 before fix 4
+  esac
   sleep 240
-  for L in vf_s2d vf_ctrl; do echo "== $L"; grep -aE "Resumed|Validation split|pooled|token_mode|Error|Traceback" /workspace/vf/$L.log | tail -5; done
+  for L in vf_s2d vf_ctrl vf_clean; do [ -f /workspace/vf/$L.log ] && { echo "== $L"; grep -aE "Resumed|Validation split|pooled|token_mode|channels_last|Error|Traceback" /workspace/vf/$L.log | tail -5; }; done
   nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader
   wait ;;
 esac
