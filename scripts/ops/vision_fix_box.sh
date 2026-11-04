@@ -79,7 +79,7 @@ train)
       > /workspace/vf/$2.log 2>&1; mark "TRAIN_END $2 rc=$?"
   }
   # fix 3 first (the user's order); live encoder, so it takes the longest and gets its own GPU
-  ( run 0 vf_s2d "--route_overlay 1 --token_mode s2d --s2d_patch 3 --token_mask 0.2 --vision_grid 6x16 --num_workers $(( $(nproc) / 2 - 4 ))" ) &
+  ( run 0 vf_s2d "--route_overlay 1 --token_mode s2d --s2d_patch 3 --token_mask 0.2 --vision_grid 6x16 --encoder_channels_last 1 --num_workers $(( $(nproc) / 2 - 4 ))" ) &
   ( run 1 vf_ctrl "--route_overlay 1 --vision_grid 4 --num_workers 8 --pooled_cache $P1"
     run 1 vf_clean "--route_overlay 0 --vision_grid 4 --num_workers 8 --pooled_cache $P0"
     run 1 vf_path "--route_overlay 1 --vision_grid 4 --num_workers 8 --pooled_cache $P1 --path_head 1 --path_cascade 1" ) &

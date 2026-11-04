@@ -169,7 +169,27 @@ class CarlaPretrainedEncoder(nn.Module):
         x = x.float()
         if x.max() > 1.0:
             x = x / 255.0
-        return (x - self.mean) / self.std
+        x = (x - self.mean) / self.std
+        return x.contiguous(memory_format=torch.channels_last) if getattr(self, "channels_last", False) else x
+
+    def set_channels_last(self):
+        """TODO A54 speed-up (2026-11-04): NHWC convolutions, faster under bf16 on Ampere+; the features match to float rounding."""
+        self.channels_last = True
+        self.encoder.to(memory_format=torch.channels_last)
+        return self
+
+    def forward_level(self, x: torch.Tensor, level: int) -> torch.Tensor:
+        """One pyramid level, running the stages only up to the one that produces it (exact; the s2d arm reads level -2 = stride 16,
+        so the stride-32 stage, ~15-20% of regnety_032's compute, is skipped)."""
+        names = self.encoder.feature_info.module_name()
+        target = names[level]
+        x = self._prepare(x)
+        with torch.set_grad_enabled(not self.freeze_backbone and torch.is_grad_enabled()):
+            for name, module in self.encoder.items():
+                x = module(x)
+                if name == target:
+                    return x
+        raise RuntimeError(f"pyramid level {level} ({target}) not reached")
 
     def forward_pyramid(self, x: torch.Tensor) -> List[torch.Tensor]:
         """All pyramid levels, coarse-to-fine order as timm returns them.

@@ -149,6 +149,7 @@ def parse_args():
     parser.add_argument("--token_mode", type=str, default="pool", choices=["pool", "s2d"], help="TODO A54: 'pool' = the stride-32 map average-pooled to --vision_grid (default); 's2d' = the stride-16 level through a pixel-unshuffle of --s2d_patch (give --vision_grid HxW = H/16/p x W/16/p, e.g. 6x16 for 288x768 at p 3); live encoder only")
     parser.add_argument("--s2d_patch", type=int, default=3, help="TODO A54: space-to-depth patch size")
     parser.add_argument("--token_mask", type=float, default=0.0, help="TODO A54: fraction of lateral vision-token columns zeroed per sample in training (BevAD: 0.2)")
+    parser.add_argument("--encoder_channels_last", type=int, default=0, help="2026-11-04: run the frozen CARLA encoder's convolutions channels_last (NHWC; faster under bf16 on Ampere+, features equal to float rounding). Speeds up live-encoder arms such as --token_mode s2d; no effect with --pooled_cache")
     parser.add_argument("--path_head", type=int, default=0, help="TODO A15: add a space-indexed path head (10 points of the expert's shifted route, ego frame) next to the waypoints (qwen heads only)")
     parser.add_argument("--path_loss_weight", type=float, default=1.0, help="TODO A15: weight of the path L1 when --path_head 1")
     parser.add_argument("--path_cascade", type=int, default=0, help="TODO A15: condition the speed head on the predicted path (AlignDrive-style aligned cascade; zero-initialised coupling); needs --path_head 1")
@@ -368,6 +369,13 @@ def main():
             use_q_critic=bool(args.q_critic),
             use_v_head=args.offline_rl != "none"
         )
+
+    if args.encoder_channels_last:
+        enc = getattr(policy, "encoder", None)
+        if enc is None or not hasattr(enc, "set_channels_last"):
+            raise SystemExit("--encoder_channels_last needs the CARLA timm encoder (--backbone regnety_032)")
+        enc.set_channels_last()
+        print("--> frozen encoder runs channels_last")
 
     # 2. Initialize Trainer
     trainer = WorldOnRailsTrainer(

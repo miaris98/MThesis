@@ -339,7 +339,9 @@ class QwenWorldOnRailsPolicy(nn.Module):
         if self.token_mode == "s2d":
             if vision_features is not None:
                 raise ValueError("token_mode s2d reads the stride-16 level: it cannot use the pooled stride-32 cache (--pooled_cache); train with the live encoder")
-            feats = F.pixel_unshuffle(self.encoder.forward_pyramid(rgb)[-2], self.s2d_patch)
+            # 2026-11-04: stop the encoder at the stride-16 level it reads (exact, tests/test_encoder_fast_path.py)
+            lvl = self.encoder.forward_level(rgb, -2) if hasattr(self.encoder, "forward_level") else self.encoder.forward_pyramid(rgb)[-2]
+            feats = F.pixel_unshuffle(lvl, self.s2d_patch)
         else:
             feats = vision_features if vision_features is not None else self.encoder(rgb)
         if not self.training:
