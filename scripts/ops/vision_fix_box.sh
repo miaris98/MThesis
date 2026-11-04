@@ -94,7 +94,9 @@ train|train_cached|train_s2d)
   case $1 in
   train)        ( run 0 vf_s2d "$S2D" ) & ( run 1 vf_ctrl "$CTRL"; run 1 vf_clean "$CLEAN"; run 1 vf_path "$PATHA" ) & ;;
   train_s2d)    ( run ${S2D_GPU:-0} vf_s2d "$S2D" ) & ;;
-  train_cached) ( run 0 vf_ctrl "$CTRL"; run 0 vf_path "$PATHA" ) & ( run 1 vf_clean "$CLEAN" ) & ;;  # the user's order: fix 2 before fix 4
+  # three 1-hour jobs on two GPUs leave one GPU idle for an hour unless it gets a fourth job: the baseline's second seed (the noise
+  # estimate the protocol needs: seed noise is ~4 DS). Same makespan as before (about 2 hours), no extra box time.
+  train_cached) ( run 0 vf_ctrl "$CTRL"; run 0 vf_path "$PATHA" ) & ( run 1 vf_clean "$CLEAN"; run 1 vf_ctrl_s1 "$CTRL --seed 1" ) & ;;  # the user's order: fix 2 before fix 4
   esac
   sleep 240
   for L in vf_s2d vf_ctrl vf_clean; do [ -f /workspace/vf/$L.log ] && { echo "== $L"; grep -aE "Resumed|Validation split|pooled|token_mode|channels_last|Error|Traceback" /workspace/vf/$L.log | tail -5; }; done
