@@ -30,6 +30,11 @@ def point_to_polyline(p, line):
     return best
 
 
+def _town(name):
+    """One name per map: Bench2Drive writes Town10HD, PDM-Lite's data folder is Town10."""
+    return "Town10" if name and name.startswith("Town10") else name
+
+
 def _route(el):
     wps = [(float(q.get("x")), float(q.get("y"))) for q in el.iter("position")]
     scen = []
@@ -37,7 +42,7 @@ def _route(el):
         tp = s.find("trigger_point")
         if tp is not None:
             scen.append((s.get("type"), float(tp.get("x")), float(tp.get("y"))))
-    return {"id": el.get("id"), "town": el.get("town"), "waypoints": wps, "scenarios": scen}
+    return {"id": el.get("id"), "town": _town(el.get("town")), "waypoints": wps, "scenarios": scen}
 
 
 def load_eval_routes(path):
@@ -105,7 +110,7 @@ def audit_data_dir(data_dir, ev, path_radius, min_overlap_m, trigger_radius=30.0
         typ = os.path.basename(os.path.dirname(rd))
         # the town is a path component (download layout Town13/data/<Scenario>/Route<N>_Rep<k>) or the folder-name prefix (Town13_Rep0_...)
         parts = os.path.relpath(rd, data_dir).replace("\\", "/").split("/")
-        town = next((p.split("_")[0] for p in parts if re.match(r"^Town\d+(_|$)", p)), "")
+        town = _town(next((p.split("_")[0] for p in parts if re.match(r"^Town\d+(HD)?(_|$)", p)), ""))
         if town not in {r["town"] for r in ev}:
             continue
         pos = read_positions(rd)

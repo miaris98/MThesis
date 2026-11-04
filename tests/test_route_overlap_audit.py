@@ -101,6 +101,20 @@ def test_real_pdm_lite_layout_takes_the_town_from_the_path(tmp_path):
     assert row["town"] == "Town13" and row["type"] == "Accident" and row["leak"]
 
 
+def test_town10hd_evaluation_routes_match_the_town10_data_folder(tmp_path):
+    # Bench2Drive names the map Town10HD, PDM-Lite's data folder is Town10 (2026-11-04: the first audit skipped Town10 entirely)
+    import gzip, json
+    from scripts.analysis.route_overlap_audit import audit_data_dir
+    ev = load_eval_routes(_write(tmp_path, "b2d.xml", EVAL_XML.replace('town="Town13"', 'town="Town10HD"')))
+    m = tmp_path / "data" / "Town10" / "data" / "Accident" / "Route3_Rep0" / "measurements"
+    m.mkdir(parents=True)
+    for i, x in enumerate(range(0, 61, 2)):
+        with gzip.open(m / f"{i:04d}.json.gz", "wt") as fh:
+            json.dump({"pos_global": [float(x), 1.0]}, fh)
+    (row,) = audit_data_dir(str(tmp_path / "data"), ev, 10.0, 30.0)
+    assert row["town"] == "Town10" and row["leak"]
+
+
 def test_same_type_trigger_pass_is_flagged_even_without_path_overlap(tmp_path):
     import gzip, json
     from scripts.analysis.route_overlap_audit import audit_data_dir
