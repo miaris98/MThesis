@@ -195,6 +195,13 @@ class WorB2DAgent(AutonomousAgent):
 
         if os.environ.get("WOR_RL"):
             self._rl_pre_step(hero, timestamp)                  # TODO A74: last tick's reward first, then act() picks this tick's maneuver
+        if os.environ.get("B2D_VIDEO_DIR") and getattr(self, "_probe", None) is None:
+            try:  # 2026-11-12: read-only attention hooks, installed before the first forward so tick 0 has its attention too
+                from src.eval.attention_probe import PolicyAttentionProbe
+                self._probe = PolicyAttentionProbe(self._inner.net)
+            except Exception as e:
+                self._probe = False
+                print(f"[video] attention probe off for this route: {e!r}", flush=True)
         control = self._inner.run_step({
             "rgb_front": rgb,
             "speed": input_data["speed"],  # (frame, {'speed': m/s}) - already the trained unit
@@ -211,6 +218,12 @@ class WorB2DAgent(AutonomousAgent):
             except Exception as e:
                 self._clips_failed = True
                 print(f"[A44] clip recorder disabled for this route: {e!r}", flush=True)
+        if os.environ.get("B2D_VIDEO_DIR") and not getattr(self, "_vid_failed", False):
+            try:  # the video recorder reads only; a recorder bug must never cost a route or change a control
+                self._video_step(hero, rgb, control, timestamp, input_data, route)
+            except Exception as e:
+                self._vid_failed = True
+                print(f"[video] recorder disabled for this route: {e!r}", flush=True)
         return control
 
     def _rl_pre_step(self, hero, timestamp):
@@ -272,7 +285,8 @@ class WorB2DAgent(AutonomousAgent):
         self._clips.push(timestamp, rgb, {"speed": spd, "throttle": float(control.throttle), "brake": float(control.brake), "steer": float(control.steer),
                                           "target_kmh": dbg.get("target_kmh"), "probs": None if dbg.get("probs") is None else [round(float(x), 4) for x in dbg["probs"]],
                                           "waypoints": None if dbg.get("waypoints") is None else [[round(float(a), 2) for a in w] for w in dbg["waypoints"]],
-                                          "force_brake": dbg.get("force_brake")})
+                                          "force_brake": dbg.get("force_brake"),
+                                          "danger_p": dbg.get("danger_p")})   # TODO A84: did the danger head see the crash coming?
         self._clip_stand = self._clip_stand + 0.05 if spd < 0.1 else 0.0
         events = []
         while not self._clip_q.empty():
@@ -287,6 +301,71 @@ class WorB2DAgent(AutonomousAgent):
                     t, v = a.get_transform(), a.get_velocity()
                     actors.append({"type": a.type_id, "id": a.id, "xy": [t.location.x, t.location.y, t.rotation.yaw], "speed": (v.x ** 2 + v.y ** 2) ** 0.5})
             self._clips.trigger(timestamp, kind, {**ev, "actors": actors})
+
+    # ---- per-tick video recorder (B2D_VIDEO_DIR); off by default ----------------------------------------------------------------
+    # One JPEG of the front camera as the policy receives it, and one JSON line per tick with what the policy was given (speed,
+    # command, the four route points in the ego frame) and what it returned (predicted waypoints, target speed, control).
+    # scripts/eval/compose_eval_video.py turns the folder into an mp4 with a HUD on top. Read-only: it never changes a control.
+    def _video_step(self, hero, rgb, control, timestamp, input_data, route):
+        import json
+        import cv2
+
+        def _np(x):
+            if x is None:
+                return None
+            if hasattr(x, "detach"):
+                x = x.detach().float().cpu().numpy()
+            return np.asarray(x, dtype=float)
+
+        probe = getattr(self, "_probe", None) or None
+        if getattr(self, "_vid_f", None) is None:
+            d = os.path.join(os.environ["B2D_VIDEO_DIR"], self._route_tag)
+            os.makedirs(d, exist_ok=True)
+            self._vid_dir = d
+            self._vid_f = open(os.path.join(d, "ticks.jsonl"), "w")
+            self._vid_n = 0
+            # B2D_VIDEO_EVERY=k keeps every k-th tick (the composer then plays at 20/k frames per simulated second)
+            self._vid_every = max(1, int(os.environ.get("B2D_VIDEO_EVERY", "1")))
+            meta = {"tag": self._route_tag, "checkpoint": os.environ.get("WOR_CHECKPOINT") or getattr(self._inner, "checkpoint_path", None),
+                    "label": os.environ.get("B2D_VIDEO_LABEL", ""), "every": self._vid_every, "tick_dt": 0.05}
+            if probe:
+                meta["layout"] = probe.layout()
+            with open(os.path.join(d, "meta.json"), "w") as f:
+                json.dump(meta, f)
+        n = self._vid_n
+        self._vid_n += 1
+        if n % self._vid_every:
+            return
+        # the frame the policy received (resized to its input size, route overlay drawn when the checkpoint uses one), so the attention
+        # grid lies on exactly what the network saw; the raw camera frame only when the agent does not expose it
+        pin = getattr(self._inner, "_last_input", None)
+        frame = pin if pin is not None and getattr(pin, "ndim", 0) == 3 else rgb
+        cv2.imwrite(os.path.join(self._vid_dir, f"{n:06d}.jpg"), cv2.cvtColor(np.ascontiguousarray(frame), cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 92])
+        spd = input_data["speed"][1]
+        spd = float(spd.get("speed", 0.0)) if isinstance(spd, dict) else float(spd)
+        dbg = getattr(getattr(self._inner, "net", None), "last_debug", None) or {}
+        wps = _np(dbg.get("waypoints"))
+        tgt = dbg.get("target_kmh")
+        tgt = None if tgt is None else float(_np(tgt).reshape(-1)[0])
+        probs = dbg.get("probs")
+        tr = hero.get_transform()
+        row = {
+            "n": n, "t": round(float(timestamp), 3), "tag": self._route_tag,
+            "speed_mps": round(spd, 3), "command": WOR_LANEFOLLOW_COMMAND,
+            "route_ego": _np(route).round(3).tolist(),
+            "waypoints_pred": None if wps is None else wps.reshape(-1, 2).round(3).tolist(),
+            "target_kmh": None if tgt is None else round(tgt, 2),
+            "throttle": round(float(control.throttle), 4), "brake": round(float(control.brake), 4), "steer": round(float(control.steer), 4),
+            "ego_xy": [round(tr.location.x, 2), round(tr.location.y, 2), round(tr.rotation.yaw, 1)],
+            "probs": None if probs is None else [round(float(p), 4) for p in np.asarray(probs).reshape(-1)],
+            "force_brake": dbg.get("force_brake"),
+            "danger_p": dbg.get("danger_p"),   # TODO A84
+        }
+        if probe:  # what the policy token attended to on this tick, and how the speed head (and its experts) decided
+            row["attn"] = probe.attention()
+            row["dec"] = probe.decision(spd)
+        self._vid_f.write(json.dumps(row) + "\n")
+        self._vid_f.flush()
 
     def _creep(self, input_data, control):
         """TF++ stuck recovery (sensor_agent.py): after stuck_threshold=1100 ticks below 0.1 m/s,
@@ -362,9 +441,11 @@ class WorB2DAgent(AutonomousAgent):
                 self._coll_sensor.stop(); self._coll_sensor.destroy()
             except Exception:
                 pass
-        for f in (getattr(self, "_tele_f", None), getattr(self, "_coll_f", None)):
+        for f in (getattr(self, "_tele_f", None), getattr(self, "_coll_f", None), getattr(self, "_vid_f", None)):
             if f is not None:
                 f.close()
+        if getattr(self, "_probe", None):
+            self._probe.close()
         # Resets the PID's integrator state. The evaluator builds a fresh agent per route, so
         # this is belt-and-braces rather than load-bearing, but leaving stale integrator state
         # behind is exactly the kind of cross-route leakage that would bias a comparison.

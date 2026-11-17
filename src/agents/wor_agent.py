@@ -52,6 +52,9 @@ class WorldOnRailsAgent:
     route_points: int = 4
     blank_image: Optional[str] = None
     _frozen_rgb: Optional[np.ndarray] = None
+    fuse_pca: int = 0                 # 2026-11-09 two-encoder arm (run_config `fuse_pca` / `fuse_cache`): 0 = one encoder, as before
+    fuse_cache: str = ""
+    _fuse = None
 
     def __init__(
         self,
@@ -107,6 +110,33 @@ class WorldOnRailsAgent:
         )
         self.net.eval()
         self.step_counter = 0
+        if self.fuse_pca:
+            self._build_fuse(checkpoint_path)
+
+    def _build_fuse(self, checkpoint_path: str):
+        """Two-encoder checkpoint (f1_fuse): the second encoder (SimLingo tower, weights WOR_FUSE_WEIGHTS) and the PCA basis its training
+        cache was projected with (WOR_FUSE_BASIS, default fuse_basis.pt beside the checkpoint). Both are hard requirements: without
+        them the policy would read a vision vector it was never trained on."""
+        from src.models.world_on_rails.fuse_encoder import FuseSecondEncoder, fuse_cache_backbone
+        fuse_cache_backbone(self.fuse_cache)
+        basis = os.environ.get("WOR_FUSE_BASIS") or os.path.join(os.path.dirname(os.path.abspath(checkpoint_path)), "fuse_basis.pt")
+        weights = os.environ.get("WOR_FUSE_WEIGHTS", "/workspace/simlingo_weights.pt")
+        for what, p in (("PCA basis (WOR_FUSE_BASIS)", basis), ("SimLingo weights (WOR_FUSE_WEIGHTS)", weights)):
+            if not os.path.exists(p):
+                raise FileNotFoundError(f"two-encoder checkpoint {checkpoint_path}: {what} {p} is missing")
+        self._fuse = FuseSecondEncoder(basis, weights_path=weights, k=self.fuse_pca).to(self.device).eval()
+        print(f"--> Two-encoder input: SimLingo tower + PCA-{self.fuse_pca} basis {basis} (explained {self._fuse.explained:.3f}); "
+              f"primary {self.backbone_name} pooled to {tuple(self.net.vision_grid_hw)}", flush=True)
+
+    @torch.no_grad()
+    def _fused_features(self, rgb_img: np.ndarray, raw_img: np.ndarray) -> torch.Tensor:
+        """The training cache's flat vector for this frame: [primary map pooled | SimLingo PCA map] (fuse_encoder.py)."""
+        from src.models.world_on_rails.fuse_encoder import FUSE_IMG_SIZE, fused_vision_features
+        if raw_img.shape[:2] != FUSE_IMG_SIZE:
+            raw_img = preprocess_rgb(raw_img, img_size=FUSE_IMG_SIZE, crop_bottom_frac=0.0, route_xy=None, overlay=False)
+        x1 = torch.as_tensor(np.ascontiguousarray(rgb_img), dtype=torch.float32, device=self.device).unsqueeze(0)
+        x2 = torch.as_tensor(np.ascontiguousarray(raw_img), dtype=torch.float32, device=self.device).unsqueeze(0)
+        return fused_vision_features(self.net.encoder(x1), self.net.vision_grid_hw, self._fuse(x2))
 
     def _adopt_training_preprocessing(self, checkpoint_path: str):
         """Take img_size / crop / overlay from the checkpoint's own run_config.json.
@@ -153,10 +183,12 @@ class WorldOnRailsAgent:
         # to build the same shape. Left unadopted, every eval path used its own default of 4
         # against a 20-point checkpoint.
         self.route_points = int(cfg.get("route_points", getattr(self, "route_points", 4)))
+        self.fuse_cache = str(cfg.get("fuse_cache") or "")
+        self.fuse_pca = int(cfg.get("fuse_pca") or 0) if self.fuse_cache else 0
         print(f"--> From run_config.json: backbone={self.backbone_name}, "
               f"img_size={self.img_size}, crop_bottom_frac={self.crop_bottom_frac}, "
               f"route_overlay={self.route_overlay}, target_speed={self.use_target_speed}, "
-              f"route_points={self.route_points}")
+              f"route_points={self.route_points}, fuse_pca={self.fuse_pca}")
 
     def sensors(self) -> List[Dict[str, Any]]:
         """
@@ -259,19 +291,30 @@ class WorldOnRailsAgent:
         # trained on were cropped, optionally overlaid, and resized before it ever saw them, and
         # that has to be the same transform rather than an equivalent-looking reimplementation
         # (11.4). preprocess_rgb is what the dataset calls too.
+        raw_img = rgb_img                     # the two-encoder arm's SimLingo input: the frame as recorded (fuse_encoder.py)
         if rgb_img.shape[:2] != tuple(self.img_size) or self.route_overlay:
             rgb_img = preprocess_rgb(
                 rgb_img, img_size=self.img_size, crop_bottom_frac=self.crop_bottom_frac,
                 route_xy=route, overlay=self.route_overlay)
+        self._last_input = rgb_img            # 2026-11-12: the exact frame the policy receives (read-only, for the B2D_VIDEO_DIR recorder)
 
         # 6. Neural Network Forward Inference & PID Control
+        extra = {"vision_features": self._fused_features(rgb_img, raw_img)} if self._fuse is not None else {}
         steer, throttle, brake = self.net.act(
             rgb=rgb_img,
             speed=speed_mps,
             command=int(command),
             device=self.device,
-            route=route
+            route=route,
+            **extra
         )
+
+        # WOR_BACKOFF (safety_layer.py): while the layer is reversing a car that pushed into a standing obstacle, drive straight back.
+        safety = getattr(self.net, "_safety", None)
+        reverse = bool(safety is not None and safety.reversing)
+        if reverse:
+            from src.agents.safety_layer import BACKOFF_THROTTLE
+            steer, throttle, brake = 0.0, BACKOFF_THROTTLE, 0.0
 
         # 5. Return CARLA VehicleControl or Control Dict
         try:
@@ -281,7 +324,7 @@ class WorldOnRailsAgent:
             control.throttle = float(throttle)
             control.brake = float(brake)
             control.hand_brake = False
-            control.reverse = False
+            control.reverse = reverse
             return control
         except ImportError:
             return {
@@ -304,4 +347,7 @@ class WorldOnRailsAgent:
     def destroy(self):
         """Cleans up resources upon episode completion."""
         self._frozen_rgb = None  # A0 `freeze`: a harness that reuses the agent must not carry one route's frame into the next
+        safety = getattr(getattr(self, "net", None), "_safety", None)
+        if safety is not None:
+            safety.n_backoffs, safety.reversing = 0, False   # WOR_BACKOFF budget is per route
         self.net.controller.reset()

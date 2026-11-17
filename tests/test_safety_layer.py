@@ -19,7 +19,7 @@ def test_quantile_matches_the_torch_rule_and_is_not_interpolated():
 
 
 def test_no_env_means_no_layer(monkeypatch):
-    for k in ("WOR_NEWSVENDOR", "WOR_CREEP_CLAMP", "WOR_CONTACT_REFLEX", "WOR_SPEED_SCALE"):
+    for k in ("WOR_NEWSVENDOR", "WOR_CREEP_CLAMP", "WOR_CONTACT_REFLEX", "WOR_SPEED_SCALE", "WOR_BACKOFF"):
         monkeypatch.delenv(k, raising=False)
     assert SafetyLayer.from_env() is None
 
@@ -121,3 +121,50 @@ def test_pushing_into_an_obstacle_triggers_the_reflex_without_any_speed_drop():
     for _ in range(200):
         _, brake = L.update(0.0, P(b0=1.0), BINS, 0.0, 0.0, last_throttle=0.0)
     assert L.events["contacts"] == 0
+
+
+def test_backoff_switch_from_env(monkeypatch):
+    for k in ("WOR_NEWSVENDOR", "WOR_CREEP_CLAMP", "WOR_CONTACT_REFLEX", "WOR_SPEED_SCALE", "WOR_BACKOFF"):
+        monkeypatch.delenv(k, raising=False)
+    assert SafetyLayer.from_env() is None
+    monkeypatch.setenv("WOR_BACKOFF", "1")
+    L = SafetyLayer.from_env()
+    assert L is not None and L.backoff_on and not L.reversing
+
+
+def test_backoff_reverses_after_a_push_then_hands_back_after_five_metres():
+    L = SafetyLayer(backoff=True, dt=0.05)
+    for _ in range(40):                                            # 2 s of throttle at 0.1 m/s = a push
+        L.update(0.1, P(b2=1.0), BINS, 8.0, 0.0, last_throttle=0.6)
+        if L.reversing:
+            break
+    assert L.reversing and L.events["backoffs"] == 1
+    for _ in range(90):                                            # 4.5 m at 1 m/s: still reversing
+        L.update(1.0, P(b2=1.0), BINS, 8.0, 0.0, last_throttle=0.0)
+    assert L.reversing
+    for _ in range(13):                                            # past 5 m: hands back
+        L.update(1.0, P(b2=1.0), BINS, 8.0, 0.0, last_throttle=0.0)
+    assert not L.reversing
+
+
+def test_backoff_budget_is_three_per_route_and_no_reverse_at_a_red_light():
+    L = SafetyLayer(backoff=True, dt=0.05)
+    for _ in range(4):
+        for _ in range(40):
+            L.update(0.1, P(b2=1.0), BINS, 8.0, 0.0, last_throttle=0.6)
+            if L.reversing:
+                break
+        while L.reversing:
+            L.update(1.0, P(b2=1.0), BINS, 8.0, 0.0, last_throttle=0.0)
+    assert L.events["backoffs"] == 3 and not L.reversing
+    R = SafetyLayer(backoff=True, dt=0.05)
+    for _ in range(300):                                           # standing at a red light, no throttle
+        R.update(0.0, P(b0=1.0), BINS, 0.0, 0.0, last_throttle=0.0)
+    assert R.events["backoffs"] == 0 and not R.reversing
+
+
+def test_backoff_off_by_default_leaves_the_contact_reflex_unchanged():
+    L = SafetyLayer(contact_reflex=True, dt=0.05)
+    for _ in range(100):
+        L.update(0.1, P(b2=1.0), BINS, 8.0, 0.0, last_throttle=0.6)
+    assert not L.reversing and L.events["backoffs"] == 0 and L.events["contacts"] >= 1   # 5 s of push: the reflex fires again after its 3 s hold

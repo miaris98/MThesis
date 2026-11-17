@@ -9,6 +9,7 @@ The objective and the held-out pass live in src/training/wor_eval.py; the optimi
 groups and LR schedule live in src/training/wor_optim.py.
 """
 import dataclasses
+import json
 from typing import Dict, Optional, Tuple
 import math
 import os
@@ -18,10 +19,12 @@ import torch.nn as nn
 from torch.optim.lr_scheduler import LambdaLR
 
 from src.models.world_on_rails.wor_policy import WorldOnRailsPolicy
-from src.training.wor_dataset import create_wor_train_val_dataloaders
+from src.training.wor_dataset import SCENARIO_CLASSES, create_wor_train_val_dataloaders
 from src.training.wor_eval import run_validation, to_device_batch_with_features, waypoint_losses
 from src.models.world_on_rails.aux_heads import target_speed_loss
+from src.models.world_on_rails.qwen_wor_policy import route_label_loss   # TODO A83: scenario-label loss on the waypoint router
 from src.models.world_on_rails.q_critic import q_critic_term
+from src.models.world_on_rails.reason_heads import reason_term   # TODO A84
 from src.training.offline_rl import OfflineRLConfig, next_inputs, offline_rl_terms, polyak_update
 from src.training.wor_checkpoint import (
     CheckpointWriter, best_metric_so_far, load_trainable_state, to_cpu)
@@ -78,6 +81,8 @@ class WorldOnRailsTrainer:
         # does not contain them, so a run trained with heading supervision can be
         # compared against the existing ones on the same two columns.
         "wp_heading_err", "wp_curvature_err",
+        # TODO A81 / A83: routing metrics. speed_moe_split was computed but never written (it was missing here and from the CSV row).
+        "speed_moe_split", "route_label_ce",
         # Held-out metrics, blank when no validation set is configured. Training loss
         # alone cannot tell a model that generalises from one that has memorised, and
         # `is_best` used to be selected on it.
@@ -128,7 +133,9 @@ class WorldOnRailsTrainer:
         target_speed_loss_weight: float = 0.0,
         speed_loss_kwargs: Optional[dict] = None,
         path_loss_weight: float = 0.0,
+        moe_route_label_weight: float = 0.0,   # TODO A83: scenario-label loss on the waypoint router (0 = off)
         q_critic_loss_weight: float = 0.0,
+        reason_loss_weight: float = 0.0,       # TODO A84: expert-reason / danger heads (0 = off)
         offline_rl: Optional[OfflineRLConfig] = None,
         grad_clip: float = 5.0,
         warmup_frac: float = 0.05,
@@ -156,7 +163,21 @@ class WorldOnRailsTrainer:
         self.wp_loss_weight = wp_loss_weight
         self.target_speed_loss_weight = target_speed_loss_weight
         self.path_loss_weight = path_loss_weight                  # TODO A15: L1 on the path head's 10 ego-frame points (0 = off)
+        self.moe_route_label_weight = float(moe_route_label_weight)   # TODO A83
+        if self.moe_route_label_weight > 0:
+            _trunk_moe = getattr(getattr(self.model, "trunk", None), "moe", None)
+            if _trunk_moe is None:
+                raise ValueError("moe_route_label_weight > 0 needs the waypoint experts (moe_experts > 0): the router it supervises is not built")
+            if _trunk_moe.num_experts < len(SCENARIO_CLASSES):   # (review finding) class k -> expert k needs one expert per class
+                raise ValueError(f"moe_route_label_weight > 0 needs at least {len(SCENARIO_CLASSES)} waypoint experts, got {_trunk_moe.num_experts}")
+        # 2026-11-08 idea 8: feature distillation from the privileged teacher (train_wor.py --distill_weight / --teacher_repr via the environment)
+        self.distill_weight = float(os.environ.get("WOR_DISTILL_WEIGHT", "0") or 0)
+        if self.distill_weight > 0 and hasattr(model, "return_policy_repr"):
+            model.return_policy_repr = True
         self.q_critic_loss_weight = q_critic_loss_weight          # TODO A71: smooth L1 on the counterfactual Q labels (0 = off)
+        self.reason_loss_weight = float(reason_loss_weight)       # TODO A84
+        if self.reason_loss_weight > 0 and getattr(model, "reason_head", None) is None:
+            raise ValueError("reason_loss_weight > 0 needs the reason heads (use_reason_heads=True)")
         # TODO A72: IQL / CQL on the logged transitions (src/training/offline_rl.py); the target Q is a Polyak copy of the Q head
         self.offline_rl = offline_rl
         self.q_target = None
@@ -233,9 +254,38 @@ class WorldOnRailsTrainer:
             "qk_norm": bool(getattr(model, "qk_norm", False)),  # TODO B67: adds q_norm / k_norm tensors to every trunk block
             "use_q_critic": bool(getattr(model, "use_q_critic", False)),  # TODO A71: adds the q_head tensors
             "use_v_head": bool(getattr(model, "use_v_head", False)),      # TODO A72: adds the v_head tensors
+            "use_reason_heads": bool(getattr(model, "use_reason_heads", False)),   # TODO A84: adds the reason_head tensors
+            "reason_detach": bool(getattr(model, "reason_detach", False)),
+            "reason_cascade": bool(getattr(model, "reason_cascade", False)),       # TODO A84: adds reason_embed and changes the speed head's input
             "target_speed_input": getattr(model, "target_speed_input", None),
             "use_rail_q": getattr(model, "use_rail_q", None),
             "use_ray_geometry": getattr(model, "use_ray_geometry", None),
+            "prev_frame": getattr(model, "prev_frame", None),
+            "route_windows": getattr(model, "route_windows", None),
+            "moe_experts": getattr(model, "moe_experts", None),
+            "moe_hidden": getattr(model, "moe_hidden", None),
+            "moe_top_k": getattr(model, "moe_top_k", None),
+            "speed_moe_experts": getattr(model, "speed_moe_experts", None),   # TODO A81: adds the speed_moe tensors
+            "speed_moe_hidden": getattr(model, "speed_moe_hidden", None),
+            "speed_moe_top_k": getattr(model, "speed_moe_top_k", None),
+            "vision_moe_experts": getattr(model, "vision_moe_experts", None),   # TODO A82: adds the vis_moe tensors
+            "vision_moe_hidden": getattr(model, "vision_moe_hidden", None),
+            "vision_moe_top_k": getattr(model, "vision_moe_top_k", None),
+            "moe_route_label_weight": getattr(self, "moe_route_label_weight", None),   # TODO A83 (training-only: the loader ignores it)
+            "aux_cells": getattr(model, "aux_cells", None),
+            "pca_input": getattr(model, "pca_input", None),
+            "attn_pool": getattr(model, "attn_pool_q", None),
+            "query_decoder": getattr(model, "query_decoder", None),
+            "qd_layers": getattr(model, "qd_layers", None),
+            "fuse_pca": getattr(model, "fuse_pca", None),
+            "fuse_hw": list(getattr(model, "fuse_hw", None) or []) or None,
+            "extra_vision_channels": getattr(model, "extra_vision_channels", None),
+            "win_aux": getattr(model, "win_aux", None),
+            "win_aux_weight": getattr(model, "win_aux_weight", None),
+            "privileged_boxes": getattr(model, "privileged_boxes", None),
+            "full_adapter": getattr(model, "full_adapter", None),
+            "full_aux_weight": getattr(model, "full_aux_weight", None),
+            "distill_weight": float(os.environ.get("WOR_DISTILL_WEIGHT", "0") or 0),
             "crop_bottom_frac": getattr(model, "crop_bottom_frac", None)
         }
         self.train_start_time = time.time()
@@ -264,6 +314,12 @@ class WorldOnRailsTrainer:
         })
         if offline_rl is not None:
             self.logger.log_params({f"offline_rl_{k}": v for k, v in dataclasses.asdict(offline_rl).items()})
+        if self.reason_loss_weight > 0 or os.environ.get("WOR_REASON_LABELS") or float(os.environ.get("WOR_BUCKET_ALPHA", "0") or 0) > 0:
+            from src.training.reason_labels import ReasonConfig   # TODO A84: the label definition is part of the run's parameters
+            self.logger.log_params({"reason_loss_weight": self.reason_loss_weight, "reason_labels": os.environ.get("WOR_REASON_LABELS", ""),
+                                    "reason_detach": bool(getattr(model, "reason_detach", False)), "reason_cascade": bool(getattr(model, "reason_cascade", False)),
+                                    "bucket_alpha": os.environ.get("WOR_BUCKET_ALPHA", "0"), "bucket_min_cruise": os.environ.get("WOR_BUCKET_MIN_CRUISE", "0.3"),
+                                    **{f"reason_label_{k}": v for k, v in dataclasses.asdict(ReasonConfig()).items()}})
         if q_critic_loss_weight > 0:
             # TODO A71: load_q_labels refuses files whose config differs from QConfig(), so QConfig() is the config the labels were built with
             from src.training.counterfactual_q import QConfig
@@ -296,6 +352,12 @@ class WorldOnRailsTrainer:
             use_augmented_camera=use_augmented_camera,
             color_aug_prob=color_aug_prob
         )
+        if self.moe_route_label_weight > 0:   # (review finding) a run with no labelled frame would train the router on nothing, silently
+            _base = getattr(self.train_loader.dataset, "dataset", self.train_loader.dataset)
+            _n_lab = sum(1 for s in (getattr(_base, "samples", None) or []) if isinstance(s, dict) and int(s.get("scenario", -1)) >= 0)
+            if _n_lab == 0:
+                raise ValueError("moe_route_label_weight > 0 but no training frame has a scenario name in its route folder "
+                                 f"(classes: {', '.join(SCENARIO_CLASSES)}); check the data layout")
         # Cap on batches per epoch, for smoke tests that measure cost without paying for a full
         # epoch. 0 means no cap. Stored rather than applied here so both the train and eval
         # loops can honour it consistently.
@@ -351,7 +413,9 @@ class WorldOnRailsTrainer:
         self.model.train()
         total_loss_accum = 0.0
         q_loss_accum = 0.0
-        aux_accum = {"target_speed": 0.0, "path": 0.0, "q_critic": 0.0, "rl_v": 0.0, "rl_q": 0.0, "rl_cql": 0.0}      # TODO A15 / A39 / A71: the auxiliary losses were never in the epoch metrics (MLflow)
+        aux_accum = {"target_speed": 0.0, "path": 0.0, "q_critic": 0.0, "rl_v": 0.0, "rl_q": 0.0, "rl_cql": 0.0, "reason": 0.0}      # TODO A15 / A39 / A71 / A84: the auxiliary losses were never in the epoch metrics (MLflow)
+        split_sum, split_batches = 0.0, 0   # TODO A81: mean routing split (standing vs moving) over batches that hold both groups
+        route_ce_sum, route_ce_batches = 0.0, 0   # TODO A83: mean scenario-label cross-entropy of the waypoint router
         wp_loss_accum = 0.0
         ade_accum = 0.0
         fde_accum = 0.0
@@ -421,6 +485,10 @@ class WorldOnRailsTrainer:
                 if q_term is not None:
                     total_loss = total_loss + q_term
                     losses["q_critic"] = q_term / self.q_critic_loss_weight
+                r_term, _ = reason_term(out, batch, self.reason_loss_weight, self.device)   # TODO A84
+                if r_term is not None:
+                    total_loss = total_loss + r_term
+                    losses["reason"] = r_term / self.reason_loss_weight
                 if self.offline_rl is not None and batch.get("exp_a") is not None:     # TODO A72
                     with torch.no_grad():
                         n_rgb, n_feat, n_speed, n_cmd, n_route = next_inputs(batch, self.device)
@@ -432,6 +500,45 @@ class WorldOnRailsTrainer:
                     total_loss = total_loss + rl["total"]
                     losses.update({k: v for k, v in rl.items() if k != "total"})
 
+            if "moe_aux" in out:   # 2026-11-07: mixture-of-experts load balance (policy moe_aux_weight)
+                total_loss = total_loss + getattr(self.model, "moe_aux_weight", 0.01) * out["moe_aux"].float()
+            if self.moe_route_label_weight > 0 and "moe_gate_logits" in out and "scenario" in batch:   # TODO A83: route each scenario to its expert
+                _rce = route_label_loss(out["moe_gate_logits"], batch["scenario"])
+                if _rce is not None:
+                    total_loss = total_loss + self.moe_route_label_weight * _rce
+                    route_ce_sum, route_ce_batches = route_ce_sum + float(_rce.detach()), route_ce_batches + 1
+            if "speed_moe_split" in out:   # TODO A81: logged only, never in the loss
+                _split = float(out["speed_moe_split"])
+                if math.isfinite(_split):
+                    split_sum, split_batches = split_sum + _split, split_batches + 1
+            if "cell_logits" in out and "cell_labels" in batch:   # 2026-11-07: per-cell box targets on the trunk's vision tokens (training only)
+                lab = batch["cell_labels"].to(self.device).float().flatten(2).transpose(1, 2)        # (B, 16, 2): occupancy, distance / 40 m
+                valid = batch["cell_valid"].to(self.device).float()
+                if float(valid.sum()) > 0:
+                    lg = out["cell_logits"].float()
+                    occ = nn.functional.binary_cross_entropy_with_logits(lg[..., 0], lab[..., 0], reduction="none").mean(1)
+                    dist = (torch.sigmoid(lg[..., 1]) - lab[..., 1]).abs().mean(1)
+                    cell_aux = ((occ + dist) * valid).sum() / valid.sum()
+                    total_loss = total_loss + getattr(self.model, "aux_cell_weight", 0.1) * cell_aux
+            if "full_logits" in out and "full_labels" in batch and getattr(self.model, "full_aux_weight", 0.0) > 0:   # 2026-11-08 idea 12
+                lab = batch["full_labels"].to(self.device).float()                                    # (B, 2, H, W)
+                valid = batch["full_valid"].to(self.device).float()
+                if float(valid.sum()) > 0:
+                    lg = out["full_logits"].float()
+                    occ = nn.functional.binary_cross_entropy_with_logits(lg[:, 0], lab[:, 0], reduction="none").mean((1, 2))
+                    dist = (torch.sigmoid(lg[:, 1]) - lab[:, 1]).abs().mean((1, 2))
+                    total_loss = total_loss + self.model.full_aux_weight * ((occ + dist) * valid).sum() / valid.sum()
+            if "policy_repr" in out and "teacher_repr" in batch:   # 2026-11-08 idea 8: match the privileged teacher's policy token
+                total_loss = total_loss + self.distill_weight * nn.functional.mse_loss(out["policy_repr"].float(), batch["teacher_repr"].to(self.device).float())
+            if "win_logits" in out and "win_labels" in batch:   # 2026-11-08 idea 2: path-relative obstacle targets of the window tokens
+                lab = batch["win_labels"].to(self.device).float().transpose(1, 2)                  # (B, M, 2): occupancy, distance / 10 m
+                valid = batch["win_valid"].to(self.device).float()
+                if float(valid.sum()) > 0:
+                    lg = out["win_logits"].float()
+                    occ = nn.functional.binary_cross_entropy_with_logits(lg[..., 0], lab[..., 0], reduction="none").mean(1)
+                    dist = (torch.sigmoid(lg[..., 1]) - lab[..., 1]).abs().mean(1)
+                    win_aux = ((occ + dist) * valid).sum() / valid.sum()
+                    total_loss = total_loss + getattr(self.model, "win_aux_weight", 0.5) * win_aux
             if self.use_amp:
                 self.scaler.scale(total_loss).backward()
                 self.scaler.unscale_(self.optimizer)
@@ -556,9 +663,12 @@ class WorldOnRailsTrainer:
             "speed_head_loss": aux_accum["target_speed"] / max(1, num_batches),
             "path_loss": aux_accum["path"] / max(1, num_batches),
             "q_critic_loss": aux_accum["q_critic"] / max(1, num_batches),
+            "reason_loss": aux_accum["reason"] / max(1, num_batches),   # TODO A84 (unweighted)
             "rl_v_loss": aux_accum["rl_v"] / max(1, num_batches),
             "rl_q_loss": aux_accum["rl_q"] / max(1, num_batches),
             "rl_cql_loss": aux_accum["rl_cql"] / max(1, num_batches),
+            "speed_moe_split": (split_sum / split_batches) if split_batches else float("nan"),   # TODO A81: 0 = experts ignore standing vs moving
+            "route_label_ce": (route_ce_sum / route_ce_batches) if route_ce_batches else float("nan"),   # TODO A83
             "grad_norm": avg_grad_norm,
             "nonfinite_grad_batches": nonfinite_batches,
             "clipped_grad_batches": clipped_batches,
@@ -615,6 +725,8 @@ class WorldOnRailsTrainer:
             changed = load_trainable_state(self.model, ckpt["model"], self.ckpt.frozen_keys, resume_from)
             if changed:
                 print(f"[Warning] {len(changed)} tensors start from their own init (new or reshaped heads): the optimizer state of {resume_from} is not loaded, AdamW starts fresh.")
+            elif os.environ.get("WOR_RESET_OPTIMIZER", "0") == "1":   # 2026-11-08: the fresh-AdamW control (every widened arm restarts AdamW)
+                print(f"--> WOR_RESET_OPTIMIZER=1: weights from {resume_from}, AdamW state starts fresh (control for the widened arms).")
             elif "optimizer" in ckpt:
                 try:
                     self.optimizer.load_state_dict(ckpt["optimizer"])
@@ -709,8 +821,12 @@ class WorldOnRailsTrainer:
                            "lr_backbone", "lr_heads", "samples_per_sec",
                            "data_wait_sec", "compute_sec", "save_sec"]
             scalar_tags += ["wp_heading_err", "wp_curvature_err"]
+            if getattr(self.model, "speed_moe_experts", 0) > 0:   # TODO A81 / A83: routing metrics go to MLflow and TensorBoard too
+                scalar_tags += ["speed_moe_split"]
+            if self.moe_route_label_weight > 0:
+                scalar_tags += ["route_label_ce"]
             scalar_tags += [k for k, w in (("speed_head_loss", self.target_speed_loss_weight), ("path_loss", self.path_loss_weight),
-                                           ("q_critic_loss", self.q_critic_loss_weight)) if w > 0]
+                                           ("q_critic_loss", self.q_critic_loss_weight), ("reason_loss", self.reason_loss_weight)) if w > 0]
             if self.offline_rl is not None:
                 scalar_tags += ["rl_v_loss", "rl_q_loss"] + (["rl_cql_loss"] if self.offline_rl.mode == "cql" else [])
             scalar_tags += [k for k in ("val_loss", "val_wp_ade_m", "val_wp_fde_m",
@@ -719,6 +835,14 @@ class WorldOnRailsTrainer:
                             if k in metrics]
             for tag in scalar_tags:
                 self.logger.add_scalar(f"wor/{tag}", metrics[tag], epoch)
+            obst = {k: float(v) for k, v in metrics.items() if k.startswith(("val_obst_", "val_reason_"))}   # TODO A84: reason metrics ride along
+            if obst:   # 2026-11-09 obstacle metrics (wor_eval.run_validation): own file + log line, the telemetry CSV schema stays unchanged
+                for k, v in obst.items():
+                    self.logger.add_scalar(f"wor/{k}", v, epoch)
+                with open(os.path.join(self.save_dir, "obstacle_metrics.jsonl"), "a") as _of:
+                    _of.write(json.dumps({"epoch": epoch, "val_loss": metrics.get("val_loss"), **obst}) + "\n")
+                print(f"[obst] epoch {epoch:03d} " + " ".join(f"{k.split('_', 2)[2] if k.startswith('val_obst_') else k[4:]} {v:.4f}"
+                                                              for k, v in obst.items()), flush=True)
 
             # Blank rather than 0.0 when validation is off - a zero here would read as
             # a perfect held-out score in any downstream plot.
@@ -750,6 +874,8 @@ class WorldOnRailsTrainer:
                 "wp_longitudinal_error_m": round(metrics["wp_longitudinal_error_m"], 4),
                 "wp_heading_err": round(metrics["wp_heading_err"], 5),
                 "wp_curvature_err": round(metrics["wp_curvature_err"], 5),
+                "speed_moe_split": round(metrics["speed_moe_split"], 4),   # TODO A81 / A83: NaN when the run has no such experts
+                "route_label_ce": round(metrics["route_label_ce"], 5),
                 "lr_backbone": f"{metrics['lr_backbone']:.2e}",
                 "lr_heads": f"{metrics['lr_heads']:.2e}",
                 "grad_norm": round(metrics["grad_norm"], 4),

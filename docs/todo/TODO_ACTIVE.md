@@ -2,6 +2,8 @@
 
 > **CARLA items are also tracked on their own in [TODO_CARLA.md](TODO_CARLA.md)** (created 2026-10-27; same A-numbers).
 
+> **TF++-gap items, 2026-11-11: A75-A80 + measurements M1-M3** are in [TODO_TFPP_GAP_2026-11-11.md](TODO_TFPP_GAP_2026-11-11.md). A75 (launch-frame emphasis) and A77 (speed conditioned on the path, extends A15) are Next. Gate: 50 obstacle routes, paired, stall routes fall on at least 10 and rise on at most 2. Run M1 first.
+
 > **Next (2026-10-12):** verify the 2026-10-11 claims first, then rerun. See [TODO_2026-10-12_verify_then_rerun.md](TODO_2026-10-12_verify_then_rerun.md). The fleet is down (Vast balance $0); the credit top-up and the seed-0 choice are the first blockers.
 
 The short list of what is worth doing next. Older items are ticked in their own files with the reason
@@ -14,6 +16,23 @@ The status block below is the only snapshot in this file: replace it, don't appe
 (history goes to `challenges/`).
 
 ---
+
+## A84. Imitate the expert's reasons, re-balance rare frames, and a "would we crash" classifier - **Code ready 2026-11-16, box run pending** (user, 2026-11-16: "we should fix all of that ... we could also try to train a small classifier that would predict if we are going to crash")
+
+**Why.** w4 vs E15 (220 Epic routes, 2026-11-16): flat overall (+0.6), +11.4 on the 50 obstacle routes, but more vehicle hits per km on routes both finished (5.3 vs 4.8) and lost yields: ParkingExit 0 -> 6 hits (92 -> 25 DS), ControlLoss 0 -> 5, ParkingCutIn 1 -> 5, MergerIntoSlowTrafficV2 4 -> 8. The fine-tune recipe (E15 e15 -> e30) traded yielding for passing. PDM-Lite (the expert) scores 97.0 DS / 92.3% clean routes; our clean-route share is 39%. Behaviour cloning copies the expert's poses and target speed, never why it slowed down.
+
+**Code (2026-11-16, uncommitted).**
+- `src/training/reason_labels.py` + `scripts/training/build_reason_labels.py`: per frame, from measurements + boxes only: the BINDING cause (none / vehicle / vulnerable / light / stop / static; the logged `speed_reduced_by_obj_*` only counts when the target speed is below 0.72 x speed limit and the object is within max(15, 3 v + 10) m: a red light 144 m away is "the reducing object" on every cruise frame of the Town02 sample), its distance and closing speed, brake-within-1 s, and **danger** = proceeding along the expert's route at max(v, 3 m/s) for 2 s would come within 0.25 m of an actor's recorded future footprint or a static obstacle (followers excluded, open loop), plus a sampling bucket. Prints the step-0 counts and the label-noise check (danger frames where the expert drives on anyway). Town02 sample (73 frames): danger 5/65, noise 0/5, pedestrian frames labelled as such.
+- `src/models/world_on_rails/reason_heads.py`: heads on the policy token (`--reason_heads`, `--reason_loss_weight 0.1`), `--reason_detach` (a classifier beside an unchanged policy), `--reason_cascade` (the speed head reads the predictions, zero-init); `WOR_DANGER_GATE="theta=0.6;off=0.4;T=4;release=3;max_release=3"` brakes while p(danger) is high, with hysteresis and a stall breaker (A50's reflex lost 11 DS by never releasing). p(danger) is recorded in the A44 clips and the video ticks.
+- `src/training/bucket_sampler.py` (`--bucket_alpha 0.5`, cruise floor 0.3), `src/training/reason_metrics.py`: `val_reason_speed_err_<cause>` (works for ANY checkpoint on a labelled data dir: where its speed head is too fast, by cause), `val_reason_pstop_danger`, danger / brake AUROC, cause accuracy, distance MAE.
+- `scripts/ops/a84_box.sh` (audit / labels / cache / readout / train ARM / loadcheck / lanes ARM [gate] / base_lanes S). Arms on vf_clean's recipe (no overlay, which beat vf_ctrl by 4.8 on the same host): rb = heads + cascade + sampler, dg = detached heads (lanes with and without the gate), ablations rh / rc / bs only if rb moves.
+- Tests: `tests/test_reason_labels.py`, `tests/test_reason_heads.py` (17); CPU smoke on the Town02 sample: train, validate, reload through `load_wor_model` (0 missing / 0 unexpected).
+
+**Already tried (do not repeat):** A38 anticipation + brake-onset sampler 65.4 vs E15 ~64.5 (103 routes, n.s.); A39 asymmetric speed loss 62.7-64.1; A57 newsvendor +0.7 same host; A52 speed scale +2 / +2.8 n.s.; A50 reflex halves collisions but -11 DS; A71 Q-critic decode -11.7 (fine-tune alone -6.6); offline aux labels / distillation (wave 2) no val-loss gain, but val_loss is the waypoint L1 and cannot see braking, so A84 is judged on `val_reason_*` and closed loop.
+
+**Gate.** Offline first (free): danger AUROC >= 0.8 on held-out routes and the per-cause speed error on vulnerable / vehicle frames lower than vf_clean's. Closed loop: vehicle-collision events per km and ParkingExit / ParkingCutIn / Merger / DynamicObjectCrossing against the three vf_clean seeds on one host, stall share guard +3 points.
+
+**Cost.** Labels ~15-30 min on 16 CPU cores; cache rebuild if pooled_ov0 is gone (~45 min); training ~35 min per arm on the cache; lanes ~660 route-runs for rb + dg (+ gate) + vf_clean s0 ($6-9 on two 4-lane boxes, one working day). Unused assets that only need lanes: vf_ctrl / vf_clean / vf_path seeds 1 and 2 and vf_s2d (A54, 6x16 tokens), all on E: since 2026-11-04 and never driven.
 
 ## New CARLA items, 2026-11-01: A71-A73 (RL on the logged dataset; CARLA used only to evaluate) - Next, top CARLA priority (user, 2026-11-01: "create these as the next top todos ... try both wor and qwen")
 

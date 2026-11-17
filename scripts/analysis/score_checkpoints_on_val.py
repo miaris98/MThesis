@@ -48,6 +48,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from src.models.world_on_rails.wor_loader import load_wor_model
+import src.training.wor_dataset  # noqa: F401  (first: wor_dataset re-exports wor_dataloaders at its bottom, so importing wor_dataloaders first is circular)
 from src.training.wor_dataloaders import create_wor_train_val_dataloaders
 from src.training.wor_eval import run_validation
 from src.training.wor_trainer import autocast

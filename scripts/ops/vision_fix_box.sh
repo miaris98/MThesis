@@ -38,8 +38,12 @@ setup)
   if [ "${NO_CARLA:-0}" = 1 ]; then  # 2026-11-04: training-only box (the s2d arm on a 5090): the trainer runs in /venv/main
     ( $PY -m pip install -q timm mlflow tensorboard opencv-python-headless pytest >> /workspace/vf/pip.log 2>&1; mark CARLA_PROV_END ) &
   else
+    # 2026-11-13: the tools go through install_guard.sh (the CARLA provisioning above is the other writer of this venv, so the guard's
+    # flock runs them one after the other); CARLA_PROV_END only after an import check passes, otherwise CARLA_PROV_FAILED.
     ( bash scripts/ops/provision_carla_no_hf.sh > /workspace/vf/carla_prov.log 2>&1
-      VIRTUAL_ENV=/workspace/venv_carla uv pip install -q tensorboard mlflow pytest >> /workspace/vf/carla_prov.log 2>&1; mark CARLA_PROV_END ) &
+      bash scripts/ops/install_guard.sh carla_tools /workspace/venv_carla -- -q tensorboard mlflow pytest >> /workspace/vf/carla_prov.log 2>&1
+      if /workspace/venv_carla/bin/python -c "import torch, carla, py_trees, tensorboard, mlflow, pytest" >> /workspace/vf/carla_prov.log 2>&1
+      then mark CARLA_PROV_END; else mark CARLA_PROV_FAILED; fi ) &
   fi
   wait; mark SETUP_END ;;
 audit)

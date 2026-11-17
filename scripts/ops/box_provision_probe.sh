@@ -17,7 +17,7 @@ SO="-o StrictHostKeyChecking=no -o ConnectTimeout=30 -o BatchMode=yes"
 mkdir -p "$SCRATCH"
 
 echo "== box fit test ($BOX port $PORT)"
-ssh $SO -p "$PORT" "$BOX" 'bash -s' <<'REMOTE'
+if ! ssh $SO -p "$PORT" "$BOX" 'bash -s' <<'REMOTE'
 set -u
 nvidia-smi --query-gpu=index,name,memory.total,utilization.gpu,memory.used --format=csv,noheader
 echo "gpu processes: $(nvidia-smi --query-compute-apps=pid --format=csv,noheader | wc -l) (no process of ours yet: anything listed is a foreign load, destroy the box)"
@@ -30,14 +30,25 @@ curl -s -o /dev/null -w "hf head %{http_code} %{time_total}s\n" --max-time 30 ht
 curl -s -L -o /dev/null -r 0-209715199 -w "hf download 200 MB: http %{http_code}, %{speed_download} B/s\n" --max-time 300 https://huggingface.co/openai-community/gpt2/resolve/main/model.safetensors
 head -c 209715200 /dev/urandom > /dev/shm/probe_200m.bin
 REMOTE
+then
+  echo "ABORT: no SSH session to $BOX port $PORT (key not accepted yet, or the box is not up). No speed was measured; retry later."
+  exit 2
+fi
 
 echo "== box -> E: (pull of 200 MB over SSH)"
 t0=$(date +%s.%N)
 ssh $SO -p "$PORT" "$BOX" 'cat /dev/shm/probe_200m.bin' > "$SCRATCH/probe_200m.bin"
+rc=$?
 t1=$(date +%s.%N)
+SZ=$(stat -c %s "$SCRATCH/probe_200m.bin" 2>/dev/null || echo 0)
 rm -f "$SCRATCH/probe_200m.bin"
-EMBS=$(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.2f", 200/(b-a)}')
-echo "box -> E: $EMBS MB/s"
+if [ "$rc" -ne 0 ] || [ "$SZ" -ne 209715200 ]; then
+  EMBS=0
+  echo "box -> E: FAILED (ssh rc=$rc, got $SZ of 209715200 bytes); counted as 0 MB/s"
+else
+  EMBS=$(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.2f", 200/(b-a)}')
+  echo "box -> E: $EMBS MB/s"
+fi
 
 echo "== box -> Google Drive (rclone, 200 MB, then deleted)"
 DRV=$(ssh $SO -p "$PORT" "$BOX" 'bash -s' <<'REMOTE'

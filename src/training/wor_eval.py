@@ -219,6 +219,13 @@ def run_validation(
            "heading": 0.0, "curvature": 0.0}
     n = 0
     q_sum, q_rows = 0.0, 0.0                      # TODO A71: held-out Q-label loss, a diagnostic outside val_loss (same reasoning as heading)
+    # 2026-11-09 obstacle metrics: per-sample errors on the frames where the expert swerves around an obstacle (swerve flag) and where it is
+    # about to brake hard (brake_onset flag). Overall val_loss is dominated by ordinary driving and cannot see either.
+    ob = {"sw_n": 0.0, "sw_lat": 0.0, "sw_ade": 0.0, "sw_path_n": 0.0, "sw_path_lat": 0.0,
+          "on_n": 0.0, "on_err": 0.0, "on_abs": 0.0, "on_pstop": 0.0}
+    speed_head = getattr(model, "target_speed_head", None)
+    from src.training.reason_metrics import ReasonValAccumulator   # TODO A84: per-cause speed error, reason-head accuracy, danger AUROC
+    racc = ReasonValAccumulator(speed_head)
 
     for batch_idx, batch in enumerate(val_loader):
         if max_batches and batch_idx >= max_batches:
@@ -237,6 +244,24 @@ def run_validation(
         acc["heading"] += losses["heading"].item()
         acc["curvature"] += losses["curvature"].item()
         n += 1
+        if "swerve" in batch:
+            with torch.no_grad():
+                pw, tw = out["selected_waypoints"].float(), target_wp.float()
+                sw = batch["swerve"].to(device).float()
+                lat = (pw[..., 1] - tw[..., 1]).abs().mean(-1)
+                ade = (pw - tw).norm(dim=-1).mean(-1)
+                ob["sw_n"] += float(sw.sum()); ob["sw_lat"] += float((lat * sw).sum()); ob["sw_ade"] += float((ade * sw).sum())
+                if "path" in out and "target_path" in batch:
+                    pv = sw * batch["path_valid"].to(device).float()
+                    plat = (out["path"].float()[..., 1] - batch["target_path"].to(device).float()[..., 1]).abs().mean(-1)
+                    ob["sw_path_n"] += float(pv.sum()); ob["sw_path_lat"] += float((plat * pv).sum())
+                if speed_head is not None and "target_speed_logits" in out and "target_speed" in batch:
+                    on = batch["brake_onset"].to(device).float()
+                    logits = out["target_speed_logits"].float()
+                    err = speed_head.expected_speed(logits).float() - batch["target_speed"].to(device).float()
+                    ob["on_n"] += float(on.sum()); ob["on_err"] += float((err * on).sum()); ob["on_abs"] += float((err.abs() * on).sum())
+                    ob["on_pstop"] += float((logits.softmax(-1)[:, 0] * on).sum())
+        racc.add(out, batch, device)
         term = q_critic_term(out, batch, 1.0, device)
         if term is not None:
             rows = float(batch["qsa_valid"].sum())
@@ -247,8 +272,18 @@ def run_validation(
 
     d = max(1, n)
     q_diag = {"val_q_critic_loss": q_sum / q_rows} if q_rows > 0 else {}
+    obst = {}
+    if ob["sw_n"] > 0:
+        obst.update(val_obst_swerve_n=ob["sw_n"], val_obst_swerve_lat_m=ob["sw_lat"] / ob["sw_n"], val_obst_swerve_ade_m=ob["sw_ade"] / ob["sw_n"])
+    if ob["sw_path_n"] > 0:
+        obst["val_obst_swerve_path_lat_m"] = ob["sw_path_lat"] / ob["sw_path_n"]
+    if ob["on_n"] > 0:   # speed error in m/s, + = the model wants to go faster than the expert when the expert is about to brake
+        obst.update(val_obst_onset_n=ob["on_n"], val_obst_onset_speed_err=ob["on_err"] / ob["on_n"],
+                    val_obst_onset_speed_abs=ob["on_abs"] / ob["on_n"], val_obst_onset_pstop=ob["on_pstop"] / ob["on_n"])
     return {
         **q_diag,
+        **obst,
+        **racc.result(),
         "val_loss": acc["loss"] / d,
         "val_wp_ade_m": acc["ade"] / d,
         "val_wp_fde_m": acc["fde"] / d,

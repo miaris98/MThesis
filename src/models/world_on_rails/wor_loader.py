@@ -143,6 +143,7 @@ def load_wor_model(
     resolved_ts_input = str(_resolve("target_speed_input", None, "state"))
     resolved_rail_q = bool(_resolve("use_rail_q", None, True))
     resolved_ray_geo = bool(_resolve("use_ray_geometry", None, False))
+    resolved_prev = bool(_resolve("prev_frame", None, False))   # 2026-11-07: previous-frame arm (absent in older configs = False)
     resolved_crop = float(_resolve("crop_bottom_frac", None, DEFAULT_CROP_BOTTOM_FRAC))
 
     if policy_arch == "cnn":
@@ -172,6 +173,30 @@ def load_wor_model(
             target_speed_input=resolved_ts_input,
             use_rail_q=resolved_rail_q,
             use_ray_geometry=resolved_ray_geo,
+            prev_frame=resolved_prev,
+            route_windows=int(_resolve("route_windows", None, 0) or 0),
+            moe_experts=int(_resolve("moe_experts", None, 0) or 0),
+            moe_hidden=int(_resolve("moe_hidden", None, 8) or 8),
+            moe_top_k=int(_resolve("moe_top_k", None, 2) or 2),
+            speed_moe_experts=int(_resolve("speed_moe_experts", None, 0) or 0),   # TODO A81 (absent in older configs = off)
+            speed_moe_hidden=int(_resolve("speed_moe_hidden", None, 32) or 32),
+            speed_moe_top_k=int(_resolve("speed_moe_top_k", None, 2) or 2),
+            vision_moe_experts=int(_resolve("vision_moe_experts", None, 0) or 0),   # TODO A82 (absent in older configs = off)
+            vision_moe_hidden=int(_resolve("vision_moe_hidden", None, 16) or 16),
+            vision_moe_top_k=int(_resolve("vision_moe_top_k", None, 2) or 2),
+            aux_cells=bool(_resolve("aux_cells", None, False)),
+            pca_input=int(_resolve("pca_input", None, 0) or 0),
+            attn_pool=int(_resolve("attn_pool", None, 0) or 0),
+            query_decoder=int(_resolve("query_decoder", None, 0) or 0),
+            qd_layers=int(_resolve("qd_layers", None, 2) or 2),
+            fuse_pca=int(_resolve("fuse_pca", None, 0) or 0),
+            fuse_hw=_resolve("fuse_hw", None, None),
+            extra_vision_channels=int(_resolve("extra_vision_channels", None, 0) or 0),
+            win_aux=str(_resolve("win_aux", None, "") or ""),
+            win_aux_weight=float(_resolve("win_aux_weight", None, 0.5) or 0.5),
+            privileged_boxes=int(_resolve("privileged_boxes", None, 0) or 0),
+            full_adapter=bool(_resolve("full_adapter", None, False)),
+            full_aux_weight=float(_resolve("full_aux_weight", None, 0.0) or 0.0),
             crop_bottom_frac=resolved_crop,
             use_path_head=bool(_resolve("use_path_head", None, False)),
             path_cascade=bool(_resolve("path_cascade", None, False)),
@@ -179,7 +204,10 @@ def load_wor_model(
             s2d_patch=int(_resolve("s2d_patch", None, 3)),
             qk_norm=bool(_resolve("qk_norm", None, False)),
             use_q_critic=bool(_resolve("use_q_critic", None, False)),    # TODO A71: adds the q_head tensors
-            use_v_head=bool(_resolve("use_v_head", None, False))         # TODO A72: adds the v_head tensors
+            use_v_head=bool(_resolve("use_v_head", None, False)),        # TODO A72: adds the v_head tensors
+            use_reason_heads=bool(_resolve("use_reason_heads", None, False)),   # TODO A84: adds the reason_head (+ reason_embed) tensors
+            reason_detach=bool(_resolve("reason_detach", None, False)),
+            reason_cascade=bool(_resolve("reason_cascade", None, False))
         )
 
     if checkpoint_path and os.path.exists(checkpoint_path):

@@ -129,6 +129,62 @@ def parse_args():
                              "flat-ground intersection) to the vision features, derived from "
                              "src/config/camera.py. No new data, one cached tensor, and identical "
                              "for both arms (1=True, 0=False).")
+    parser.add_argument("--prev_frame", type=int, default=0,
+                        help="2026-11-07 (previous-frame idea): stack the cached pooled map of frame t-1 after frame t's map on the "
+                             "channel axis (vision_proj input doubles; tokens and trunk unchanged). Needs --pooled_cache (1=True, 0=False).")
+    parser.add_argument("--route_windows", type=int, default=0,
+                        help="2026-11-07 (route-window idea): K extra vision tokens, each the 2x2-cell mean of the stride-32 map around one of K points "
+                             "along the route (2.5-21.5 m). Read from <pooled_cache>.win<K>.f16 (build_pooled_cache.py --route_windows K). 0 = off.")
+    parser.add_argument("--moe_experts", type=int, default=0,
+                        help="2026-11-07 (mixture-of-experts test): number of small experts added to the waypoint head (zero at init). 0 = off.")
+    parser.add_argument("--moe_hidden", type=int, default=8, help="hidden width of each expert")
+    parser.add_argument("--moe_top_k", type=int, default=2, help="experts used per sample")
+    parser.add_argument("--moe_aux_weight", type=float, default=0.01, help="weight of the load-balance term (1.0 when balanced)")
+    parser.add_argument("--speed_moe_experts", type=int, default=0,
+                        help="2026-11-12 (TODO A81): experts on the target-speed head (zero at init; gate also sees ego speed and a standing flag). "
+                             "Needs --target_speed_loss_weight > 0. Shares --moe_aux_weight. 0 = off.")
+    parser.add_argument("--speed_moe_hidden", type=int, default=32, help="hidden width of each speed expert")
+    parser.add_argument("--speed_moe_top_k", type=int, default=2, help="speed experts used per sample")
+    parser.add_argument("--vision_moe_experts", type=int, default=0,
+                        help="2026-11-13 (TODO A82): gated experts on every vision token before the trunk (each token routed on its own content; "
+                             "zero at init). 0 = off. Shares --moe_aux_weight.")
+    parser.add_argument("--vision_moe_hidden", type=int, default=16, help="hidden width of each vision expert")
+    parser.add_argument("--vision_moe_top_k", type=int, default=2, help="vision experts used per token")
+    parser.add_argument("--moe_route_label_weight", type=float, default=0.0,
+                        help="2026-11-13 (TODO A83): weight of the scenario-label loss on the waypoint router (class k -> expert k, classes in "
+                             "wor_dataset.SCENARIO_CLASSES; needs --moe_experts >= 5). 0 = off.")
+    # 2026-11-07, spatial tests (all read the pooled cache's side files, see build_pooled_cache.py)
+    parser.add_argument("--fixed_windows", type=int, default=0, help="with --route_windows K: read the fixed straight-ahead windows (placement control)")
+    parser.add_argument("--flip_prob", type=float, default=0.0, help="probability of training on the mirrored frame (labels mirrored; validation never)")
+    parser.add_argument("--flip_cache", type=str, default=None, help="prefix of the mirrored-frame pooled cache (build_pooled_cache.py --flip 1)")
+    parser.add_argument("--box_labels", type=int, default=0, help="1: auxiliary per-cell box targets on the trunk's vision tokens")
+    parser.add_argument("--aux_cell_weight", type=float, default=0.1, help="weight of the per-cell auxiliary loss")
+    parser.add_argument("--pca_full", type=int, default=0, help="K: the full stride-32 map compressed to K PCA channels, one token per cell (use --vision_grid 9x24)")
+    parser.add_argument("--query_decoder", type=int, default=0, help="2026-11-09: Q learned queries, a TF++-style transformer decoder over the PCA full map (needs --pca_full); their tokens are added to the pooled grid")
+    parser.add_argument("--qd_layers", type=int, default=2, help="decoder layers of --query_decoder")
+    parser.add_argument("--fuse_cache", default="", help="2026-11-09 two-encoder arm: prefix of a SECOND pooled cache whose PCA full map (--fuse_pca K) feeds --query_decoder; the primary --pooled_cache stays the pooled grid")
+    parser.add_argument("--fuse_pca", type=int, default=128, help="PCA channels of the --fuse_cache full map")
+    parser.add_argument("--route_mode", default="dense", choices=["dense", "tp"], help="2026-11-09 route-shortcut test: dense = the 4 near route points (every earlier run); tp = TF++'s target point + next target point (needs --route_overlay 0)")
+    parser.add_argument("--attn_pool", type=int, default=0, help="Q: pool the full-map cells to Q tokens by route-conditioned learned queries (needs --pca_full)")
+    # 2026-11-08 (ideas 1, 2, 5, 10 and the fresh-AdamW control; all read the pooled cache's side files, see build_pooled_cache.py)
+    parser.add_argument("--side_windows", type=int, default=0, help="1: with --route_windows K also read the 2K side windows (one lane left / right): 3K window tokens")
+    parser.add_argument("--window_labels", type=int, default=0, help="1: serve the path-relative obstacle targets of the windows (needed by --win_aux)")
+    parser.add_argument("--win_aux", type=str, default="", choices=["", "post", "pre"],
+                        help="window obstacle head: 'post' on the window tokens after the trunk, 'pre' before the trunk with its prediction fed back")
+    parser.add_argument("--win_aux_weight", type=float, default=0.5, help="weight of the window auxiliary loss")
+    parser.add_argument("--window_coords", type=int, default=0, help="1: append each window's ground point (x / 20 m, y / 10 m) as two input channels")
+    parser.add_argument("--decoder_stats", type=int, default=0, help="1: append the 10 TF++ depth / semantic statistic channels to every token (cache built with --decoder_stats 1)")
+    parser.add_argument("--reset_optimizer", type=int, default=0, help="1: resume the weights but start AdamW fresh (the control for widened arms)")
+    # 2026-11-08 wave 2 (build_box_targets.py writes the targets next to the pooled cache)
+    parser.add_argument("--privileged_boxes", type=int, default=0, help="M: the privileged TEACHER (idea 8): M logged objects replace the camera tokens")
+    parser.add_argument("--privileged_variant", default="", choices=["", "_vis", "_visns"],
+                        help="teacher ceiling: '' all objects within 50 m; _vis only objects inside the camera image; _visns also speed zeroed")
+    parser.add_argument("--privileged_noise", default="0,0", help="'sigma_m,drop': Gaussian position jitter (m) and object drop rate, train and val")
+    parser.add_argument("--teacher_repr", type=str, default="", help="the teacher's policy token per cache row (dump_teacher_repr.py); with --distill_weight")
+    parser.add_argument("--distill_weight", type=float, default=0.0, help="weight of the MSE between the student's and the teacher's policy token (idea 8)")
+    parser.add_argument("--full_adapter", type=int, default=0, help="1: trainable per-cell adapter on the PCA full map, pooled to --vision_grid (idea 12)")
+    parser.add_argument("--full_labels", type=str, default="", help="HxW of the full-map per-cell labels for the adapter's auxiliary head (e.g. 9x24)")
+    parser.add_argument("--full_aux_weight", type=float, default=0.0, help="weight of the full-map per-cell auxiliary loss (0 = adapter only)")
     parser.add_argument("--val_every", type=int, default=1,
                         help="Run held-out validation every Nth epoch instead of every epoch (TF++ uses 5). "
                              "Saves ~10%% of epoch wall time, at the cost of coarsening which checkpoint "
@@ -179,7 +235,32 @@ def parse_args():
     parser.add_argument("--cql_alpha", type=float, default=1.0, help="TODO A72: CQL penalty weight (--offline_rl cql)")
     parser.add_argument("--target_polyak", type=float, default=0.005, help="TODO A72: Polyak rate of the target Q head")
     parser.add_argument("--offline_rl_weight", type=float, default=1.0, help="TODO A72: weight of the offline-RL term in the training loss")
+    # TODO A84 (2026-11-16): learn WHY the expert slows down, a "would we crash" classifier, and re-balance rare frames (src/training/reason_labels.py)
+    parser.add_argument("--reason_labels", type=str, default="", help="TODO A84: tag of the per-route label files (<route>/reason_<tag>.npz, scripts/training/build_reason_labels.py). "
+                        "On its own it only adds the per-cause validation readouts (val_reason_*); the heads and the sampler below need it")
+    parser.add_argument("--reason_heads", type=int, default=0, help="TODO A84: cause / distance / closing speed / brake-soon / danger heads on the policy token (qwen heads only)")
+    parser.add_argument("--reason_loss_weight", type=float, default=0.1, help="TODO A84: weight of the reason loss (its five terms are each O(1)) when --reason_heads 1")
+    parser.add_argument("--reason_detach", type=int, default=0, help="TODO A84: 1 = the heads read a detached policy token: the driving policy stays its base, the heads are a "
+                        "classifier beside it (the danger gate's input)")
+    parser.add_argument("--reason_cascade", type=int, default=0, help="TODO A84: the target-speed head also reads the heads' predictions (zero-initialised coupling)")
+    parser.add_argument("--bucket_alpha", type=float, default=0.0, help="TODO A84: re-balancing sampler over the label buckets, frame weight n_bucket^-alpha (0 = off, 0.5 = "
+                        "square-root balancing, 1 = every bucket equally often); epoch length unchanged; needs --reason_labels")
+    parser.add_argument("--bucket_min_cruise", type=float, default=0.3, help="TODO A84: share of draws the cruise bucket keeps at least")
     return parser.parse_args()
+
+
+def check_reason_args(args) -> None:
+    """TODO A84: the heads and the sampler read the label files, the cascade reads the speed head, and the heads are a qwen-head option."""
+    if (args.reason_heads or args.bucket_alpha > 0) and not args.reason_labels:
+        raise SystemExit("--reason_heads / --bucket_alpha need --reason_labels TAG (scripts/training/build_reason_labels.py writes the labels)")
+    if args.reason_heads and args.policy_arch == "cnn":
+        raise SystemExit("--reason_heads reads the qwen trunk's policy token; the cnn arch has none")
+    if args.reason_heads and args.reason_loss_weight <= 0:
+        raise SystemExit("--reason_heads 1 with --reason_loss_weight 0 would build heads that never train")
+    if args.reason_cascade and not (args.reason_heads and args.target_speed_loss_weight > 0 and args.target_speed_input == "policy"):
+        raise SystemExit("--reason_cascade needs --reason_heads 1 and the target-speed head on the policy token")
+    if args.reason_detach and args.reason_cascade:
+        print("[Warning] --reason_detach with --reason_cascade: the trunk gets no reason gradient, but the speed head still reads the heads")
 
 
 def check_q_critic_args(args) -> None:
@@ -187,6 +268,19 @@ def check_q_critic_args(args) -> None:
     if args.q_critic and (not args.q_labels or args.target_speed_loss_weight <= 0):
         raise SystemExit("--q_critic 1 needs --q_labels TAG (scripts/training/build_q_labels.py writes the labels) and the target-speed head "
                          "(--target_speed_loss_weight > 0): act() reads the Q head only through the speed posterior")
+
+
+def check_moe_args(args) -> None:
+    """TODO A82 / A83: the vision experts and the scenario-label router need their own experts and a model that has them."""
+    from src.training.wor_dataset import SCENARIO_CLASSES
+    if args.moe_route_label_weight > 0 and args.moe_experts < len(SCENARIO_CLASSES):
+        raise SystemExit(f"--moe_route_label_weight needs --moe_experts >= {len(SCENARIO_CLASSES)} (one expert per scenario class, class k -> expert k)")
+    if args.moe_route_label_weight > 0 and args.policy_arch == "cnn":
+        raise SystemExit("--moe_route_label_weight is built for the qwen trunk's waypoint experts only")
+    if args.vision_moe_experts > 0 and args.policy_arch == "cnn":
+        raise SystemExit("--vision_moe_experts is a Qwen-head option (it routes the trunk's vision tokens)")
+    if args.token_mask > 0 and (args.route_windows or args.attn_pool or args.query_decoder):
+        raise SystemExit("--token_mask masks the plain vision grid only: it cannot be combined with --route_windows, --attn_pool or --query_decoder")
 
 
 def check_offline_rl_args(args) -> None:
@@ -207,10 +301,59 @@ def main():
     if args.q_labels:
         os.environ["WOR_Q_LABELS"] = args.q_labels             # TODO A71 (read when the dataset indexes routes)
     check_offline_rl_args(args)
+    check_moe_args(args)
+    check_reason_args(args)
+    os.environ["WOR_REASON_LABELS"] = args.reason_labels                 # TODO A84 (read when the dataset indexes routes)
+    os.environ["WOR_BUCKET_ALPHA"] = str(float(args.bucket_alpha))       # TODO A84 (read by the train loader)
+    os.environ["WOR_BUCKET_MIN_CRUISE"] = str(float(args.bucket_min_cruise))
     if args.offline_rl != "none":
         os.environ["WOR_TRANSITIONS"] = "1"                    # TODO A72: every sample also carries the next logged frame
     if args.token_mode == "s2d" and args.pooled_cache:
         raise SystemExit("--token_mode s2d reads the stride-16 level and cannot use --pooled_cache (the cache holds the pooled stride-32 map)")
+    os.environ["WOR_PREV_FRAME"] = "1" if args.prev_frame else "0"   # read by WorldOnRailsDataset; inherited by DataLoader workers
+    if args.prev_frame and not args.pooled_cache:
+        raise SystemExit("--prev_frame needs --pooled_cache (the previous frame's map is read from the cache)")
+    os.environ["WOR_ROUTE_WINDOWS"] = str(int(args.route_windows))   # read by PooledFeatureCache / WorldOnRailsDataset
+    if args.route_windows and not args.pooled_cache:
+        raise SystemExit("--route_windows needs --pooled_cache (the windows are cached next to it)")
+    os.environ["WOR_WINDOW_KIND"] = "fixed" if args.fixed_windows else ("route+side" if args.side_windows else "route")
+    os.environ["WOR_WINDOW_LABELS"] = "1" if args.window_labels else "0"
+    os.environ["WOR_WINDOW_COORDS"] = "1" if args.window_coords else "0"
+    os.environ["WOR_DECODER_STATS"] = "1" if args.decoder_stats else "0"
+    os.environ["WOR_RESET_OPTIMIZER"] = "1" if args.reset_optimizer else "0"
+    os.environ["WOR_PRIVILEGED"] = str(int(args.privileged_boxes))
+    os.environ["WOR_ROUTE_MODE"] = args.route_mode
+    os.environ["WOR_FUSE_CACHE"] = args.fuse_cache
+    os.environ["WOR_FUSE_PCA"] = str(int(args.fuse_pca))
+    os.environ["WOR_PRIVILEGED_VARIANT"] = args.privileged_variant
+    os.environ["WOR_PRIVILEGED_NOISE"] = args.privileged_noise
+    os.environ["WOR_FULL_LABELS"] = args.full_labels if (args.full_adapter and args.full_aux_weight > 0) else ""
+    os.environ["WOR_TEACHER_REPR"] = args.teacher_repr if args.distill_weight > 0 else ""
+    os.environ["WOR_DISTILL_WEIGHT"] = str(float(args.distill_weight))
+    if args.distill_weight > 0 and not args.teacher_repr:
+        raise SystemExit("--distill_weight needs --teacher_repr")
+    if args.full_adapter and not args.pca_full:
+        raise SystemExit("--full_adapter reads the PCA full map: give --pca_full K")
+    if (args.side_windows or args.window_labels or args.window_coords) and not args.route_windows:
+        raise SystemExit("--side_windows / --window_labels / --window_coords need --route_windows")
+    if args.win_aux and not args.window_labels:
+        raise SystemExit("--win_aux needs --window_labels 1")
+    os.environ["WOR_FLIP_PROB"] = str(float(args.flip_prob))
+    if args.flip_prob > 0:
+        if not (args.flip_cache and args.pooled_cache):
+            raise SystemExit("--flip_prob needs --pooled_cache and --flip_cache (build_pooled_cache.py --flip 1)")
+        os.environ["WOR_FLIP_CACHE"] = args.flip_cache
+    os.environ["WOR_BOX_LABELS"] = "1" if args.box_labels else "0"
+    os.environ["WOR_PCA_FULL"] = str(int(args.pca_full))
+    if args.pca_full:
+        if not args.pooled_cache:
+            raise SystemExit("--pca_full needs --pooled_cache (the compressed map is cached next to it)")
+        from src.training.pooled_feature_cache import pca_file
+        os.environ["WOR_PCA_BASIS"] = pca_file(args.pooled_cache.split(",")[0], args.pca_full) + ".basis.pt"
+        os.environ["WOR_VISION_GRID_HW"] = str(args.vision_grid)
+    # widen-on-resume (wor_checkpoint.load_trainable_state): a resumed arm whose vision input only grew starts exactly at the checkpoint
+    os.environ["WOR_RESUME_WIDEN"] = "1" if (args.prev_frame or args.ray_geometry or args.route_windows or args.decoder_stats or args.window_coords
+                                             or args.privileged_boxes) and args.token_mode == "pool" else "0"
     if args.pooled_cache:
         import json as _json                                      # not `import json`: that would make json a local of main() and break the later uses
         os.environ["WOR_POOLED_CACHE"] = args.pooled_cache      # read by WorldOnRailsDataset (TODO A59)
@@ -218,6 +361,10 @@ def main():
             raise SystemExit("--pooled_cache is exact only for a frozen backbone, no colour augmentation and a qwen head (the CNN head convolves the full map)")
         for _p in args.pooled_cache.split(","):
             _g = tuple(_json.load(open(_p + ".json"))["grid"])
+            if args.pca_full and not (args.full_adapter or args.query_decoder):   # 2026-11-07: the full-map arms read the PCA map's own grid (its .json), not the pooled grid
+                # (full_adapter / query_decoder pool the full map to --vision_grid inside the model, so their tokens are the pooled grid's)
+                from src.training.pooled_feature_cache import pca_file as _pca_file
+                _g = tuple(_json.load(open(_pca_file(_p, args.pca_full) + ".json"))["shape"][2:])
             if _g != tuple(_parse_vision_grid(args.vision_grid)):
                 raise SystemExit(f"pooled cache {_p} holds a {_g} grid but --vision_grid is {args.vision_grid}: pooling a pooled map is the identity only for the same grid")
 
@@ -359,6 +506,33 @@ def main():
             target_speed_input=args.target_speed_input,
             use_rail_q=bool(args.use_rail_q),
             use_ray_geometry=bool(args.ray_geometry),
+            prev_frame=bool(args.prev_frame),
+            route_windows=int(args.route_windows) * (3 if args.side_windows else 1),
+            extra_vision_channels=(10 if args.decoder_stats else 0) + (2 if args.window_coords else 0),
+            win_aux=args.win_aux,
+            win_aux_weight=float(args.win_aux_weight),
+            privileged_boxes=int(args.privileged_boxes),
+            full_adapter=bool(args.full_adapter),
+            full_aux_weight=float(args.full_aux_weight),
+            moe_experts=int(args.moe_experts),
+            moe_hidden=int(args.moe_hidden),
+            moe_top_k=int(args.moe_top_k),
+            moe_aux_weight=float(args.moe_aux_weight),
+            speed_moe_experts=int(args.speed_moe_experts),
+            speed_moe_hidden=int(args.speed_moe_hidden),
+            speed_moe_top_k=int(args.speed_moe_top_k),
+            vision_moe_experts=int(args.vision_moe_experts),
+            vision_moe_hidden=int(args.vision_moe_hidden),
+            vision_moe_top_k=int(args.vision_moe_top_k),
+            aux_cells=bool(args.box_labels and args.aux_cell_weight > 0),
+            aux_cell_weight=float(args.aux_cell_weight),
+            pca_input=int(args.pca_full),
+            attn_pool=int(args.attn_pool),
+            query_decoder=int(args.query_decoder),
+            qd_layers=int(args.qd_layers),
+            fuse_pca=int(args.fuse_pca) if args.fuse_cache else 0,
+            fuse_hw=(__import__("json").load(open(__import__("src.training.pooled_feature_cache", fromlist=["pca_file"]).pca_file(args.fuse_cache, args.fuse_pca) + ".json"))["shape"][2:]
+                     if args.fuse_cache else None),
             crop_bottom_frac=args.crop_bottom_frac,
             use_path_head=bool(args.path_head),
             path_cascade=bool(args.path_cascade),
@@ -367,7 +541,10 @@ def main():
             token_mask=args.token_mask,
             qk_norm=bool(args.qk_norm),
             use_q_critic=bool(args.q_critic),
-            use_v_head=args.offline_rl != "none"
+            use_v_head=args.offline_rl != "none",
+            use_reason_heads=bool(args.reason_heads),          # TODO A84
+            reason_detach=bool(args.reason_detach),
+            reason_cascade=bool(args.reason_cascade)
         )
 
     if args.encoder_channels_last:
@@ -411,7 +588,9 @@ def main():
         target_speed_loss_weight=args.target_speed_loss_weight,
         speed_loss_kwargs={"lambda_over": args.speed_lambda_over, "lambda_under": args.speed_lambda_under},
         path_loss_weight=args.path_loss_weight if args.path_head else 0.0,
+        moe_route_label_weight=float(args.moe_route_label_weight),   # TODO A83
         q_critic_loss_weight=args.q_critic_loss_weight if args.q_critic else 0.0,
+        reason_loss_weight=args.reason_loss_weight if args.reason_heads else 0.0,   # TODO A84
         offline_rl=(OfflineRLConfig(mode=args.offline_rl, gamma=args.rl_gamma, tau=args.iql_tau, cql_alpha=args.cql_alpha, polyak=args.target_polyak,
                                     weight=args.offline_rl_weight) if args.offline_rl != "none" else None),
         wp_loss_weight=args.wp_loss_weight,

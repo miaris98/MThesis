@@ -45,9 +45,14 @@ def _wrap_loader(dataset, batch_size: int, num_workers: int, is_train: bool,
         kwargs["prefetch_factor"] = 4
     frac = float(os.environ.get("WOR_SWERVE_FRAC", "0") or 0)
     bfrac = float(os.environ.get("WOR_BRAKE_FRAC", "0") or 0)
-    if is_train and frac > 0 and bfrac > 0:
-        raise ValueError("--swerve_frac and --brake_frac both set: one sampler per run (one change per arm)")
-    if is_train and frac > 0:
+    balpha = float(os.environ.get("WOR_BUCKET_ALPHA", "0") or 0)   # TODO A84: re-balance over the reason-label buckets
+    if is_train and sum(x > 0 for x in (frac, bfrac, balpha)) > 1:
+        raise ValueError("--swerve_frac, --brake_frac and --bucket_alpha: one sampler per run (one change per arm)")
+    if is_train and balpha > 0:
+        from src.training.bucket_sampler import bucket_sampler
+        kwargs.pop("shuffle")
+        kwargs["sampler"] = bucket_sampler(dataset, balpha, seed, float(os.environ.get("WOR_BUCKET_MIN_CRUISE", "0.3") or 0.3))
+    elif is_train and frac > 0:
         kwargs.pop("shuffle")
         kwargs["sampler"] = swerve_sampler(dataset, frac, seed)  # TODO A16, arm K (src/training/swerve.py)
     elif is_train and bfrac > 0:
@@ -241,6 +246,12 @@ def create_wor_train_val_dataloaders(
           f"across {len(keys)} route group(s), seed {split_seed}{fold_note}."
           + ("" if len(keys) > 1 else "  [Warning] Only one group found - this is a"
              " frame-level split and will read optimistically."))
+
+    if getattr(train_ds, "_flip_cache", None) is not None:   # 2026-11-07 flip arm: only training indices may be mirrored, never validation
+        allowed = np.zeros(len(train_ds), dtype=bool)
+        allowed[train_idx] = True
+        train_ds._flip_allowed = allowed
+        print(f"--> flip arm: {len(train_idx)} training frames may be mirrored (p={train_ds._flip_prob}); validation frames never are", flush=True)
 
     return (_wrap_loader(Subset(train_ds, train_idx), batch_size, num_workers, True, seed),
             _wrap_loader(Subset(train_ds, val_idx), batch_size, num_workers, False, seed))

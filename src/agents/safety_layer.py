@@ -31,6 +31,10 @@ PUSH_THROTTLE, PUSH_SPEED_MPS, PUSH_S = 0.3, 0.3, 1.5
 CLAMP_STOP_MASS = 0.3
 BREAKER_STANDING_S = 4.0
 BREAKER_STOP_MASS = 0.9
+BACKOFF_M = 5.0                 # WOR_BACKOFF (2026-11-10): reverse this far (odometry from the speedometer) ...
+BACKOFF_MAX_S = 6.0             # ... or for at most this long, whichever comes first
+BACKOFF_MAX_PER_ROUTE = 3       # budget: a car that keeps re-entering the obstacle is left to the policy
+BACKOFF_THROTTLE = 0.35         # reverse throttle, straight (no steering), no RGB or rear sensor is used
 
 
 def quantile_speed(probs: np.ndarray, bins: np.ndarray, tau: float) -> float:
@@ -50,8 +54,9 @@ def _parse_kv(spec: str, defaults: dict) -> dict:
 
 
 class SafetyLayer:
-    def __init__(self, newsvendor: Optional[dict] = None, creep_clamp: bool = False, contact_reflex: bool = False, speed_scale: float = 1.0, dt: float = 0.05):
+    def __init__(self, newsvendor: Optional[dict] = None, creep_clamp: bool = False, contact_reflex: bool = False, speed_scale: float = 1.0, dt: float = 0.05, backoff: bool = False):
         self.nv, self.clamp_on, self.reflex_on, self.scale, self.dt = newsvendor, creep_clamp or contact_reflex, contact_reflex, float(speed_scale), float(dt)
+        self.backoff_on, self.reversing, self.rev_s, self.rev_m, self.n_backoffs = bool(backoff), False, 0.0, 0.0, 0
         self.t = 0.0
         self.standing = 0.0
         self.hist: deque = deque()      # (t, speed) of the last CONTACT_WINDOW_S
@@ -59,18 +64,19 @@ class SafetyLayer:
         self.push_s = 0.0
         self.clamp_active = False
         self.released = False
-        self.events = {"contacts": 0, "clamp_ticks": 0, "hold_ticks": 0}
+        self.events = {"contacts": 0, "clamp_ticks": 0, "hold_ticks": 0, "backoffs": 0}
 
     @classmethod
     def from_env(cls) -> Optional["SafetyLayer"]:
         nv = os.environ.get("WOR_NEWSVENDOR")
         clamp = os.environ.get("WOR_CREEP_CLAMP") == "1"
         reflex = os.environ.get("WOR_CONTACT_REFLEX") == "1"
+        backoff = os.environ.get("WOR_BACKOFF") == "1"
         scale = float(os.environ.get("WOR_SPEED_SCALE", "1.0"))
-        if not (nv or clamp or reflex or scale != 1.0):
+        if not (nv or clamp or reflex or backoff or scale != 1.0):
             return None
-        layer = cls(_parse_kv(nv, {"q0": 0.3, "T": 8.0, "qmax": 0.7}) if nv else None, clamp, reflex, scale, float(os.environ.get("WOR_TICK_DT", "0.05")))
-        print(f"[A50/A57] safety layer: newsvendor={layer.nv} creep_clamp={clamp} contact_reflex={reflex} speed_scale={scale}", flush=True)
+        layer = cls(_parse_kv(nv, {"q0": 0.3, "T": 8.0, "qmax": 0.7}) if nv else None, clamp, reflex, scale, float(os.environ.get("WOR_TICK_DT", "0.05")), backoff=backoff)
+        print(f"[A50/A57] safety layer: newsvendor={layer.nv} creep_clamp={clamp} contact_reflex={reflex} speed_scale={scale} backoff={backoff}", flush=True)
         return layer
 
     def update(self, speed_mps: float, probs: np.ndarray, bins: np.ndarray, mean_mps: float, last_brake: float, last_throttle: float = 0.0) -> Tuple[float, bool]:
@@ -86,11 +92,26 @@ class SafetyLayer:
             q = self.nv["q0"] + (self.nv["qmax"] - self.nv["q0"]) * min(1.0, self.standing / self.nv["T"])
             target = quantile_speed(probs, bins, q)
         force_brake = False
+        if self.backoff_on and self.reversing:
+            self.rev_s += self.dt
+            self.rev_m += abs(speed_mps) * self.dt
+            if self.rev_m < BACKOFF_M and self.rev_s < BACKOFF_MAX_S:
+                return 0.0, False                       # the agent drives the reverse itself; the policy's target is not used
+            self.reversing = False                      # reversed far enough: hand back to the policy on this tick
+            self.push_s = 0.0
+        if self.reflex_on or self.backoff_on:
+            self.push_s = self.push_s + self.dt if (last_throttle > PUSH_THROTTLE and speed_mps < PUSH_SPEED_MPS) else 0.0
+        if self.backoff_on and self.push_s >= PUSH_S and self.n_backoffs < BACKOFF_MAX_PER_ROUTE:
+            # WOR_BACKOFF: the policy has pushed on a standing car for PUSH_S. Reverse straight out instead of creeping in.
+            self.reversing, self.rev_s, self.rev_m, self.push_s = True, 0.0, 0.0, 0.0
+            self.n_backoffs += 1
+            self.events["backoffs"] += 1
+            print(f"[BACKOFF] {PUSH_S:.1f}s of throttle against a standing car: reversing ({self.n_backoffs}/{BACKOFF_MAX_PER_ROUTE})", flush=True)
+            return 0.0, False
         if self.reflex_on:
             self.hist.append((self.t, speed_mps))
             while self.hist and self.t - self.hist[0][0] > CONTACT_WINDOW_S:
                 self.hist.popleft()
-            self.push_s = self.push_s + self.dt if (last_throttle > PUSH_THROTTLE and speed_mps < PUSH_SPEED_MPS) else 0.0
             drop = max(s for _, s in self.hist) - speed_mps >= CONTACT_DROP_MPS
             if self.t >= self.hold_until and ((last_brake < 0.5 and drop) or self.push_s >= PUSH_S):
                 self.push_s = 0.0

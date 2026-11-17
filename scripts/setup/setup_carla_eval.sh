@@ -33,15 +33,39 @@ vulkaninfo --summary 2>&1 | head -20
 
 echo "===== [4/7] CARLA 0.9.15 ====="
 CARLA_DIR=/workspace/carla
-if [ -f "$CARLA_DIR/CarlaUE4.sh" ]; then
+# fetch URL FILE: aria2 into /workspace/FILE. Success = aria2 exit 0 AND its .aria2 control file gone (aria2 removes it only when
+# every piece is in). A dead connection times out (--timeout) and aria2 retries; a failed run is resumed from the control file.
+# 2026-11-14 (box 60611716), what this replaces:
+#   1. aria2 had no timeout: one stalled connection hung the setup for 50 min;
+#   2. the first fix added --lowest-speed-limit=200K, which aria2 applies PER CONNECTION: 16 connections at ~190 KB/s each (3 MB/s,
+#      this host's normal rate) all aborted with errorCode=5;
+#   3. the `|| wget -c` fallback then saw aria2's pre-allocated full-size file, reported it complete and fetched nothing;
+#   4. tar extracted the downloaded front part (CHANGELOG, CarlaUE4, Engine), failed on the empty tail, the script went on (no set -e),
+#      deleted the tarball and the import check passed on PyPI's carla wheel: a "provisioned" box without the simulator.
+# So: no wget fallback after aria2 has touched the file, gzip -t before extracting, and every step checks its result.
+fetch() {
+  local url=$1 out=$2 i
+  for i in 1 2 3 4 5; do
+    aria2c -c -x 16 -s 16 -k 20M --check-certificate=false --timeout=60 --connect-timeout=30 --max-tries=10 --retry-wait=10 \
+      --summary-interval=60 --console-log-level=warn "$url" -d /workspace -o "$out" \
+      && [ ! -f "/workspace/$out.aria2" ] && [ -s "/workspace/$out" ] && { echo "FETCH_OK $out $(stat -c %s "/workspace/$out") bytes"; return 0; }
+    echo "FETCH_RETRY $out: aria2 run $i of 5 did not finish, resuming from its control file"; sleep 15
+  done
+  echo "FETCH_FAILED $out"; return 1
+}
+unpack() {  # FILE DEST CHECK_PATH: verify the gzip stream, extract, check one file the archive must provide, then delete the archive
+  gzip -t "/workspace/$1" || { echo "FATAL: /workspace/$1 is corrupt (gzip -t), kept for inspection"; exit 1; }
+  tar -xzf "/workspace/$1" -C "$2" || { echo "FATAL: extracting /workspace/$1 failed, archive kept"; exit 1; }
+  [ -e "$3" ] || { echo "FATAL: $3 missing after extracting $1, archive kept"; exit 1; }
+  rm -f "/workspace/$1"
+}
+if [ -x "$CARLA_DIR/CarlaUE4.sh" ] && [ -d "$CARLA_DIR/PythonAPI/carla" ]; then
   echo "CARLA already present, skipping."
 else
   mkdir -p "$CARLA_DIR"
   URL_S3="https://carla-releases.s3.us-east-005.backblazeb2.com/Linux/CARLA_0.9.15.tar.gz"
-  aria2c -x 16 -s 16 -k 1M --check-certificate=false "$URL_S3" -d /workspace -o CARLA_0.9.15.tar.gz \
-    || wget -c "$URL_S3" -O /workspace/CARLA_0.9.15.tar.gz
-  tar -xf /workspace/CARLA_0.9.15.tar.gz -C "$CARLA_DIR"
-  rm -f /workspace/CARLA_0.9.15.tar.gz
+  fetch "$URL_S3" CARLA_0.9.15.tar.gz || { echo "FATAL: CARLA download failed"; exit 1; }
+  unpack CARLA_0.9.15.tar.gz "$CARLA_DIR" "$CARLA_DIR/CarlaUE4.sh"
 fi
 
 echo "===== [5/7] CARLA AdditionalMaps (Town06/07/13/15) ====="
@@ -55,10 +79,8 @@ if [ -f "$CARLA_DIR/CarlaUE4/Content/Carla/Maps/Town06.umap" ]; then
   echo "AdditionalMaps already present, skipping."
 else
   URL_MAPS="https://downloads.carlasim.com/Linux/AdditionalMaps_0.9.15.tar.gz"
-  aria2c -x 16 -s 16 -k 1M --check-certificate=false "$URL_MAPS" -d /workspace -o AdditionalMaps_0.9.15.tar.gz \
-    || wget -c "$URL_MAPS" -O /workspace/AdditionalMaps_0.9.15.tar.gz
-  tar -xzf /workspace/AdditionalMaps_0.9.15.tar.gz -C "$CARLA_DIR"
-  rm -f /workspace/AdditionalMaps_0.9.15.tar.gz
+  fetch "$URL_MAPS" AdditionalMaps_0.9.15.tar.gz || { echo "FATAL: AdditionalMaps download failed"; exit 1; }
+  unpack AdditionalMaps_0.9.15.tar.gz "$CARLA_DIR" "$CARLA_DIR/CarlaUE4/Content/Carla/Maps/Town06.umap"
 fi
 
 id carlauser >/dev/null 2>&1 || useradd -m -s /bin/bash carlauser

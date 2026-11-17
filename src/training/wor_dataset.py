@@ -16,6 +16,7 @@ import gzip
 import json
 import os
 import glob
+import shutil
 import numpy as np
 from PIL import Image
 import torch
@@ -24,6 +25,7 @@ from torch.utils.data import Dataset
 from src.config.camera import preprocess_rgb
 from src.training.swerve import anticipated_targets, brake_onset_flags, route_shift, swerve_flags
 from src.training.counterfactual_q import QConfig, check_q_label_coverage, load_q_labels, load_q_transitions
+from src.training.reason_data import check_coverage, reason_tag, reason_tensors, route_lookup, sample_reason   # TODO A84
 
 Q_ROW = len(QConfig().speed_targets) * len(QConfig().lat_targets)       # TODO A71: one flattened Q label (8 speed bins x 5 lateral offsets)
 
@@ -63,6 +65,30 @@ def _reproject_points(points_xy, offset_matrix_inv: np.ndarray) -> list:
     return out
 
 
+# 2026-11-07, flip arm: the model's command index (see _PDM_LITE_COMMAND_MAP) of a mirrored frame: left <-> right, lane change left <-> right
+_FLIP_COMMAND = {0: 1, 1: 0, 4: 5, 5: 4}
+
+# 2026-11-13, TODO A83: scenario classes for the scenario-labelled router. The class index is the expert the router should pick (class k ->
+# expert k), so the list order matters. The label comes from the route folder's name (PDM-Lite archives are named by scenario).
+# A folder with none of these names gets -1 (ignored by the loss).
+SCENARIO_CLASSES = ("ParkedObstacle", "Accident", "ConstructionObstacle", "HazardAtSideLane", "InvadingTurn")
+
+
+def scenario_label(route_dir: str) -> int:
+    """Index into SCENARIO_CLASSES of the scenario named by the route's folders, or -1.
+
+    The archives unpack as <Town>/data/<Scenario>/<Route>_<Rep>/ (checked on the box, 2026-11-13), so the scenario is the
+    immediate parent folder of the route; the route folder's own name is checked too. Only these two folders are searched,
+    so a data root such as D:/Accident_data/ still labels nothing (review finding)."""
+    p = route_dir.replace("\\", "/").rstrip("/")
+    names = [os.path.basename(p).lower(), os.path.basename(os.path.dirname(p)).lower()]
+    for name_lc in names:
+        for k, name in enumerate(SCENARIO_CLASSES):
+            if name.lower() in name_lc:
+                return k
+    return -1
+
+
 def color_augment(rgb: np.ndarray, rng=np.random) -> np.ndarray:
     """Photometric-only augmentation of one uint8 HWC frame, in the spirit of TransFuser++'s
     training-time colour augmentation (TF++ improvement #4): brightness, contrast, a mild colour
@@ -79,6 +105,19 @@ def color_augment(rgb: np.ndarray, rng=np.random) -> np.ndarray:
     if rng.rand() < 0.3:
         x += rng.normal(0.0, rng.uniform(2.0, 10.0), x.shape).astype(np.float32)
     return np.clip(x, 0, 255).astype(np.uint8)
+
+
+def _cache_has_room(path: str) -> bool:
+    """2026-11-04, opt-in: WOR_CACHE_MIN_FREE_GB keeps this much disk free for checkpoints. The decoded-pixel cache writes a
+    664 KB .npy per frame, so the first pass over the data fills a 320 GB disk; the next checkpoint write then fails and kills the run
+    (fix 3 on the 5090 died at epoch 16 that way). Unset or 0 = the old behaviour (always write)."""
+    floor = float(os.environ.get("WOR_CACHE_MIN_FREE_GB", "0") or 0) * 1e9
+    if floor <= 0:
+        return True
+    try:
+        return shutil.disk_usage(os.path.dirname(os.path.abspath(path))).free >= floor
+    except OSError:
+        return False
 
 
 def feature_cache_path(rgb_path: str, pixel_tag: str, feature_cache_tag: str) -> str:
@@ -130,6 +169,10 @@ class WorldOnRailsDataset(Dataset):
         # be set identically at evaluation or it becomes another 11.4 entry - the agent reads
         # the same flag off the checkpoint's run_config.json.
         self.route_overlay = route_overlay
+        if os.environ.get("WOR_ROUTE_MODE", "dense") not in ("dense", "tp"):
+            raise ValueError(f"WOR_ROUTE_MODE must be dense or tp, got {os.environ.get('WOR_ROUTE_MODE')!r}")
+        if os.environ.get("WOR_ROUTE_MODE", "dense") == "tp" and route_overlay:   # checked here: _route_input runs inside the per-frame try/except
+            raise ValueError("WOR_ROUTE_MODE=tp needs route_overlay 0: the overlay would still draw the dense route into the image")
         self.overlay_kwargs = overlay_kwargs or {}
         self.num_rails = num_rails
         self.transform = transform
@@ -179,10 +222,28 @@ class WorldOnRailsDataset(Dataset):
         self.color_aug_prob = float(color_aug_prob) if is_train else 0.0
         # TODO A59: pooled-token cache (src/training/pooled_feature_cache.py), switched on by train_wor.py --pooled_cache through the environment
         self._pooled = None
+        self._fuse = None   # 2026-11-09 two-encoder arm (WOR_FUSE_CACHE)
+        # 2026-11-07: previous-frame arm (policy prev_frame): the map of frame t-1 is stacked after the map of frame t (pooled cache only)
+        self._prev_frame = os.environ.get("WOR_PREV_FRAME", "0") == "1"
+        # 2026-11-07, flip arm and auxiliary-target arm (pooled cache only): the mirrored frames' cache (WOR_FLIP_CACHE, used with probability
+        # WOR_FLIP_PROB on training indices only - create_wor_train_val_dataloaders marks them) and the per-cell box labels (WOR_BOX_LABELS=1)
+        self._flip_prob = float(os.environ.get("WOR_FLIP_PROB", "0") or 0)
+        self._flip_cache = None
+        self._flip_allowed = None
+        self._box_labels = os.environ.get("WOR_BOX_LABELS", "0") == "1"
+        self._window_labels = os.environ.get("WOR_WINDOW_LABELS", "0") == "1"   # 2026-11-08 idea 2 (path-relative window targets)
+        self._full_labels = os.environ.get("WOR_FULL_LABELS", "") or ""          # 2026-11-08 idea 12 (full-map per-cell targets)
+        self._teacher_path = os.environ.get("WOR_TEACHER_REPR", "") or ""        # 2026-11-08 idea 8 (the teacher's policy token per cache row)
+        self._teacher = None
         if os.environ.get("WOR_POOLED_CACHE") and synthetic_samples <= 0 and os.path.exists(data_dir):
             from src.training.pooled_feature_cache import PooledFeatureCache, prefixes_from_env
             self._pooled = PooledFeatureCache(prefixes_from_env(os.environ["WOR_POOLED_CACHE"]), self.pixel_cache_tag(), data_dir)
+            if os.environ.get("WOR_FUSE_CACHE"):
+                from src.training.pooled_feature_cache import FusePCAReader
+                self._fuse = FusePCAReader(os.environ["WOR_FUSE_CACHE"], int(os.environ.get("WOR_FUSE_PCA", "128")))
             self.feature_cache_tag = "pooled"
+            if self._flip_prob > 0:
+                self._flip_cache = PooledFeatureCache(prefixes_from_env(os.environ["WOR_FLIP_CACHE"]), self.pixel_cache_tag(), data_dir)
 
         self.samples = []
         self.missing_rgb = 0
@@ -197,6 +258,8 @@ class WorldOnRailsDataset(Dataset):
             self.is_synthetic = False
             self._index_dataset()
             check_q_label_coverage(self.samples, os.environ.get("WOR_Q_LABELS"))     # TODO A71: a wrong tag must not train the head on nothing
+            check_coverage(self.samples)                                              # TODO A84: same rule for the reason labels
+        self._reason_on = bool(reason_tag())                                          # TODO A84: every sample then carries the label tensors
 
     def _index_dataset(self):
         """Indexes all trajectory frames in the dataset directory (recursively, to
@@ -224,6 +287,14 @@ class WorldOnRailsDataset(Dataset):
         if self.missing_rgb:
             print(f"[Warning] Skipped {self.missing_rgb} frames under {self.data_dir} that have "
                   f"measurements but no rgb/ image - is the dataset still extracting?")
+        # 2026-11-13, TODO A83: how many frames each scenario class gets (-1 = unnamed folder), so a folder-name mismatch shows up in the log
+        _scn = {}
+        for s in self.samples:
+            if isinstance(s, dict):
+                _scn[s.get("scenario", -1)] = _scn.get(s.get("scenario", -1), 0) + 1
+        if _scn:
+            print("[scenario] frames per class (-1 = no scenario name in the folder): "
+                  + ", ".join(f"{k}:{v}" for k, v in sorted(_scn.items())))
         if len(self.samples) == 0:
             print(f"[Warning] No frames found in {self.data_dir}. Falling back to synthetic mode.")
             self.is_synthetic = True
@@ -232,6 +303,26 @@ class WorldOnRailsDataset(Dataset):
     # carla_garage's raw command ids -> the WoR policy's 6-way command space
     # (LEFT, RIGHT, STRAIGHT, LANEFOLLOW, CHANGELANELEFT, CHANGELANERIGHT).
     _PDM_LITE_COMMAND_MAP = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
+
+    def _route_input(self, meas) -> List[List[float]]:
+        """The route the policy is conditioned on. WOR_ROUTE_MODE (2026-11-09, the route-shortcut test after TF++'s "target point shortcut"):
+          dense (default)  `route_points` points subsampled from the dense ~20 m route (`route_key`), every earlier run
+          tp               TF++'s conditioning: the leaderboard target point and the next one (sparse GNSS points of the plan, ego frame), each repeated
+                           over half of the `route_points` slots, so the policy shape is unchanged. Falls back to the far end of the dense route when a
+                           frame has no target point. Needs --route_overlay 0 (the overlay would still draw the dense route into the pixels)."""
+        mode = os.environ.get("WOR_ROUTE_MODE", "dense")
+        if mode == "dense":
+            return self._subsample_route(meas.get(self.route_key) or meas.get("route"))
+        if mode != "tp":
+            raise ValueError(f"WOR_ROUTE_MODE must be dense or tp, got {mode!r}")
+        tp, tpn = meas.get("target_point"), meas.get("target_point_next")
+        if not tp:
+            dense = self._subsample_route(meas.get(self.route_key) or meas.get("route"))
+            tp = dense[-1]
+        tpn = tpn or tp
+        n = self.route_points
+        h = max(1, n // 2)
+        return [[float(tp[0]), float(tp[1])]] * h + [[float(tpn[0]), float(tpn[1])]] * (n - h)
 
     def _subsample_route(self, route) -> List[List[float]]:
         """Reduces the ego-frame planned route to `self.route_points` evenly spaced
@@ -284,7 +375,7 @@ class WorldOnRailsDataset(Dataset):
                     "command": self._PDM_LITE_COMMAND_MAP.get(raw_command, 3),
                     "ego_matrix": np.array(meas["ego_matrix"], dtype=np.float64),
                     # frames logged without route_original fall back to route (identical wherever nothing was shifted)
-                    "route": self._subsample_route(meas.get(self.route_key) or meas.get("route")),
+                    "route": self._route_input(meas),
                     # The expert's *intended* speed, not its current one. This is the label for
                     # the target-speed head: PDM-Lite decides a target and a controller chases
                     # it, so `speed` lags the decision while `target_speed` is the decision.
@@ -300,6 +391,9 @@ class WorldOnRailsDataset(Dataset):
                     "route_shift": route_shift(meas.get("route"), meas.get("route_original")),
                     # TODO A15: the path label = every second point of the expert's SHIFTED route (20 points at 1 m from x = 2.5 m): 10 points, ego frame
                     "path": ([[float(q[0]), float(q[1])] for q in meas["route"][1::2][:10]] if meas.get("route") and len(meas["route"]) >= 20 else None),
+                    # T5 / idea 19e DAgger frames (scripts/datagen/dagger_prune.py): false = our policy drove inside this frame's label
+                    # horizon, so its future poses are not an expert label. Absent on all ordinary PDM-Lite data (= keep).
+                    "dagger_keep": bool(meas.get("dagger_keep", True)),
                 }
             except Exception:
                 parsed[i] = None
@@ -312,11 +406,12 @@ class WorldOnRailsDataset(Dataset):
         _onset = brake_onset_flags(_ts, int(os.environ.get("WOR_BRAKE_WINDOW", "8")))
         _qlab = load_q_labels(route_dir, os.environ.get("WOR_Q_LABELS"))    # TODO A71: counterfactual Q labels by frame id ({} = none)
         _qtr = load_q_transitions(route_dir, os.environ.get("WOR_Q_LABELS")) if self.with_transitions else {}   # TODO A72
+        _rl = route_lookup(route_dir)                                       # TODO A84: reason / danger / bucket labels (None = off or no file)
         _real = {}                                                          # TODO A72: frame index -> sample index of its real-camera sample
 
         for i in range(5, num_frames - pred_len - 2):
             cur = parsed[i]
-            if cur is None:
+            if cur is None or not cur["dagger_keep"]:
                 continue
             frame_id = os.path.basename(meas_files[i]).split(".")[0]
             rgb_path = os.path.join(rgb_dir, f"{frame_id}.jpg")
@@ -342,6 +437,7 @@ class WorldOnRailsDataset(Dataset):
             self.samples.append({
                 "format": "pdm_lite",
                 "rgb_path": rgb_path,
+                "scenario": scenario_label(route_dir),      # TODO A83: -1 = no scenario name in the folder
                 "speed": cur["speed"],
                 "command": cur["command"],
                 "route": cur["route"],
@@ -351,7 +447,8 @@ class WorldOnRailsDataset(Dataset):
                 "brake_onset": bool(_onset[i]),
                 "path": cur["path"],
                 "qsa": _qlab.get(frame_id),       # labelled from the true ego pose: the recovery-camera sample below gets none
-                "exp": _qtr.get(frame_id)         # TODO A72: (expert action, reward of its logged step)
+                "exp": _qtr.get(frame_id),        # TODO A72: (expert action, reward of its logged step)
+                "reason": sample_reason(_rl, frame_id),   # TODO A84
             })
             _real[i] = len(self.samples) - 1
             if i - 1 in _real:
@@ -376,6 +473,7 @@ class WorldOnRailsDataset(Dataset):
                     self.samples.append({
                         "format": "pdm_lite",
                         "rgb_path": aug_rgb_path,
+                        "scenario": scenario_label(route_dir),
                         "speed": cur["speed"],
                         "command": cur["command"],
                         "route": aug_route,
@@ -384,7 +482,9 @@ class WorldOnRailsDataset(Dataset):
                         "is_recovery_augmented": True,
                         "swerve": bool(swerve[i]),
                         "brake_onset": bool(_onset[i]),
-                        "path": _reproject_points(cur["path"], offset_inv) if cur["path"] else None
+                        "path": _reproject_points(cur["path"], offset_inv) if cur["path"] else None,
+                        # TODO A84: the scene's labels (cause, danger along the expert's plan) also hold for a camera ~1 m off it
+                        "reason": sample_reason(_rl, frame_id)
                     })
 
     def __len__(self) -> int:
@@ -431,7 +531,11 @@ class WorldOnRailsDataset(Dataset):
         encoding per-sample."""
         if self._pooled is not None:
             from src.training.pooled_feature_cache import rel_key
-            return self._pooled.get(rel_key(rgb_path, self.data_dir))
+            key = rel_key(rgb_path, self.data_dir)
+            arr = self._pooled.get(key)
+            if self._fuse is not None:   # 2026-11-09 two-encoder arm: [primary pooled map | second encoder's PCA full map], flattened; the policy splits it
+                arr = np.concatenate([np.asarray(arr, dtype=np.float32).reshape(-1), np.asarray(self._fuse.get(key), dtype=np.float32).reshape(-1)])
+            return arr
         cache_path = self._feature_cache_path(rgb_path)
         try:
             return np.load(cache_path)
@@ -442,6 +546,21 @@ class WorldOnRailsDataset(Dataset):
                 f"crop_bottom_frac/route_overlay/backbone combination first - this dataset mode "
                 f"never computes features live, so a missing entry is a hard error rather than "
                 f"a silent slowdown or a silently mixed batch.") from exc
+
+    def _with_prev_frame(self, features: np.ndarray, rgb_path: str) -> np.ndarray:
+        """Stacks the cached map of the previous frame after this frame's map (channel axis). A first frame of a route, or a previous
+        frame outside the cache, repeats this frame's own map. Pooled cache only (2026-11-07)."""
+        if not self._prev_frame:
+            return features
+        if self._pooled is None:
+            raise RuntimeError("prev_frame needs the pooled cache (WOR_POOLED_CACHE): the previous-frame map is read from it")
+        from src.training.pooled_feature_cache import prev_frame_rgb_path, rel_key
+        prev = prev_frame_rgb_path(rgb_path)
+        if prev is None or rel_key(prev, self.data_dir) not in self._pooled.index:
+            prev_features = features
+        else:
+            prev_features = self._load_features(prev)
+        return np.concatenate([features, prev_features], axis=0)
 
     def _load_rgb(self, rgb_path: str, route_xy=None) -> np.ndarray:
         """Loads one RGB frame at self.img_size, transparently caching the
@@ -474,7 +593,7 @@ class WorldOnRailsDataset(Dataset):
             # Never cached: a black frame written to the cache would outlive the image arriving.
             return np.zeros((h, w, 3), dtype=np.uint8)
 
-        if cache_path is not None:
+        if cache_path is not None and _cache_has_room(cache_path):
             try:
                 # np.save appends ".npy" if the target doesn't already end with it, so
                 # the tmp name must end in .npy too or the rename below targets the
@@ -532,7 +651,7 @@ class WorldOnRailsDataset(Dataset):
             if self.feature_cache_tag:
                 # Metadata only - the frozen backbone's output is read from disk below instead
                 # of being recomputed from pixels, so the JPEG is never even opened.
-                features = self._load_features(item["rgb_path"])
+                features = self._with_prev_frame(self._load_features(item["rgb_path"]), item["rgb_path"])
                 rgb = None
                 speed, command = item["speed"], item["command"]
                 target_waypoints = np.array(item["waypoints"], dtype=np.float32)
@@ -544,7 +663,7 @@ class WorldOnRailsDataset(Dataset):
             item = self.samples[idx]
             rgb_path = item.get("rgb_path", os.path.join(item.get("route_dir", ""), "rgbs", f"{idx:05d}.jpg"))
             if self.feature_cache_tag:
-                features = self._load_features(rgb_path)
+                features = self._with_prev_frame(self._load_features(rgb_path), rgb_path)
                 rgb = None
             else:
                 rgb = self._load_rgb(rgb_path)
@@ -557,6 +676,20 @@ class WorldOnRailsDataset(Dataset):
 
         if rgb is not None and self.color_aug_prob > 0 and np.random.rand() < self.color_aug_prob:
             rgb = color_augment(rgb)
+
+        # 2026-11-07, flip arm: on a training index, with probability WOR_FLIP_PROB, the mirrored frame's cached map replaces this one and every
+        # lateral label is mirrored to match (route and waypoints y -> -y, left <-> right commands). Validation indices are never flipped.
+        flipped = False
+        if (self._flip_cache is not None and self._flip_allowed is not None and self._flip_allowed[idx]
+                and np.random.rand() < self._flip_prob):
+            from src.training.pooled_feature_cache import rel_key
+            features = self._flip_cache.get(rel_key(self.samples[idx]["rgb_path"], self.data_dir))
+            route = np.array(route, dtype=np.float32).copy()
+            route[:, 1] *= -1.0
+            target_waypoints = np.array(target_waypoints, dtype=np.float32).copy()
+            target_waypoints[:, 1] *= -1.0
+            command = _FLIP_COMMAND.get(int(command), int(command))
+            flipped = True
 
         # RGB stays uint8 HWC here: converting to float32 CHW in the worker would
         # quadruple both the CPU work and the bytes crossing PCIe (786KB vs 196KB per
@@ -583,6 +716,8 @@ class WorldOnRailsDataset(Dataset):
 
         # TODO A15: path label (10 x 2, ego frame of this camera) and its validity; zeros + 0 where a frame carries no 20-point route
         _path = None if self.is_synthetic else self.samples[idx].get("path")
+        if flipped and _path:
+            _path = [[float(p[0]), -float(p[1])] for p in _path]
         _qsa = None if self.is_synthetic else self.samples[idx].get("qsa")        # TODO A71
         sample = {
             "target_qsa": torch.as_tensor(_qsa if _qsa is not None else np.zeros(Q_ROW), dtype=torch.float32),
@@ -594,7 +729,13 @@ class WorldOnRailsDataset(Dataset):
             "route": torch.as_tensor(route, dtype=torch.float32),
             "target_q": target_q_tensor,
             "target_waypoints": target_waypoints_tensor,
-            "target_speed": torch.tensor(tgt_speed, dtype=torch.float32)
+            "target_speed": torch.tensor(tgt_speed, dtype=torch.float32),
+            # 2026-11-09 obstacle metrics (wor_eval.run_validation): the expert bends its route around an obstacle here (or within 2 s), /
+            # the expert's target speed drops >= 4 m/s within 2 s. Labels only; the model never sees them.
+            "swerve": torch.tensor(0.0 if self.is_synthetic else float(bool(self.samples[idx].get("swerve"))), dtype=torch.float32),
+            "brake_onset": torch.tensor(0.0 if self.is_synthetic else float(bool(self.samples[idx].get("brake_onset"))), dtype=torch.float32),
+            # 2026-11-13, TODO A83: scenario class of the route folder (-1 = unlabelled; the route-label loss skips it)
+            "scenario": torch.tensor(-1 if self.is_synthetic else int(self.samples[idx].get("scenario", -1)), dtype=torch.long),
         }
         # Exactly one of "rgb"/"vision_features" is present, never both and never neither -
         # every sample in a batch takes the same branch above (feature_cache_tag is dataset-wide),
@@ -606,6 +747,32 @@ class WorldOnRailsDataset(Dataset):
                 sample["rgb"] = torch.as_tensor(np.ascontiguousarray(rgb), dtype=torch.uint8)
             except Exception:
                 sample["rgb"] = torch.tensor(rgb.tolist(), dtype=torch.uint8)
+        if self._box_labels and self._pooled is not None:   # 2026-11-07 auxiliary per-cell targets (mirrored with the frame when flipped)
+            from src.training.pooled_feature_cache import rel_key
+            lab, valid = (self._flip_cache if flipped else self._pooled).get_labels(rel_key(self.samples[idx]["rgb_path"], self.data_dir))
+            sample["cell_labels"] = torch.as_tensor(lab, dtype=torch.float32)
+            sample["cell_valid"] = torch.tensor(valid, dtype=torch.float32)
+        if self._window_labels and self._pooled is not None:
+            from src.training.pooled_feature_cache import rel_key
+            if flipped:
+                raise RuntimeError("window labels are not built for mirrored frames")
+            wlab, wvalid = self._pooled.get_window_labels(rel_key(self.samples[idx]["rgb_path"], self.data_dir))
+            sample["win_labels"] = torch.as_tensor(wlab, dtype=torch.float32)
+            sample["win_valid"] = torch.tensor(wvalid, dtype=torch.float32)
+        if self._full_labels and self._pooled is not None:
+            from src.training.pooled_feature_cache import rel_key
+            flab, fvalid = self._pooled.get_full_labels(rel_key(self.samples[idx]["rgb_path"], self.data_dir))
+            sample["full_labels"] = torch.as_tensor(flab, dtype=torch.float32)
+            sample["full_valid"] = torch.tensor(fvalid, dtype=torch.float32)
+        if self._teacher_path and self._pooled is not None:
+            from src.training.pooled_feature_cache import rel_key
+            if self._teacher is None:   # opened lazily in each DataLoader worker
+                meta = json.load(open(self._teacher_path + ".json"))
+                self._teacher = np.memmap(self._teacher_path, dtype=np.float16, mode="r", shape=tuple(meta["shape"]))
+            _, row = self._pooled.row_of(rel_key(self.samples[idx]["rgb_path"], self.data_dir))
+            sample["teacher_repr"] = torch.as_tensor(np.asarray(self._teacher[row], dtype=np.float32))
+        if self._reason_on:   # TODO A84 (frames without a label get masks of 0)
+            sample.update(reason_tensors(None if self.is_synthetic else self.samples[idx].get("reason")))
         return sample
 
 

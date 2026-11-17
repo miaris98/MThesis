@@ -10,8 +10,10 @@ DRV=$(head -1 /proc/driver/nvidia/version | grep -oE '[0-9]{3}\.[0-9]+' | head -
 if [ "${DRV:-0}" -ge 570 ]; then TORCH_IDX=cu128; TORCH_PKGS="torch torchvision"; else TORCH_IDX=cu124; TORCH_PKGS="torch==2.6.0 torchvision==0.21.0"; fi
 ( cd /workspace/MThesis && bash scripts/eval/launch_b2d20.sh setup > /workspace/logs_prov/setup_carla.log 2>&1 && \
   { for f in $(grep -l "cuda.*compat" /etc/ld.so.conf.d/* 2>/dev/null); do mv "$f" "/root/$(basename "$f").disabled_compat"; done; ldconfig; } && \
-  VIRTUAL_ENV=/workspace/venv_carla uv pip install --reinstall $TORCH_PKGS --index-url https://download.pytorch.org/whl/$TORCH_IDX >> /workspace/logs_prov/setup_carla.log 2>&1 && \
-  VIRTUAL_ENV=/workspace/venv_carla uv pip install lmdb wandb pyyaml >> /workspace/logs_prov/setup_carla.log 2>&1 && \
+  { /workspace/venv_carla/bin/python -c "import torch; torch.ones(2, device='cuda').sum().item()" >> /workspace/logs_prov/setup_carla.log 2>&1 \
+      && echo "carla_torch: the installed torch runs on this GPU, no reinstall" >> /workspace/logs_prov/setup_carla.log \
+      || bash /workspace/MThesis/scripts/ops/install_guard.sh carla_torch /workspace/venv_carla -- --reinstall $TORCH_PKGS --index-url https://download.pytorch.org/whl/$TORCH_IDX >> /workspace/logs_prov/setup_carla.log 2>&1; } && \
+  bash /workspace/MThesis/scripts/ops/install_guard.sh carla_extra /workspace/venv_carla -- lmdb wandb pyyaml >> /workspace/logs_prov/setup_carla.log 2>&1 && \
   /workspace/venv_carla/bin/python -c "import torch,timm,carla,py_trees;x=torch.ones(2,device='cuda');print('venv_carla torch',torch.__version__,x.sum().item())" >> /workspace/logs_prov/setup_carla.log 2>&1 \
   && echo CARLA_DONE >> /workspace/logs_prov/status || echo CARLA_FAILED >> /workspace/logs_prov/status )
 if grep -q CARLA_DONE logs_prov/status && ! grep -q CARLA_FAILED logs_prov/status; then

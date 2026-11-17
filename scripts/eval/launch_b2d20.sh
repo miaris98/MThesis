@@ -41,10 +41,13 @@ setup)
   python3 "$MTHESIS_ROOT/scripts/setup/patch_bench2drive.py" "$GARAGE"
   # Vanilla leaderboard/scenario_runner runtime set (py-trees MUST be 0.8.3 - a bare install
   # pulls 2.x, S-011) plus timm for the regnety_032 backbone.
-  VIRTUAL_ENV="$VENV_CARLA" uv pip install six "py-trees==0.8.3" Shapely xmlschema ephem \
+  # 2026-11-13: through the guard (flock, timeouts, retries, pip fallback); a failed install stops the setup (it used to print DONE without torch)
+  bash "$MTHESIS_ROOT/scripts/ops/install_guard.sh" carla_runtime "$VENV_CARLA" -- six "py-trees==0.8.3" Shapely xmlschema ephem \
     tabulate opencv-python matplotlib psutil pygame pexpect dictor transforms3d \
-    simple-watchdog-timer requests timm
-  "$PY" -c "import carla, torch, timm, py_trees; print('carla ok | torch', torch.__version__, torch.cuda.is_available(), '| py_trees', py_trees.__version__ if hasattr(py_trees,'__version__') else '?')"
+    simple-watchdog-timer requests timm || { echo "LAUNCH_B2D20_SETUP_FAILED runtime install"; exit 1; }
+  "$PY" -c "import carla, torch, timm, py_trees; print('carla ok | torch', torch.__version__, torch.cuda.is_available(), '| py_trees', py_trees.__version__ if hasattr(py_trees,'__version__') else '?')" || { echo "LAUNCH_B2D20_SETUP_FAILED import check"; exit 1; }
+  # 2026-11-14: `import carla` passes on PyPI's wheel without the simulator; a box whose CARLA extraction had failed printed DONE here
+  [ -x "$CARLA_DIR/CarlaUE4.sh" ] && [ -d "$CARLA_DIR/PythonAPI/carla" ] || { echo "LAUNCH_B2D20_SETUP_FAILED no simulator in $CARLA_DIR"; exit 1; }
   echo "LAUNCH_B2D20_SETUP_DONE"
   ;;
 preflight)
