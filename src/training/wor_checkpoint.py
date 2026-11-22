@@ -52,6 +52,17 @@ def load_trainable_state(model: nn.Module, state: Dict[str, torch.Tensor], froze
     # start from their own init and the rest of the trunk (the driving knowledge) is kept. Any OTHER shape mismatch stays an error.
     reshaped = [k for k, v in incoming.items() if k in own and own[k].shape != v.shape]
     ok_reshape = [k for k in reshaped if k.startswith(("vision_proj.", "trunk.vision_pos"))]
+    # 2026-11-21 A87 target-point arm (WOR_ROUTE_MODE=dense_tp): route_proj reads 2 more points than the checkpoint's. The old inputs (the near
+    # route points, in the same slots) keep their weights and the new columns start at zero, so the arm starts exactly at the checkpoint.
+    if os.environ.get("WOR_ROUTE_MODE") == "dense_tp":
+        for k in [k for k in reshaped if k.split("_orig_mod.")[-1] == "route_proj.weight"]:
+            old, new = incoming[k], own[k]
+            if old.shape[0] == new.shape[0] and old.shape[1] < new.shape[1]:
+                w = torch.zeros_like(new)
+                w[:, :old.shape[1]] = old.to(new.dtype)
+                incoming[k] = w
+                print(f"--> route_proj widened {tuple(old.shape)} -> {tuple(new.shape)}: the target-point inputs start at zero", flush=True)
+        reshaped = [k for k, v in incoming.items() if k in own and own[k].shape != v.shape]
     # 2026-11-07 (WOR_RESUME_WIDEN=1, set by train_wor.py for the prev-frame / ray-geometry / route-window arms): a vision input that only
     # GREW keeps the checkpoint's weights in its leading slice. vision_proj.weight gets zeros in the new input columns (the added channels
     # start with no effect, so the arm starts exactly at the checkpoint); trunk.vision_pos keeps the old tokens' rows, new token rows keep
@@ -116,7 +127,7 @@ def load_trainable_state(model: nn.Module, state: Dict[str, torch.Tensor], froze
     missing = [k for k in missing if k not in frozen]
     new_heads = [k for k in missing if k.startswith(("path_head.", "path_embed.", "q_head.", "v_head.", "q_sa_head.", "trunk.moe.", "speed_moe.", "vis_moe.", "cell_head.", "attn_pool.", "pool_queries", "cell_pos",
                                                        "win_head.", "win_pre_head.", "win_feed.", "adapter.", "full_head.", "qd_queries", "qd_cell_proj.", "qd.", "qd_out.",
-                                                       "reason_head.", "reason_embed."))]   # 2026-11-09 query decoder; TODO A15 / A71 / A84, 2026-11-07 MoE: heads a resumed arm adds on purpose
+                                                       "reason_head.", "reason_embed.", "obj_proj.", "obj_det.", "obj_pca_mean", "obj_pca_basis", "obj_ready"))]   # 2026-11-19 R1 object tokens; 2026-11-09 query decoder; TODO A15 / A71 / A84, 2026-11-07 MoE: heads a resumed arm adds on purpose
     if new_heads:
         print(f"--> {len(new_heads)} new-head tensors start from their own init (zero output): {', '.join(new_heads[:3])} ...", flush=True)
     missing = [k for k in missing if k not in new_heads]

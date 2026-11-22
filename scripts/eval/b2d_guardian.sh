@@ -28,6 +28,10 @@ while true; do
       echo "$(date) [$LABEL] giving up after $ATTEMPT attempts at progress=${PROGRESS:-0}/$TOTAL" >> "$GUARDIAN_LOGS/${LABEL}.log"
       exit 1
     fi
+    # wait for the previous attempt's run_bench2drive.sh to finish its EXIT trap: that trap kills every CARLA on the lane's
+    # port and otherwise kills the new attempt's simulator 1 s after launch (evaluator then hangs; 2026-11-19, twice)
+    # (anchored: this guardian's own argv also contains "run_bench2drive.sh $LABEL")
+    for _ in $(seq 1 24); do pgrep -f "^bash [^ ]*run_bench2drive\.sh $LABEL " >/dev/null 2>&1 || break; sleep 5; done
     ATTEMPT=$((ATTEMPT+1))
     echo "$(date) [$LABEL] not running, progress=${PROGRESS:-0}/$TOTAL, launch attempt=$ATTEMPT" >> "$GUARDIAN_LOGS/${LABEL}.log"
     nohup "$@" > "$GUARDIAN_LOGS/${LABEL}_attempt${ATTEMPT}.log" 2>&1 &

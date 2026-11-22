@@ -174,6 +174,33 @@ def route_group_split(
     return train_idx, val_idx, groups, keys
 
 
+def make_train_eval_loader(train_loader: DataLoader, n_frames: int, seed: int,
+                           batch_size: int, num_workers: int = 0) -> Optional[DataLoader]:
+    """2026-11-21 memorization readout: a fixed sample of `n_frames` TRAINING frames, scored like the held-out set.
+
+    The training columns of the telemetry are measured on the fly, in train mode, with recovery re-renders mixed in and (for the
+    regularized arms) with noise and token dropout on, so they cannot be set against the held-out error. This picks frames from the
+    training side of the route split only, main camera only (`is_recovery_augmented` frames are excluded, as they are from the
+    held-out set), the same frames every epoch (seeded), unshuffled. Scored with run_validation, which puts the model in eval mode.
+    Returns None when the training loader is not a route-split Subset (no held-out set to compare against)."""
+    sub = train_loader.dataset
+    if n_frames <= 0 or not isinstance(sub, Subset):
+        return None
+    base = sub.dataset
+    if getattr(base, "color_aug_prob", 0.0) > 0 or float(getattr(base, "_flip_prob", 0.0) or 0.0) > 0:
+        raise ValueError("train_eval_frames scores training frames as stored: not with colour augmentation or the flip arm")
+    samples = getattr(base, "samples", None) or []
+    eligible = [i for i in sub.indices
+                if not (i < len(samples) and isinstance(samples[i], dict) and samples[i].get("is_recovery_augmented"))]
+    if not eligible:
+        return None
+    rng = np.random.RandomState(int(seed) + 7919)
+    picked = sorted(rng.choice(eligible, size=min(int(n_frames), len(eligible)), replace=False).tolist())
+    print(f"--> clean training readout: {len(picked)} fixed training frames (main camera, of {len(eligible)} eligible), "
+          "scored in eval mode at every validation", flush=True)
+    return _wrap_loader(Subset(base, picked), batch_size, num_workers, False, seed)
+
+
 def create_wor_train_val_dataloaders(
     data_dir: str,
     batch_size: int = 32,

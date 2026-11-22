@@ -36,6 +36,10 @@ MTHESIS_ROOT = os.environ.get("MTHESIS_ROOT", "/workspace/MThesis")
 if MTHESIS_ROOT not in sys.path:
     sys.path.insert(0, MTHESIS_ROOT)
 
+# 2026-11-21 A87 target-point arm: a checkpoint trained with --route_mode dense_tp reads its route_points - 2 near route points plus TF++'s
+# target point and next target point; the eval job must set WOR_ROUTE_MODE=dense_tp (the agent then builds that layout).
+_ROUTE_MODE = os.environ.get("WOR_ROUTE_MODE", "dense") or "dense"
+
 from src.agents.wor_agent import WorldOnRailsAgent  # noqa: E402
 
 # Imported rather than re-derived. `_ego_frame_route` is the exact ego-frame projection the
@@ -156,6 +160,15 @@ class WorB2DAgent(AutonomousAgent):
                              if hasattr(transform, "location") else transform)
         return _resample_locations(locations)
 
+    def _tfpp_target_points(self, hero):
+        """(2, 2) ego-frame TF++ target point and next target point (src/agents/tfpp_target_point.py: carla_garage's RoutePlanner on the
+        sparse plan, projected like every route point here)."""
+        if getattr(self, "_tp", None) is None:
+            from src.agents.tfpp_target_point import TfppTargetPoints
+            self._tp = TfppTargetPoints(self._global_plan_world_coord)
+        tf = hero.get_transform()
+        return self._tp.step((tf.location.x, tf.location.y, tf.location.z), tf.get_inverse_matrix())
+
     def _get_hero(self):
         """The ego actor, looked up in a way that works on both evaluators.
 
@@ -177,6 +190,34 @@ class WorB2DAgent(AutonomousAgent):
                 "fork-specific accessor was available. The ego is not spawned/registered.")
         return hero
 
+    def _privileged_tokens(self, hero, m):
+        """(m, BOX_FEATS) object tokens for the privileged teacher (src/agents/privileged_boxes.py). The traffic-light stop waypoints
+        are built once per agent instance (the evaluator sets the agent up once per route). The first tick's tokens are printed, so a
+        lane log shows what the teacher was given."""
+        if getattr(self, "_priv", None) is None:
+            from src.agents.privileged_boxes import PrivilegedBoxes
+            self._priv = PrivilegedBoxes(CarlaDataProvider.get_world(), CarlaDataProvider.get_map())
+            self._priv_logged = False
+        variant = str(getattr(self._inner, "privileged_variant", "") or "")
+        tok = self._priv.tokens(hero, m, variant, float(getattr(self._inner, "crop_bottom_frac", 0.0) or 0.0))
+        if not self._priv_logged:
+            from scripts.training.build_box_targets import BOX_CLASSES, VALID_SLOT
+            valid = tok[:, VALID_SLOT] > 0.5
+            first = [(BOX_CLASSES[int(np.argmax(r[9:15]))], round(float(np.hypot(r[0] * 20.0, r[1] * 10.0)), 1)) for r in tok[valid][:3]]
+            print(f"[privileged] variant {variant or 'all'}: {int(valid.sum())}/{m} object tokens on tick 1, "
+                  f"{len(self._priv.lights)} traffic lights on the map; "
+                  f"nearest: {first}", flush=True)
+            self._priv_logged = True
+        dump = os.environ.get("B2D_PRIV_DUMP")   # 2026-11-18: per-tick tokens, to compare with the PDM-Lite log tokens of the same scenario
+        if dump:
+            self._priv_ticks = getattr(self, "_priv_ticks", [])
+            self._priv_ticks.append(tok.astype(np.float16))
+            if len(self._priv_ticks) % 50 == 1:   # rewritten as the route goes, so a crash keeps what was driven
+                os.makedirs(dump, exist_ok=True)
+                name = os.path.basename(str(getattr(self, "_route_tag", "") or "")) or f"route_{id(self)}"
+                np.savez_compressed(os.path.join(dump, f"{name}_tokens.npz"), tokens=np.stack(self._priv_ticks), variant=variant)
+        return tok
+
     def run_step(self, input_data, timestamp):
         if self._route_locations is None:
             self._route_locations = self._build_route_locations()
@@ -191,7 +232,12 @@ class WorB2DAgent(AutonomousAgent):
         # be the module's WOR_ROUTE_POINTS default.
         route, self._route_idx, _ = _ego_frame_route(
             hero, self._route_locations, self._route_idx,
-            route_points=self._inner.route_points)
+            route_points=self._inner.route_points - (2 if _ROUTE_MODE == "dense_tp" else 0))
+        if getattr(self._inner, "route_mode", "dense") in ("dense", "dense_tp") and getattr(self._inner, "route_mode", "dense") != _ROUTE_MODE:
+            raise RuntimeError(f"the checkpoint was trained with route_mode {self._inner.route_mode!r} but WOR_ROUTE_MODE is {_ROUTE_MODE!r}: "
+                               "set the eval job's WOR_ROUTE_MODE to the training value")
+        if _ROUTE_MODE == "dense_tp":   # 2026-11-21 A87: + TF++'s target point and next target point (its RoutePlanner rule)
+            route = np.concatenate([np.asarray(route, dtype=np.float32).reshape(-1, 2), self._tfpp_target_points(hero)], axis=0)
 
         if os.environ.get("WOR_RL"):
             self._rl_pre_step(hero, timestamp)                  # TODO A74: last tick's reward first, then act() picks this tick's maneuver
@@ -202,12 +248,16 @@ class WorB2DAgent(AutonomousAgent):
             except Exception as e:
                 self._probe = False
                 print(f"[video] attention probe off for this route: {e!r}", flush=True)
-        control = self._inner.run_step({
+        inner_input = {
             "rgb_front": rgb,
             "speed": input_data["speed"],  # (frame, {'speed': m/s}) - already the trained unit
             "command": WOR_LANEFOLLOW_COMMAND,
             "route": route,
-        })
+        }
+        m_priv = int(getattr(self._inner.net, "privileged_boxes", 0) or 0)
+        if m_priv:  # 2026-11-17 ceiling diagnostic: the privileged teacher's object tokens, from the simulator (never an RGB-only agent)
+            inner_input["privileged_tokens"] = self._privileged_tokens(hero, m_priv)
+        control = self._inner.run_step(inner_input)
         if os.environ.get("WOR_CREEP") == "1":
             control = self._creep(input_data, control)
         if os.environ.get("B2D_TELEMETRY_DIR"):

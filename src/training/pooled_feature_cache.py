@@ -188,6 +188,20 @@ class PooledFeatureCache:
             store[slot] = np.memmap(path, dtype=np.float16, mode="r", shape=shape)
         return store[slot]
 
+    def object_tokens(self, key: str, m: int, variant: str) -> np.ndarray:
+        """2026-11-19 R1: the (m, BOX_FEATS) detector tokens exported for this frame (<prefix>.boxtok<m><variant>.f16, written by
+        export_detector_tokens.py from the cached PCA map). A frame without the file is a hard error, like a missing feature."""
+        from scripts.training.build_box_targets import BOX_FEATS
+        try:
+            ci, r = self.index[key]
+        except KeyError:
+            raise RuntimeError(f"frame {key!r} is not in the pooled cache (WOR_POOLED_CACHE)") from None
+        c = self.caches[ci]
+        path = f"{c['prefix']}.boxtok{m}{variant}.f16"
+        if not os.path.exists(path):
+            raise RuntimeError(f"no detector tokens {path}: run scripts/training/export_detector_tokens.py on this cache first")
+        return np.array(self._mm(c, ("o", f"{m}{variant}"), path, (c["meta"]["n"], m, BOX_FEATS))[r], dtype=np.float32)
+
     def row_of(self, key: str) -> Tuple[int, int]:
         return self.index[key]
 

@@ -138,6 +138,7 @@ def parse_args():
     parser.add_argument("--moe_experts", type=int, default=0,
                         help="2026-11-07 (mixture-of-experts test): number of small experts added to the waypoint head (zero at init). 0 = off.")
     parser.add_argument("--moe_hidden", type=int, default=8, help="hidden width of each expert")
+    parser.add_argument("--moe_lateral_only", type=int, default=0, help="2026-11-21: 1 = the waypoint experts may only move the waypoints sideways (their logs: +11%% on swerve frames, but on the road they lost yields); the speed profile stays the main head's")
     parser.add_argument("--moe_top_k", type=int, default=2, help="experts used per sample")
     parser.add_argument("--moe_aux_weight", type=float, default=0.01, help="weight of the load-balance term (1.0 when balanced)")
     parser.add_argument("--speed_moe_experts", type=int, default=0,
@@ -164,7 +165,7 @@ def parse_args():
     parser.add_argument("--qd_layers", type=int, default=2, help="decoder layers of --query_decoder")
     parser.add_argument("--fuse_cache", default="", help="2026-11-09 two-encoder arm: prefix of a SECOND pooled cache whose PCA full map (--fuse_pca K) feeds --query_decoder; the primary --pooled_cache stays the pooled grid")
     parser.add_argument("--fuse_pca", type=int, default=128, help="PCA channels of the --fuse_cache full map")
-    parser.add_argument("--route_mode", default="dense", choices=["dense", "tp"], help="2026-11-09 route-shortcut test: dense = the 4 near route points (every earlier run); tp = TF++'s target point + next target point (needs --route_overlay 0)")
+    parser.add_argument("--route_mode", default="dense", choices=["dense", "tp", "dense_tp"], help="2026-11-09 route-shortcut test: dense = the 4 near route points (every earlier run); tp = TF++'s target point + next target point (needs --route_overlay 0); 2026-11-21 dense_tp (A87): the --route_points minus 2 near route points PLUS TF++'s target point and next target point (give --route_points 6; resuming a 4-point checkpoint widens route_proj with zero weights on the new inputs, so the arm starts exactly at it)")
     parser.add_argument("--attn_pool", type=int, default=0, help="Q: pool the full-map cells to Q tokens by route-conditioned learned queries (needs --pca_full)")
     # 2026-11-08 (ideas 1, 2, 5, 10 and the fresh-AdamW control; all read the pooled cache's side files, see build_pooled_cache.py)
     parser.add_argument("--side_windows", type=int, default=0, help="1: with --route_windows K also read the 2K side windows (one lane left / right): 3K window tokens")
@@ -179,6 +180,14 @@ def parse_args():
     parser.add_argument("--privileged_boxes", type=int, default=0, help="M: the privileged TEACHER (idea 8): M logged objects replace the camera tokens")
     parser.add_argument("--privileged_variant", default="", choices=["", "_vis", "_visns"],
                         help="teacher ceiling: '' all objects within 50 m; _vis only objects inside the camera image; _visns also speed zeroed")
+    parser.add_argument("--object_tokens", type=int, default=0,
+                        help="R1 (2026-11-19): M detector object tokens appended after the camera tokens; needs --object_detector and the exported "
+                             "<prefix>.boxtok<M><--object_variant>.f16 of every --pooled_cache prefix (export_detector_tokens.py)")
+    parser.add_argument("--object_detector", default="", help="R1: train_object_detector.py checkpoint (frozen inside the policy)")
+    parser.add_argument("--object_pca_basis", default="", help="R1: the PCA basis the detector's cache used (default: from the detector's run config)")
+    parser.add_argument("--object_variant", default="_det", help="R1: token-file suffix written by export_detector_tokens.py --variant")
+    parser.add_argument("--object_max_range", type=float, default=30.0, help="R1: drop detections farther than this (m); must match the export")
+    parser.add_argument("--object_threshold", type=float, default=0.5, help="R1: p(object) threshold; must match the export")
     parser.add_argument("--privileged_noise", default="0,0", help="'sigma_m,drop': Gaussian position jitter (m) and object drop rate, train and val")
     parser.add_argument("--teacher_repr", type=str, default="", help="the teacher's policy token per cache row (dump_teacher_repr.py); with --distill_weight")
     parser.add_argument("--distill_weight", type=float, default=0.0, help="weight of the MSE between the student's and the teacher's policy token (idea 8)")
@@ -205,6 +214,15 @@ def parse_args():
     parser.add_argument("--token_mode", type=str, default="pool", choices=["pool", "s2d"], help="TODO A54: 'pool' = the stride-32 map average-pooled to --vision_grid (default); 's2d' = the stride-16 level through a pixel-unshuffle of --s2d_patch (give --vision_grid HxW = H/16/p x W/16/p, e.g. 6x16 for 288x768 at p 3); live encoder only")
     parser.add_argument("--s2d_patch", type=int, default=3, help="TODO A54: space-to-depth patch size")
     parser.add_argument("--token_mask", type=float, default=0.0, help="TODO A54: fraction of lateral vision-token columns zeroed per sample in training (BevAD: 0.2)")
+    parser.add_argument("--feature_noise", type=float, default=0.0, help="2026-11-21 memorization test: Gaussian noise added to each camera-grid token in training, "
+                        "as a multiple of that token's RMS (0 = off; never at validation or driving). Qwen heads, plain pooled grid only")
+    parser.add_argument("--token_drop", type=float, default=0.0, help="2026-11-21 memorization test: share of camera-grid tokens zeroed per sample in training (0 = off; "
+                        "never at validation or driving). Qwen heads, plain pooled grid only")
+    parser.add_argument("--weight_decay", type=float, default=1e-4, help="2026-11-21 (A87 wd arm): AdamW weight decay of the decayed groups "
+                        "(1e-4 = every run so far; TF++ uses 0.01). Gates, norms, embeddings and learned tokens stay at 0")
+    parser.add_argument("--train_eval_frames", type=int, default=0, help="2026-11-21: at every validation, also score this many fixed TRAINING frames (main camera only, "
+                        "no recovery re-renders) in eval mode, with no noise or dropout: the train_clean_* columns. held-out / clean-train error = the "
+                        "memorization measure (0 = off)")
     parser.add_argument("--encoder_channels_last", type=int, default=0, help="2026-11-04: run the frozen CARLA encoder's convolutions channels_last (NHWC; faster under bf16 on Ampere+, features equal to float rounding). Speeds up live-encoder arms such as --token_mode s2d; no effect with --pooled_cache")
     parser.add_argument("--path_head", type=int, default=0, help="TODO A15: add a space-indexed path head (10 points of the expert's shifted route, ego frame) next to the waypoints (qwen heads only)")
     parser.add_argument("--path_loss_weight", type=float, default=1.0, help="TODO A15: weight of the path L1 when --path_head 1")
@@ -281,6 +299,29 @@ def check_moe_args(args) -> None:
         raise SystemExit("--vision_moe_experts is a Qwen-head option (it routes the trunk's vision tokens)")
     if args.token_mask > 0 and (args.route_windows or args.attn_pool or args.query_decoder):
         raise SystemExit("--token_mask masks the plain vision grid only: it cannot be combined with --route_windows, --attn_pool or --query_decoder")
+    check_regularizer_args(args)
+
+
+def check_regularizer_args(args) -> None:
+    """2026-11-21 memorization test: the two training-only regularizers and the clean training-error readout."""
+    if args.feature_noise < 0 or not 0.0 <= args.token_drop < 1.0:
+        raise SystemExit(f"--feature_noise must be >= 0 and --token_drop in [0, 1), got {args.feature_noise} / {args.token_drop}")
+    if (args.feature_noise > 0 or args.token_drop > 0) and args.policy_arch == "cnn":
+        raise SystemExit("--feature_noise / --token_drop act on the Qwen trunk's camera tokens; the cnn arch has none")
+    if (args.feature_noise > 0 or args.token_drop > 0) and (args.route_windows or args.attn_pool or args.query_decoder
+                                                            or args.privileged_boxes or args.token_mode != "pool"):
+        raise SystemExit("--feature_noise / --token_drop act on the plain pooled camera grid: not with --route_windows, --attn_pool, "
+                         "--query_decoder, --privileged_boxes or --token_mode s2d")
+    if args.weight_decay < 0:
+        raise SystemExit("--weight_decay must be >= 0")
+    if args.train_eval_frames < 0:
+        raise SystemExit("--train_eval_frames must be >= 0")
+    if args.train_eval_frames > 0 and (args.val_data_dir or (args.val_split <= 0 and args.num_folds <= 1)):
+        raise SystemExit("--train_eval_frames samples the training side of the --val_split route split: it needs --val_split > 0 "
+                         "(or --num_folds) and no --val_data_dir")
+    if args.train_eval_frames > 0 and (args.flip_prob > 0 or args.color_aug_prob > 0):
+        raise SystemExit("--train_eval_frames scores training frames as they are stored; with --flip_prob / --color_aug_prob the dataset "
+                         "would augment them")
 
 
 def check_offline_rl_args(args) -> None:
@@ -322,6 +363,26 @@ def main():
     os.environ["WOR_DECODER_STATS"] = "1" if args.decoder_stats else "0"
     os.environ["WOR_RESET_OPTIMIZER"] = "1" if args.reset_optimizer else "0"
     os.environ["WOR_PRIVILEGED"] = str(int(args.privileged_boxes))
+    os.environ["WOR_OBJECT_TOKENS"] = str(int(args.object_tokens))
+    os.environ["WOR_OBJECT_VARIANT"] = args.object_variant
+    object_det = None
+    if args.object_tokens:
+        if not (args.object_detector and args.pooled_cache):
+            raise SystemExit("--object_tokens needs --object_detector and --pooled_cache (the tokens are exported next to the cache)")
+        import torch as _torch
+        object_det = _torch.load(args.object_detector, map_location="cpu", weights_only=False)
+        _oc = object_det.get("config", {})
+        if not args.object_pca_basis:
+            from src.training.pooled_feature_cache import pca_file
+            args.object_pca_basis = pca_file(_oc["prefix"], int(_oc.get("pca", 256))) + ".basis.pt"
+        for _pre in args.pooled_cache.split(","):   # every cache the run reads must hold the export made with THESE settings
+            _meta = _pre + f".boxtok{int(args.object_tokens)}{args.object_variant}.f16.json"
+            if not os.path.exists(_meta):
+                raise SystemExit(f"--object_tokens: {_meta} is missing (run export_detector_tokens.py on {_pre})")
+            _m = __import__("json").load(open(_meta))
+            if abs(float(_m["max_range"]) - args.object_max_range) > 1e-6 or abs(float(_m["threshold"]) - args.object_threshold) > 1e-6:
+                raise SystemExit(f"--object_tokens: {_meta} was exported with max_range {_m['max_range']} / threshold {_m['threshold']}, "
+                                 f"this run uses {args.object_max_range} / {args.object_threshold}")
     os.environ["WOR_ROUTE_MODE"] = args.route_mode
     os.environ["WOR_FUSE_CACHE"] = args.fuse_cache
     os.environ["WOR_FUSE_PCA"] = str(int(args.fuse_pca))
@@ -351,9 +412,13 @@ def main():
         from src.training.pooled_feature_cache import pca_file
         os.environ["WOR_PCA_BASIS"] = pca_file(args.pooled_cache.split(",")[0], args.pca_full) + ".basis.pt"
         os.environ["WOR_VISION_GRID_HW"] = str(args.vision_grid)
+    elif "x" in str(args.vision_grid).lower() and args.token_mode == "pool":   # 2026-11-21 A87 full-map arm (1512 channels, no PCA): each fine
+        os.environ["WOR_VISION_GRID_HW"] = str(args.vision_grid)            # cell's position row starts at its 4x4 parent's (wor_checkpoint)
+    if args.route_mode == "dense_tp" and args.route_points < 3:
+        raise SystemExit("--route_mode dense_tp needs --route_points >= 3 (near route points + the 2 target points)")
     # widen-on-resume (wor_checkpoint.load_trainable_state): a resumed arm whose vision input only grew starts exactly at the checkpoint
     os.environ["WOR_RESUME_WIDEN"] = "1" if (args.prev_frame or args.ray_geometry or args.route_windows or args.decoder_stats or args.window_coords
-                                             or args.privileged_boxes) and args.token_mode == "pool" else "0"
+                                             or args.privileged_boxes or args.object_tokens) and args.token_mode == "pool" else "0"
     if args.pooled_cache:
         import json as _json                                      # not `import json`: that would make json a local of main() and break the later uses
         os.environ["WOR_POOLED_CACHE"] = args.pooled_cache      # read by WorldOnRailsDataset (TODO A59)
@@ -512,12 +577,17 @@ def main():
             win_aux=args.win_aux,
             win_aux_weight=float(args.win_aux_weight),
             privileged_boxes=int(args.privileged_boxes),
+            object_tokens=int(args.object_tokens),
+            object_det_cfg=({**object_det.get("config", {}), "in_ch": int(object_det.get("config", {}).get("pca", 256))} if object_det else None),
+            object_max_range=float(args.object_max_range),
+            object_threshold=float(args.object_threshold),
             full_adapter=bool(args.full_adapter),
             full_aux_weight=float(args.full_aux_weight),
             moe_experts=int(args.moe_experts),
             moe_hidden=int(args.moe_hidden),
             moe_top_k=int(args.moe_top_k),
             moe_aux_weight=float(args.moe_aux_weight),
+            moe_lateral_only=bool(args.moe_lateral_only),
             speed_moe_experts=int(args.speed_moe_experts),
             speed_moe_hidden=int(args.speed_moe_hidden),
             speed_moe_top_k=int(args.speed_moe_top_k),
@@ -539,6 +609,8 @@ def main():
             token_mode=args.token_mode,
             s2d_patch=args.s2d_patch,
             token_mask=args.token_mask,
+            feature_noise=float(args.feature_noise),    # 2026-11-21 memorization test (training only)
+            token_drop=float(args.token_drop),
             qk_norm=bool(args.qk_norm),
             use_q_critic=bool(args.q_critic),
             use_v_head=args.offline_rl != "none",
@@ -546,6 +618,11 @@ def main():
             reason_detach=bool(args.reason_detach),
             reason_cascade=bool(args.reason_cascade)
         )
+
+    if args.object_tokens:   # R1: the frozen detector and its PCA basis become part of the policy (and of every checkpoint)
+        policy.load_object_detector(args.object_detector, args.object_pca_basis)
+        print(f"--> R1 object tokens: {args.object_tokens} detector tokens (<= {args.object_max_range:g} m, p >= {args.object_threshold:g}) "
+              f"appended to the camera tokens; detector {args.object_detector}, basis {args.object_pca_basis}")
 
     if args.encoder_channels_last:
         enc = getattr(policy, "encoder", None)
@@ -567,6 +644,7 @@ def main():
         grad_clip=args.grad_clip,
         warmup_frac=args.warmup_frac,
         decay_gates_and_norms=bool(args.decay_gates_and_norms),
+        weight_decay=float(args.weight_decay),   # 2026-11-21: was the trainer's default 1e-4 for every run so far
         save_dir=args.save_dir,
         lr_backbone=args.lr_backbone,
         lr_heads=args.lr_heads,
@@ -578,6 +656,7 @@ def main():
         compile_model=bool(args.compile_model),
         feature_cache_tag=args.feature_cache_tag,
         val_every=args.val_every,
+        train_eval_frames=int(args.train_eval_frames),   # 2026-11-21: the train_clean_* readout
         route_points=args.route_points,
         img_size=(img_h, img_w),
         crop_bottom_frac=args.crop_bottom_frac,

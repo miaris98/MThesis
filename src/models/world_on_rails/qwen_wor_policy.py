@@ -14,6 +14,7 @@ controls, same WorldOnRailsTrainer/WorldOnRailsDataset training pipeline - with 
 the CNN+MLP head swapped for a Qwen transformer trunk.
 """
 from typing import Dict, Optional, Tuple, Union
+import math
 import os
 
 import numpy as np
@@ -53,11 +54,21 @@ class MoEWaypointDelta(nn.Module):
     (E * sum_e f_e * P_e, 1.0 when balanced) for the trainer to add. Small expert counts are computed densely; large ones
     (e.g. 10,000 tiny experts) gather only the k selected experts per sample."""
 
-    def __init__(self, dim: int, out_dim: int, num_experts: int, hidden: int = 8, top_k: int = 2):
+    def __init__(self, dim: int, out_dim: int, num_experts: int, hidden: int = 8, top_k: int = 2, lateral_only: bool = False):
         super().__init__()
         self.num_experts, self.hidden, self.top_k = int(num_experts), int(hidden), int(top_k)
         if not 1 <= self.top_k <= self.num_experts:   # (review finding) otherwise topk fails on the first forward
             raise ValueError(f"MoE top_k must be between 1 and the number of experts ({self.num_experts}), got {self.top_k}")
+        # 2026-11-21 (the experts' logs: +11% on swerve frames, but on the road they lost yields): lateral_only keeps only the y (sideways)
+        # part of the correction, so the speed profile (x along the path) stays the main head's. The waypoint vector is (commands, 5, 2)
+        # flattened with (x, y) last, so y = the odd entries. Not saved in the state dict: the x columns of w2 / b2 never get a gradient
+        # and stay exactly zero, so a checkpoint gives the same outputs with or without the mask.
+        self.lateral_only = bool(lateral_only)
+        if self.lateral_only and out_dim % 2:
+            raise ValueError("lateral_only needs an (x, y) waypoint output")
+        self.register_buffer("out_mask", (torch.arange(out_dim) % 2 == 1).float() if self.lateral_only else torch.ones(out_dim),
+                             persistent=False)
+        self.last_stats: Optional[Dict[str, torch.Tensor]] = None   # 2026-11-21: per-batch use / size of the experts, for the logs
         self.gate = nn.Linear(dim, self.num_experts)
         nn.init.normal_(self.gate.weight, std=0.02)
         nn.init.zeros_(self.gate.bias)
@@ -84,12 +95,20 @@ class MoEWaypointDelta(nn.Module):
         else:                                                         # sparse: gather the k selected experts' weights
             h = F.gelu(torch.einsum("bd,bkdh->bkh", x, self.w1[top_i]) + self.b1[top_i])
             y = torch.einsum("bkh,bkho->bko", h, self.w2[top_i]) + self.b2[top_i]
-        out = (weights.unsqueeze(-1) * y).sum(1)
+        out = (weights.unsqueeze(-1) * y).sum(1) * self.out_mask
         load = torch.zeros(self.num_experts, device=x.device).scatter_add_(
             0, top_i.reshape(-1), torch.ones(top_i.numel(), device=x.device)) / top_i.numel()
         self.last_load = load.detach()
         self.last_top_i = top_i.detach()   # (B, k): which experts each sample used (speed-head experts: routing split)
         self.last_aux = self.num_experts * (load * probs.mean(0)).sum()
+        with torch.no_grad():   # 2026-11-21: what every earlier expert run never logged
+            p = load.clamp_min(1e-12)
+            self.last_stats = {"moe_aux": self.last_aux.detach(), "moe_load_max": load.max(),
+                               "moe_load_entropy": -(p * p.log()).sum() / math.log(max(2, self.num_experts)),   # 1 = perfectly even
+                               "moe_gate_conf": top_p[:, 0].mean()}                                             # mean top-1 router probability
+            if out.shape[-1] % 2 == 0:   # the waypoint experts: (x, y) pairs -> mean size of the correction along / across the path
+                d = out.detach().reshape(out.shape[0], -1, 2).abs()
+                self.last_stats.update(moe_delta_x=d[..., 0].mean(), moe_delta_y=d[..., 1].mean())
         return out
 
 
@@ -144,7 +163,7 @@ class QwenWaypointTransformer(nn.Module):
     def __init__(self, embed_dim: int, depth: int, num_heads: int, ffn_dim: int,
                  num_commands: int = 6, num_rails: int = 9, num_vision_tokens: int = 64,
                  use_rail_q: bool = True, qk_norm: bool = False,
-                 moe_experts: int = 0, moe_hidden: int = 8, moe_top_k: int = 2):
+                 moe_experts: int = 0, moe_hidden: int = 8, moe_top_k: int = 2, moe_lateral_only: bool = False):
         super().__init__()
         self.use_rail_q = use_rail_q
         self.num_commands = num_commands
@@ -174,7 +193,8 @@ class QwenWaypointTransformer(nn.Module):
             nn.Linear(256, num_commands * 5 * 2)
         )
         # 2026-11-07: optional mixture-of-experts correction added to waypoint_head's output (zero at init; see MoEWaypointDelta)
-        self.moe = MoEWaypointDelta(embed_dim, num_commands * 5 * 2, moe_experts, moe_hidden, moe_top_k) if moe_experts > 0 else None
+        self.moe = (MoEWaypointDelta(embed_dim, num_commands * 5 * 2, moe_experts, moe_hidden, moe_top_k, lateral_only=moe_lateral_only)
+                    if moe_experts > 0 else None)
         # Built only when something trains it. With --q_loss_weight 0 (this project's
         # default) and PDM-Lite's all-zero target_q, this head receives no gradient at all
         # and act() never reads its output - dead weight feeding a `Q Loss` column that
@@ -260,6 +280,7 @@ class QwenWorldOnRailsPolicy(nn.Module):
         moe_hidden: int = 8,
         moe_top_k: int = 2,
         moe_aux_weight: float = 0.01,
+        moe_lateral_only: bool = False,   # 2026-11-21: the waypoint experts move the waypoints sideways only
         speed_moe_experts: int = 0,
         speed_moe_hidden: int = 32,
         speed_moe_top_k: int = 2,
@@ -278,6 +299,10 @@ class QwenWorldOnRailsPolicy(nn.Module):
         win_aux: str = "",
         win_aux_weight: float = 0.5,
         privileged_boxes: int = 0,
+        object_tokens: int = 0,           # 2026-11-19 R1: M detector object tokens APPENDED after the camera tokens (object_detector.py)
+        object_det_cfg: Optional[dict] = None,
+        object_max_range: float = 30.0,
+        object_threshold: float = 0.5,
         full_adapter: bool = False,
         full_aux_weight: float = 0.0,
         crop_bottom_frac: float = DEFAULT_CROP_BOTTOM_FRAC,
@@ -287,6 +312,8 @@ class QwenWorldOnRailsPolicy(nn.Module):
         token_mode: str = "pool",
         s2d_patch: int = 3,
         token_mask: float = 0.0,
+        feature_noise: float = 0.0,       # 2026-11-21 memorization test: Gaussian noise on the camera-grid tokens in training, x token RMS
+        token_drop: float = 0.0,          # 2026-11-21 memorization test: share of camera-grid tokens zeroed per sample in training
         qk_norm: bool = False,
         use_q_critic: bool = False,
         use_v_head: bool = False,
@@ -297,6 +324,15 @@ class QwenWorldOnRailsPolicy(nn.Module):
         super().__init__()
         if float(token_mask) > 0 and (route_windows or attn_pool or query_decoder):   # (review finding) refuse at construction, before any run
             raise ValueError("token_mask applies to the plain vision grid only: it cannot be combined with route windows, attn_pool or query_decoder")
+        # 2026-11-21: both regularizers act on the first gh*gw vision tokens, so they need a layout where those ARE the camera grid
+        # (object tokens are appended after it, so they are fine; the layouts below replace or interleave the grid).
+        self.feature_noise, self.token_drop = float(feature_noise), float(token_drop)
+        if self.feature_noise < 0 or not 0.0 <= self.token_drop < 1.0:
+            raise ValueError(f"feature_noise must be >= 0 and token_drop in [0, 1), got {feature_noise} / {token_drop}")
+        if (self.feature_noise > 0 or self.token_drop > 0) and (route_windows or attn_pool or query_decoder or privileged_boxes
+                                                                 or str(token_mode) != "pool"):
+            raise ValueError("feature_noise / token_drop act on the plain pooled camera grid: not with route windows, attn_pool, "
+                             "query_decoder, privileged boxes or s2d tokens")
         self.num_commands = num_commands
         # TODO B67: Qwen3-style QK-norm in every trunk block (see QwenAttentionWithSkip). It adds tensors, so it is stamped in the
         # checkpoint config and rebuilt by load_wor_model; off by default, which keeps every existing checkpoint (E15 included) exact.
@@ -342,6 +378,8 @@ class QwenWorldOnRailsPolicy(nn.Module):
         else:
             gh = gw = self.vision_grid
         self.vision_grid_hw = (gh, gw)
+        if (self.feature_noise > 0 or self.token_drop > 0) and min(gh, gw) <= 0:
+            raise ValueError("feature_noise / token_drop need a camera grid (vision_grid > 0), not the single global token")
         self.num_vision_tokens = 1 if min(gh, gw) <= 0 else gh * gw
         # 2026-11-08 idea 8: the privileged teacher reads M logged objects (one token each) instead of the camera
         self.privileged_boxes = int(privileged_boxes)
@@ -355,6 +393,17 @@ class QwenWorldOnRailsPolicy(nn.Module):
             assert min(gh, gw) > 0 and self.route_windows % gh == 0, "route_windows must be a multiple of the grid height"
             assert not use_ray_geometry, "route windows and ray geometry are separate arms"
             self.num_vision_tokens += self.route_windows
+        # 2026-11-19 R1 (teacher ladder step 2): a frozen detector on the RGB features gives M object tokens in the teacher's format, appended
+        # after the camera tokens (the privileged teacher REPLACES them; R0 beats every object-only teacher in junction families). Training
+        # reads tokens exported once from the cached PCA map (export_detector_tokens.py); live, the model runs the same detector on the
+        # encoder's full stride-32 map. Single RGB camera at inference: no simulator input.
+        self.object_tokens = int(object_tokens)
+        if self.object_tokens:
+            if (privileged_boxes or self.route_windows or int(query_decoder) or int(attn_pool) or int(fuse_pca) or int(pca_input) or prev_frame
+                    or float(token_mask) > 0 or str(token_mode) != "pool" or min(gh, gw) <= 0):
+                raise ValueError("object_tokens is built for the plain pooled grid (no privileged boxes, route windows, query decoder, attn_pool, "
+                                 "fuse/pca input, prev_frame, token_mask or s2d)")
+            self.num_vision_tokens += self.object_tokens
         self.moe_aux_weight = float(moe_aux_weight)
         self.moe_experts = int(moe_experts)
         # 2026-11-07, spatial tests:
@@ -421,6 +470,24 @@ class QwenWorldOnRailsPolicy(nn.Module):
             from scripts.training.build_box_targets import BOX_FEATS
             vis_ch, geo_ch = BOX_FEATS, 0
         self.vision_proj = nn.Linear(vis_ch + geo_ch, self.embed_dim)
+        self.obj_det = None
+        if self.object_tokens:
+            from scripts.training.build_box_targets import BOX_FEATS
+            from src.models.world_on_rails.object_detector import ObjectDetector
+            det_cfg = dict(object_det_cfg or {})
+            self.object_det_cfg = {k: int(det_cfg.get(k, d)) for k, d in (("in_ch", 256), ("dim", 256), ("queries", 30), ("layers", 3))}
+            self.object_max_range, self.object_threshold = float(object_max_range), float(object_threshold)
+            self._obj_grid_ch = vis_ch                                  # channels of one cached grid cell (encoder + appended extras)
+            enc_ch = vis_ch - self.extra_vision_channels                # channels of the live full map the PCA basis was fitted on
+            self.obj_proj = nn.Linear(BOX_FEATS, self.embed_dim)
+            nn.init.zeros_(self.obj_proj.weight)                        # a resumed RGB arm starts with object tokens that carry nothing
+            nn.init.zeros_(self.obj_proj.bias)
+            self.obj_det = ObjectDetector(**self.object_det_cfg)
+            for p_ in self.obj_det.parameters():
+                p_.requires_grad_(False)
+            self.register_buffer("obj_pca_mean", torch.zeros(enc_ch))
+            self.register_buffer("obj_pca_basis", torch.zeros(self.object_det_cfg["in_ch"], enc_ch))
+            self.register_buffer("obj_ready", torch.zeros(()))           # 1 once load_object_detector filled the detector and the basis
         if self.query_decoder:
             E = self.embed_dim
             self.qd_cell_proj = nn.Linear(self.fuse_pca or self.pca_input, E)
@@ -475,9 +542,11 @@ class QwenWorldOnRailsPolicy(nn.Module):
             embed_dim=self.embed_dim, depth=cfg["depth"], num_heads=cfg["num_heads"],
             ffn_dim=cfg["ffn_dim"], num_commands=num_commands, num_rails=num_rails,
             num_vision_tokens=self.num_vision_tokens, use_rail_q=bool(use_rail_q), qk_norm=self.qk_norm,
-            moe_experts=self.moe_experts, moe_hidden=int(moe_hidden), moe_top_k=int(moe_top_k)
+            moe_experts=self.moe_experts, moe_hidden=int(moe_hidden), moe_top_k=int(moe_top_k),
+            moe_lateral_only=bool(moe_lateral_only)
         )
         self.moe_hidden, self.moe_top_k = int(moe_hidden), int(moe_top_k)
+        self.moe_lateral_only = bool(moe_lateral_only) and self.moe_experts > 0
         # 2026-11-13, TODO A82: gated experts on every vision token, before the trunk. Each token is routed on its own content (per-cell
         # routing), and the experts' output is added residually. The last layer starts at zero, so a run resumed from E15 starts at its base.
         self.vision_moe_experts, self.vision_moe_hidden, self.vision_moe_top_k = int(vision_moe_experts), int(vision_moe_hidden), int(vision_moe_top_k)
@@ -552,6 +621,40 @@ class QwenWorldOnRailsPolicy(nn.Module):
               f"{' (GLOBALLY POOLED - spatially blind ablation)' if self.vision_grid <= 0 else ''}"
               f"{' | QK-norm: on (TODO B67)' if self.qk_norm else ''}")
 
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if getattr(self, "obj_det", None) is not None:
+            self.obj_det.eval()   # frozen: never in training mode
+        return self
+
+    def load_object_detector(self, det_ckpt: str, basis_path: str) -> None:
+        """R1: fill the frozen detector (train_object_detector.py checkpoint) and the PCA basis of the cache it was trained on
+        (<prefix>.pca<K>.f16.basis.pt). Both live in this model's state_dict, so every checkpoint carries them."""
+        ck = torch.load(det_ckpt, map_location="cpu", weights_only=False)
+        cfg = ck.get("config", {})
+        for k in ("dim", "queries", "layers"):
+            if k in cfg and int(cfg[k]) != self.object_det_cfg[k]:
+                raise ValueError(f"detector {det_ckpt} has {k}={cfg[k]}, this model was built with {self.object_det_cfg[k]}")
+        self.obj_det.load_state_dict(ck["state_dict"])
+        st = torch.load(basis_path, map_location="cpu")
+        if tuple(st["basis"].shape) != tuple(self.obj_pca_basis.shape):
+            raise ValueError(f"PCA basis {basis_path} is {tuple(st['basis'].shape)}, expected {tuple(self.obj_pca_basis.shape)}")
+        self.obj_pca_mean.copy_(st["mean"].float())
+        self.obj_pca_basis.copy_(st["basis"].float())
+        self.obj_ready.fill_(1.0)
+
+    @torch.no_grad()
+    def object_tokens_from_map(self, fmap: torch.Tensor) -> torch.Tensor:
+        """(B, C, H, W) frozen full map -> (B, M, BOX_FEATS) detector tokens: the PCA of build_pooled_cache.py (stored f16), then the
+        detector, as export_detector_tokens.py does. float32 with autocast off, so live tokens match the exported ones."""
+        if float(self.obj_ready) < 0.5:
+            raise RuntimeError("object_tokens model without detector weights / PCA basis: load_object_detector was never called")
+        from src.models.world_on_rails.object_detector import pca_project
+        with torch.autocast(device_type=fmap.device.type, enabled=False):
+            pca = pca_project(fmap, self.obj_pca_mean, self.obj_pca_basis)
+            return self.obj_det.tokens(self.obj_det(pca), m=self.object_tokens, threshold=self.object_threshold,
+                                       max_range=self.object_max_range)
+
     def _qd_sincos(self, h: int, w: int, device) -> torch.Tensor:
         """(1, h*w, E) fixed 2D sine-cosine positions (half the channels encode the row, half the column), cached per map size."""
         key = (h, w, str(device))
@@ -571,6 +674,15 @@ class QwenWorldOnRailsPolicy(nn.Module):
         self, feats: torch.Tensor, speed: torch.Tensor, command: torch.Tensor, route: Optional[torch.Tensor]
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         B = feats.shape[0]
+        obj_tok = None
+        if self.object_tokens:
+            if feats.dim() == 2:   # cached: flat [pooled grid | M * BOX_FEATS exported detector tokens] (wor_dataset, WOR_OBJECT_TOKENS)
+                gh, gw = self.vision_grid_hw
+                n1 = self._obj_grid_ch * gh * gw
+                obj_tok = feats[:, n1:].reshape(B, self.object_tokens, -1).float()
+                feats = feats[:, :n1].reshape(B, self._obj_grid_ch, gh, gw)
+            else:                  # live: the encoder's full stride-32 map -> PCA -> detector, the same steps as the export
+                obj_tok = self.object_tokens_from_map(feats)
         if self.privileged_boxes:   # (B, M, BOX_FEATS): one token per logged object; padding rows (valid flag 0) give zero tokens
             from scripts.training.build_box_targets import VALID_SLOT
             vision_tok = self.vision_proj(feats.float()) * feats[..., VALID_SLOT:VALID_SLOT + 1].float()
@@ -620,6 +732,11 @@ class QwenWorldOnRailsPolicy(nn.Module):
         vision_tok = self.vision_proj(vis)
         if qd_tok is not None:
             vision_tok = torch.cat([vision_tok, qd_tok.to(vision_tok.dtype)], dim=1)
+        if obj_tok is not None:   # R1: padding rows (valid flag 0) give zero tokens, as in the teacher
+            from scripts.training.build_box_targets import VALID_SLOT
+            w = self.obj_proj.weight.dtype
+            o = self.obj_proj(obj_tok.to(w)) * obj_tok[..., VALID_SLOT:VALID_SLOT + 1].to(w)
+            vision_tok = torch.cat([vision_tok, o.to(vision_tok.dtype)], dim=1)
         if self.win_aux == "pre":   # 2026-11-08: predict each window's obstacle state from its own token, feed the prediction back in
             n_cells = vision_tok.shape[1] - self.route_windows
             wtok = vision_tok[:, n_cells:]
@@ -644,6 +761,23 @@ class QwenWorldOnRailsPolicy(nn.Module):
             vision_tok, _ = self.attn_pool(q, kv, kv, need_weights=False)
 
         return vision_tok, speed_tok, route_tok, cmd_tok, command
+
+    def _regularize_grid(self, vision_tok: torch.Tensor) -> torch.Tensor:
+        """2026-11-21 memorization test (training only; forward calls it only when self.training): the frozen encoder's features are
+        cached, so every epoch shows the trunk the identical camera tokens and it memorizes (train ADE 0.08 m vs held-out 0.27 m).
+        feature_noise adds Gaussian noise scaled by each token's own RMS (detached, so the projection cannot outgrow it); token_drop
+        zeroes that share of the gh*gw grid tokens per sample (vision_pos still marks the empty cell). Tokens after the grid (R1's
+        object tokens) are left alone."""
+        gh, gw = self.vision_grid_hw
+        n = gh * gw
+        grid = vision_tok[:, :n]
+        if self.feature_noise > 0:
+            rms = grid.detach().float().pow(2).mean(-1, keepdim=True).sqrt()
+            grid = grid + (self.feature_noise * rms * torch.randn(grid.shape, device=grid.device, dtype=torch.float32)).to(grid.dtype)
+        if self.token_drop > 0:
+            keep = (torch.rand(grid.shape[0], n, 1, device=grid.device) >= self.token_drop).to(grid.dtype)
+            grid = grid * keep
+        return torch.cat([grid, vision_tok[:, n:]], dim=1) if vision_tok.shape[1] > n else grid
 
     def forward(
         self,
@@ -684,6 +818,8 @@ class QwenWorldOnRailsPolicy(nn.Module):
             gh, gw = self.vision_grid_hw
             cols = (torch.rand(feats.shape[0], 1, gw, device=feats.device) >= self.token_mask).to(vision_tok.dtype)       # per sample: keep a lateral column or not
             vision_tok = vision_tok * cols.expand(-1, gh, -1).reshape(feats.shape[0], gh * gw, 1)
+        if self.training and (self.feature_noise > 0 or self.token_drop > 0):
+            vision_tok = self._regularize_grid(vision_tok)
 
         waypoints, rail_q, policy_repr = self.trunk(vision_tok, speed_tok, route_tok, cmd_tok)
         if not self.training:

@@ -2,7 +2,8 @@
 """Route bookkeeping for one CARLA lane job (TODO A60; the 2026-10-19 incidents 1 and 2). Called by queue_A9c.sh's eval_job.
 
     python3 lane_plan.py plan LABEL ROUTES OUT_DIR   -> "LABEL ROUTES": what to launch ("LABEL -" if nothing is left to drive)
-    python3 lane_plan.py split ROUTES PROGRESS       -> "ROUTE REST": the route at PROGRESS (the crash route) and the routes after it
+    python3 lane_plan.py split ROUTES PROGRESS [LOG] -> "ROUTE REST": the crash route and the routes after it; the route the attempt
+                                                        log LOG was on when given, else the route at PROGRESS
     python3 lane_plan.py norm ROUTES                 -> ROUTES in ascending order, duplicates removed
 
 1. Run order. The evaluator drives a route list in ascending id order whatever order it was given in, but the crash continuation
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from typing import Iterable, List, Optional, Set, Tuple
 
@@ -96,8 +98,30 @@ def plan(label: str, routes: str, out_dir: str) -> Tuple[str, List[int]]:
     raise SystemExit(f"lane_plan: more than {MAX_DERIVED} derived labels for {label}")
 
 
-def split(routes: str, progress: int) -> Tuple[str, str]:
+PREPARING = re.compile(r"Preparing RouteScenario_(\d+)")
+
+
+def last_prepared(attempt_log: Optional[str]) -> Optional[int]:
+    """The route the evaluator was on when it stopped: the last 'Preparing RouteScenario_<id>' line of an attempt log."""
+    if not attempt_log or not os.path.exists(attempt_log):
+        return None
+    with open(attempt_log, encoding="utf-8", errors="replace") as fh:
+        hits = PREPARING.findall(fh.read())
+    return int(hits[-1]) if hits else None
+
+
+def split(routes: str, progress: int, attempt_log: Optional[str] = None) -> Tuple[str, str]:
+    """The crash route and the routes after it.
+
+    A CARLA segfault while loading leaves no record, so the crash route is the one at PROGRESS. A crash during the route
+    ('Failed - Simulation crashed', e.g. the scenario runner's 'trying to operate on a destroyed actor') writes a record first, so
+    PROGRESS already counts it and ids[progress] is a healthy route (2026-11-18: 3572 and 2086 excluded, 3520 and 1956 crashed).
+    The attempt log names the route either way, so it wins when it names a route of this list."""
     ids = parse(routes)
+    on = last_prepared(attempt_log)
+    if on is not None and on in ids:
+        k = ids.index(on)
+        return str(on), fmt(ids[k + 1:])
     if progress >= len(ids):
         return "", ""
     return str(ids[progress]), fmt(ids[progress + 1:])
@@ -109,8 +133,8 @@ def main(argv: List[str]) -> int:
     elif len(argv) == 4 and argv[0] == "plan":
         lab, left = plan(argv[1], argv[2], argv[3])
         print(lab, fmt(left) if left else "-")
-    elif len(argv) == 3 and argv[0] == "split":
-        print(*split(argv[1], int(argv[2])))
+    elif len(argv) in (3, 4) and argv[0] == "split":
+        print(*split(argv[1], int(argv[2]), argv[3] if len(argv) == 4 else None))
     else:
         print(__doc__, file=sys.stderr)
         return 2

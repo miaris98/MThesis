@@ -178,6 +178,7 @@ def load_wor_model(
             moe_experts=int(_resolve("moe_experts", None, 0) or 0),
             moe_hidden=int(_resolve("moe_hidden", None, 8) or 8),
             moe_top_k=int(_resolve("moe_top_k", None, 2) or 2),
+            moe_lateral_only=bool(_resolve("moe_lateral_only", None, False) or False),   # 2026-11-21
             speed_moe_experts=int(_resolve("speed_moe_experts", None, 0) or 0),   # TODO A81 (absent in older configs = off)
             speed_moe_hidden=int(_resolve("speed_moe_hidden", None, 32) or 32),
             speed_moe_top_k=int(_resolve("speed_moe_top_k", None, 2) or 2),
@@ -195,6 +196,10 @@ def load_wor_model(
             win_aux=str(_resolve("win_aux", None, "") or ""),
             win_aux_weight=float(_resolve("win_aux_weight", None, 0.5) or 0.5),
             privileged_boxes=int(_resolve("privileged_boxes", None, 0) or 0),
+            object_tokens=int(_resolve("object_tokens", None, 0) or 0),
+            object_det_cfg=_resolve("object_det_cfg", None, None),
+            object_max_range=float(_resolve("object_max_range", None, 30.0) or 30.0),
+            object_threshold=float(_resolve("object_threshold", None, 0.5) or 0.5),
             full_adapter=bool(_resolve("full_adapter", None, False)),
             full_aux_weight=float(_resolve("full_aux_weight", None, 0.0) or 0.0),
             crop_bottom_frac=resolved_crop,
@@ -259,6 +264,12 @@ def load_wor_model(
         if qk_bad:
             raise RuntimeError(f"QK-norm mismatch between {checkpoint_path} and the rebuilt model ({len(qk_bad)} keys, e.g. {qk_bad[0]}): "
                                f"the checkpoint config's qk_norm does not match its weights.")
+        # 2026-11-19 R1: the detector and its PCA basis live in the checkpoint; without them the live tokens would come from a random detector.
+        if int(getattr(model, "object_tokens", 0) or 0):
+            obj_missing = [k for k in missing if k.startswith(("obj_det.", "obj_proj.", "obj_pca_", "obj_ready"))]
+            if obj_missing or float(model.obj_ready) < 0.5:
+                raise RuntimeError(f"{checkpoint_path}: object_tokens checkpoint without its detector / PCA basis "
+                                   f"({len(obj_missing)} obj_* tensors missing, obj_ready {float(model.obj_ready):g})")
         # strict=False turns an architecture mismatch into a partial load that runs
         # and produces plausible-looking numbers. Name the offending keys - a short
         # list is nearly always a real mismatch worth acting on, not noise.

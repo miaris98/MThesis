@@ -90,11 +90,40 @@ def test_unreadable_result_counts_as_nothing_driven(tmp_path):
     assert lane_plan.plan("L", "2050", str(tmp_path)) == ("Ld1", [2050])
 
 
+ROUTES_L3 = "1790,1852,2084,2127,2164,2273,2390,2509,2554,2668,2802,2903,3048,3086,3100,3189,3364,3410,3472,3520,3572,3676"
+
+
+def test_in_route_crash_names_the_route_from_the_attempt_log(tmp_path):
+    """2026-11-18, ladder_t_vis_L3: every attempt reran 3472 and 3520 and crashed in 3520 ('Simulation crashed' writes a record,
+    so progress is 20 = the index of 3572). The old rule excluded 3572, a healthy route."""
+    log = tmp_path / "L3_x_attempt2.log"
+    log.write_text("\x1b[1m========= Preparing RouteScenario_3472 (repetition 0) =========\x1b[0m\n> Loading the world\n"
+                   "\x1b[1m========= Preparing RouteScenario_3520 (repetition 0) =========\x1b[0m\n"
+                   "RuntimeError: trying to operate on a destroyed actor\n20 crash, [20/55], please restart\n")
+    assert lane_plan.split(ROUTES_L3, 20) == ("3572", "3676")                       # the old answer
+    assert lane_plan.split(ROUTES_L3, 20, str(log)) == ("3520", "3572,3676")
+
+
+def test_load_crash_and_unusable_logs_fall_back_to_progress(tmp_path):
+    log = tmp_path / "a.log"
+    log.write_text("Preparing RouteScenario_3572 (repetition 0)\n> Loading the world\nSignal 11\n")   # segfault while loading
+    assert lane_plan.split(ROUTES_L3, 20, str(log)) == ("3572", "3676")
+    log.write_text("no route line\n")
+    assert lane_plan.split(ROUTES_L3, 20, str(log)) == ("3572", "3676")
+    log.write_text("Preparing RouteScenario_99999\n")                                  # not on this list
+    assert lane_plan.split(ROUTES_L3, 20, str(log)) == ("3572", "3676")
+    assert lane_plan.split(ROUTES_L3, 20, str(tmp_path / "missing.log")) == ("3572", "3676")
+
+
 def test_cli_is_callable_the_way_queue_A9c_calls_it(tmp_path):
     py = [sys.executable, str(ROOT / "scripts" / "eval" / "lane_plan.py")]
     out = subprocess.run(py + ["plan", "L", "3457,2050", str(tmp_path)], capture_output=True, text=True, check=True).stdout
     assert out.split() == ["L", "2050,3457"]
     out = subprocess.run(py + ["split", "3457,2050", "0"], capture_output=True, text=True, check=True).stdout
+    assert out.split() == ["2050", "3457"]
+    log = tmp_path / "x_attempt1.log"
+    log.write_text("Preparing RouteScenario_2050 (repetition 0)\nSimulation crashed\n")
+    out = subprocess.run(py + ["split", "3457,2050", "1", str(log)], capture_output=True, text=True, check=True).stdout
     assert out.split() == ["2050", "3457"]
     assert subprocess.run(py + ["bogus"], capture_output=True, text=True).returncode == 2
 

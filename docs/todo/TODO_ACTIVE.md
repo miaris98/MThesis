@@ -17,6 +17,55 @@ The status block below is the only snapshot in this file: replace it, don't appe
 
 ---
 
+## A85. Memorization ladder: do the experts help once memorization is reduced? - **Stage 1 done 2026-11-21: no** (regularization cuts memorization 3.1x -> 1.8x with held-out -3%; the experts help +2.5% only WITHOUT it and -1.5..-1.8% with it; gate fails on 3; stage 2 as designed not justified; stage 1, user, 2026-11-20: "lets design a test that would fit the experts more lets reduce the memorization")
+
+Training-only feature noise + token dropout at four strengths, each with and without w4's experts, on r0ftf's recipe; new clean-train
+readout (held-out / clean-train ADE = memorization ratio, 3x today). Gate to stage 2 (closed loop, 2 seeds, brake controller): held-out
+ADE within 0.5% of L0, ratio <= 2, experts >= +1% held-out. Plan and results: `docs/ops/2026-11-21_memorization_ladder.md`.
+
+## A86. TF++ camera-only baseline on our sensors and resolution (TF++'s AIM variant) - **Next, code in progress 2026-11-21** (user, 2026-11-21: "Lets go with A but lets also make sure we use the same sensors and resolution")
+
+**Why.** Every TF++ number so far is the released checkpoint: one camera + LiDAR, its own data, its controller, its encoder trained.
+That cannot show that our policy is better or novel. **What.** TF++'s own code with `backbone = 'aim'` (camera only): the PDM-Lite front
+camera only (LiDAR removed from the agent's sensors), the full 1024x512 frame resized to 288x768 with no crop (our resize), TF++'s image
+encoder frozen (the same weights as ours), our exact frame list (leak audit, held-out split, recovery frames; TF++'s 50% shifted-view rule
+kept, colour augmentation off as in ours). TF++ keeps its decoder (reads the full 9x24 map; ours pools to 4x4), outputs (path + target-speed
+class), losses, optimizer and epochs, target-point handling and controller. Training reads a full-map fp16 cache (~316 GB; our 4x4 tokens
+are its average-pool). Driven on the 220 routes on one box next to our best model (brake controller). Checks first: encoder parity with our
+cache, label parity with TF++'s loader, the saved model loads in TF++'s agent. Cost: training box ~4 h (~$3-4, >= 700 GB disk) + driving box
+~4-5 h (~$4).
+
+## A87. TF++'s policy components inside our network - **Next, after A86** (user, 2026-11-21: "As next todo we should test these with our policy network")
+
+Swap each TF++ policy choice into our network, one arm per change, ranked by what A86 shows (if TF++ camera-only beats ours, these
+locate where). What is already known:
+
+| TF++ component | In our network so far | What is left |
+|---|---|---|
+| Reads the full 9x24 map (no 4x4 pooling) | `sp_full216` (PCA-256 per cell, 216 tokens): +8.1% held-out after 15 epochs, still improving; attention pooling +21%; TF++-style query decoder over the map helped only on SimLingo's map (11-07 / 11-09). Offline only, never driven | full 1512 channels (no PCA) through TF++'s decoder readout, 30 epochs, driven |
+| Outputs a path + target-speed class | A15 path head + cascade: at E15's level or below on 103 lead/obstacle routes (D2, 10-06, pid controller) | path-following steering under the brake controller; driven on 220 |
+| Losses (L1 on 10 path checkpoints, target-speed CE; class weights and label smoothing both off by default) | our speed head already uses TF++'s 8 bins (two-hot CE, weight 0.2) | nothing beyond the path output |
+| Optimizer / epochs (AdamW 3e-4, weight decay 0.01, cosine schedule, 31 epochs) | AdamW 3e-4, weight decay 1e-4, warmup + cosine, 30 epochs | weight decay 0.01 (it would also shrink zero-init heads such as the experts) |
+| One target point (the next route point 7.5-50 m ahead, TF++'s RoutePlanner) + command | far target point only: +12-25% held-out (11-09) | TF++'s target point next to our 4 route points (training: PDM-Lite's logged `target_point`; driving: the same planner rule) |
+
+Arms (2026-11-21, user: "utilize the whole pool and the other things make sure we evaluate as well"), each one change from the r0ftf
+recipe, one seed (a screen; a second seed before any claim), all driven on the 220 routes with the brake controller next to the control:
+`fm` full 9x24 map at 1512 channels (216 tokens; shares A86's full-map cache), `path` path head + `WOR_PATH_STEER=1`, `wd` weight decay
+0.01, `tp` + TF++ target point.
+
+**Trained 2026-11-21 (box 61770091, after the A85 ladder, mem_L0 = the same-box control; `E:\MThesis_EXP\live_20261121_a87\`), offline,
+epochs 26-30 means:** control held-out 0.2928; **`wd` 0.2781 (-5.0%, better in 10 of 10 epochs)**; `path` 0.2827 (-3.5%, 7 of 10; lateral
+0.0327 vs 0.0344). Obstacle frames (epoch 30): swerve sideways error 0.062 (both) vs 0.068 control; brake-onset speed error 1.50 / 1.56
+vs 1.43 (slightly worse). One seed each; held-out noise ~1.8% per epoch.
+
+**Closed loop, 80-route stratified screen, brake controller, Epic, one box (RTX 6000 Ada), vs control mem_L0 (DS 68.4, 49 vehicle hits,
+10 stalls); `E:\MThesis_EXP\live_20261121_eval\`:** `wd` 70.8, **+2.4 [-4.4, +9.1], p 0.49** (vehicle hits 39, stalls 7): not shown;
+`moe` (w4 plain) 69.0, +0.6 [-5.5, +6.7], p 0.85: no effect (offline +2.5% did not carry over, as on 11-15 / 11-20);
+**`path` (path head + WOR_PATH_STEER=1) 48.0, -20.5 [-28.0, -13.0], p < 0.001**, vehicle hits 107 vs 48: path steering is harmful, drop it.
+Next: `wd` on the other 140 routes (or a second seed); the round-2 arms (`fm`, `tp`, `moelat`, A86) are training on box 61804077 (I/O-bound:
+the 342 GB 9x24 caches do not fit in RAM; TF++ camera-only ~25 min/epoch).
+| Controller (brake rule, PDM lateral) | 11-20: brake +3.0 DS (now the default); PDM lateral neutral; PDM longitudinal -3.9 | nothing |
+
 ## A84. Imitate the expert's reasons, re-balance rare frames, and a "would we crash" classifier - **Code ready 2026-11-16, box run pending** (user, 2026-11-16: "we should fix all of that ... we could also try to train a small classifier that would predict if we are going to crash")
 
 **Why.** w4 vs E15 (220 Epic routes, 2026-11-16): flat overall (+0.6), +11.4 on the 50 obstacle routes, but more vehicle hits per km on routes both finished (5.3 vs 4.8) and lost yields: ParkingExit 0 -> 6 hits (92 -> 25 DS), ControlLoss 0 -> 5, ParkingCutIn 1 -> 5, MergerIntoSlowTrafficV2 4 -> 8. The fine-tune recipe (E15 e15 -> e30) traded yielding for passing. PDM-Lite (the expert) scores 97.0 DS / 92.3% clean routes; our clean-route share is 39%. Behaviour cloning copies the expert's poses and target speed, never why it slowed down.
@@ -2101,3 +2150,29 @@ seeds at 100k: do it only after B4's baseline curves and B15.
 - The HF token was put in RAM (`/dev/shm/hf_token`) on boxes U and V on 2026-09-27; both are destroyed.
 - Vast containers: check `pids.max` / `cpu.max` (cgroup v2) or `cpu/cpu.cfs_quota_us` (v1) before sizing
   Ray/CARLA parallelism; `cpu_count()` reports every host CPU (S-086).
+
+## A87 round 2 offline result (2026-11-21, box 61804077, archive E:\MThesis_EXP\live_20261121_tfpp)
+Epochs 26-30 means, held-out ADE vs control mem_L0 (0.2928 m, ratio 3.13); paired over epochs 21-30:
+- a87_tp (TF++ target point + next point in route input): 0.2760 m, **-5.7%**, ratio 2.81, better in 10/10 epochs (-4.7% +-2.4). Only arm with a clear offline gain; not yet driven.
+- a87_fm (full 9x24 map): 0.2919 m, -0.3%, 3/10 epochs better. No gain.
+- a87_moelat (lateral-only experts): 0.2923 m, -0.2%, 7/10. No gain; ratio 3.00.
+- A86 TF++ camera-only: stopped at epoch 3 of 31 (disk-bound): held-out path L1 0.304 m, last point 0.360 m, speed class acc 0.866. Not comparable to our ADE yet; needs retrain to epoch 15 (cycle end) + driving.
+Next (needs credit, ~$6 top-up): drive a87_tp on the 80-route screen; A86 retrain+drive; lateral experts on obstacle routes. Box destroyed 21:10 Athens after sha256-verified backup.
+
+## A86 / A87 closed-loop results (2026-11-22, eval box 61908338, archive E:\MThesis_EXP\live_20261122_eval, sha256 verified; destroyed)
+Brake controller, CARLA Epic, paired per route, 95% CI, sign-flip p (20k).
+- **a87_tp (TF++ target points), 80 routes:** 64.77 vs control s21_ctrl 68.41 (other box, host caveat): **-3.65 [-10.2, +2.9], p 0.28**. Vehicle hits 50 vs 49, stalls 13 vs 10, completed 67 vs 70. Offline held-out -5.7% did not carry over to driving.
+- **Obstacle routes (50), control s22o_ctrl = 50.46 (same box):**
+  - a87_moelat (lateral-only experts): 51.32, **+0.86 [-5.8, +7.5], p 0.80**; vehicle hits 41 vs 40.
+  - a87_moe / mem_L0w (plain experts, w4): 56.49, **+6.03 [-0.9, +13.0], p 0.089**; vehicle hits 30 vs 40, stalls 14 vs 15. Largest effect so far on obstacle routes, not significant; same direction as the 11-12 A81 result (fewer vehicle hits).
+- Read: no arm clears significance on the 80 routes; the obstacle experts gain is the one to test on a second route set / seed before any claim (the 11-15 220-route result was +3.2 n.s.).
+- **A86 TF++ camera-only (offline only, not driven):** trained to epoch 15 (chain TFPP_DONE 07:00 UTC). Held-out path L1 0.304 m (ep 3) -> 0.279 (ep 5) -> 0.253 (ep 9) -> 0.185 (ep 12) -> 0.169 m (ep 15); speed-class acc 0.866 -> 0.862. Training path loss fell faster (0.18 -> 0.079), so the gap widened but held-out kept improving. Archive E:\MThesis_EXP\live_20261122_a86 (sha256 verified).
+- Next (not rented, user to decide): closed-loop drive of TF++ camera-only (TFPP_ENV=1, EVAL_AGENT=scripts/eval/tfpp_cam_agent.py), 80 routes, TF++'s own controller, ~$1.5.
+
+## TF++ camera-only closed loop (2026-11-22, box 61931595, archive E:\MThesis_EXP\live_20261122_tfpp_drive, 4 result JSONs, sha256 verified; destroyed)
+A86 epoch 15 (our sensor, resolution, frozen encoder, our frames), TF++'s own agent and controller (not the brake rule), CARLA Epic, 80 stratified routes (ids80).
+- **TF++ camera-only: 65.47 mean DS** (completed 60, vehicle hits 36, stalls 20).
+- vs s21_ctrl (our 68.4, other box, brake controller): **-2.95 [-11.5, +5.6], p 0.50.** Not different. Vehicle hits 36 vs 49 (fewer), TickRuntime stalls 20 vs 10 (more: -8.5 DS [-14.8, -2.2] from stalls).
+- vs a87_tp (our target-point arm, 64.77): **+0.70 [-8.2, +9.6], p 0.88.** Same DS.
+- Read: TF++'s camera-only policy drives about as well as ours (no significant difference either way), with fewer collisions and more stalls. The controller and host differ from the control, so this is not a clean policy comparison; the same-controller comparison would need the brake rule on TF++'s policy.
+- Offline: TF++'s held-out path error (0.169 m) was not a predictor of DS here either.

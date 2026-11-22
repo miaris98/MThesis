@@ -92,7 +92,8 @@ eval_job() {  # label ckpt routes
     na=$(grep -a -c "launch attempt=" "$GUARDIAN_LOGS/${label}_x.log" 2>/dev/null)
     if [ "${na:-0}" -ge $CRASH_ATTEMPTS ] && [ -n "$p3" ] && [ "$(wc -l <<<"$p3")" = 1 ]; then
       p=${p3#progress=}
-      read -r X rest < <("$PYTHON3" "$LP" split "$routes" "$p")
+      alog=$(ls -t "$GUARDIAN_LOGS/${label}_x_attempt"*.log 2>/dev/null | head -1)   # names the route it crashed on (2026-11-18 off-by-one)
+      read -r X rest < <("$PYTHON3" "$LP" split "$routes" "$p" ${alog:+"$alog"})
       [ -n "$X" ] || continue
       kill_tree $(pgrep -f "b2d_guardian.sh ${label}_x ")
       clear_carla_ports $PORT
@@ -121,7 +122,17 @@ for job in "$@"; do
       ( export WOR_SPEED_DECODE=$dec; eval_job $lab $C/$ck "$rl" ) ;;
     CKE:*) spec=${job#*:}; lab=${spec%%:*}; rest=${spec#*:}; ck=${rest%%:*}; rest=${rest#*:}
       rl=${rest%%:*}; envs=${rest#*:}; [ "$rl" = R19 ] && rl=$R19   # CKE:<label>:<ckpt>:<routes|R19>:<K=V,K=V,...> (A50 / A57 / A52 / A44 flags: WOR_CREEP_CLAMP=1,WOR_CONTACT_REFLEX=1,
-      ( IFS=, read -ra kv <<<"$envs"; for e in "${kv[@]}"; do export "$e"; done; eval_job $lab $C/$ck "$rl" ) ;;   # WOR_NEWSVENDOR=q0=0.3;T=8 uses ';' as its separator, WOR_SPEED_SCALE=0.9, B2D_CLIPS_DIR=/workspace/clips)
+      ( IFS=, read -ra kv <<<"$envs"; for e in "${kv[@]}"; do export "$e"; done   # WOR_NEWSVENDOR=q0=0.3;T=8 uses ';' as its separator, WOR_SPEED_SCALE=0.9, B2D_CLIPS_DIR=/workspace/clips)
+        # 2026-11-20: ENV_FROM=<file> waits until the box chain writes that file (a checkpoint finished training, the controller screen
+        # picked its winner), then exports its K=V lines; LANE_SKIP=1 in it skips the job (training failed, no winner worth driving)
+        if [ -n "${ENV_FROM:-}" ]; then
+          [ -f "$ENV_FROM" ] || echo "$(date) $lab waits for $ENV_FROM"
+          until [ -f "$ENV_FROM" ]; do sleep ${ENV_FROM_POLL_S:-30}; done
+          while IFS= read -r line || [ -n "$line" ]; do [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] && export "$line"; done < "$ENV_FROM"
+          [ "${LANE_SKIP:-0}" = 1 ] && { echo "$(date) skip $lab (LANE_SKIP=1 in $ENV_FROM)"; exit 0; }
+          echo "$(date) $lab: $(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FROM" | tr '\n' ' ')from $ENV_FROM"
+        fi
+        eval_job $lab $C/$ck "$rl" ) ;;
     WORL:*) spec=${job#*:}
       ( export EVAL_AGENT=$MTHESIS_ROOT/scripts/eval/wor_official_b2d_agent.py EVAL_AGENT_CONFIG=$WOR_CFG PCLA_ROOT=$PCLA_ROOT ALLOW_NO_FROZEN_BACKBONE=1
         eval_job a9_WOR_${spec%%:*} $WOR_CFG "${spec#*:}" ) ;;

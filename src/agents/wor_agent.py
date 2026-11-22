@@ -183,6 +183,12 @@ class WorldOnRailsAgent:
         # to build the same shape. Left unadopted, every eval path used its own default of 4
         # against a 20-point checkpoint.
         self.route_points = int(cfg.get("route_points", getattr(self, "route_points", 4)))
+        # 2026-11-21 A87: dense = route_points near route points; dense_tp = route_points - 2 of them + TF++'s two target points. The
+        # Bench2Drive adapter builds the layout from WOR_ROUTE_MODE and refuses a mismatch (a dense_tp model fed 6 near points runs silently).
+        self.route_mode = str(cfg.get("route_mode") or "dense")
+        # 2026-11-18: which objects a privileged teacher was trained on ('' all, '_vis' camera image only, '_visns' also no speed).
+        # The closed-loop tokens must use the same selection; absent in run_configs before 2026-11-08 = ''.
+        self.privileged_variant = str(cfg.get("privileged_variant") or "")
         self.fuse_cache = str(cfg.get("fuse_cache") or "")
         self.fuse_pca = int(cfg.get("fuse_pca") or 0) if self.fuse_cache else 0
         print(f"--> From run_config.json: backbone={self.backbone_name}, "
@@ -300,6 +306,13 @@ class WorldOnRailsAgent:
 
         # 6. Neural Network Forward Inference & PID Control
         extra = {"vision_features": self._fused_features(rgb_img, raw_img)} if self._fuse is not None else {}
+        if int(getattr(self.net, "privileged_boxes", 0) or 0):
+            # 2026-11-17 ceiling diagnostic: the privileged teacher reads (M, BOX_FEATS) object tokens instead of the camera. The
+            # Bench2Drive wrapper builds them from the simulator (src/agents/privileged_boxes.py); never an RGB-only thesis agent.
+            tok = input_data.get("privileged_tokens")
+            if tok is None:
+                raise RuntimeError("privileged teacher checkpoint (privileged_boxes > 0): run_step needs input_data['privileged_tokens']")
+            extra = {"vision_features": torch.as_tensor(np.asarray(tok, dtype=np.float32)).unsqueeze(0)}
         steer, throttle, brake = self.net.act(
             rgb=rgb_img,
             speed=speed_mps,

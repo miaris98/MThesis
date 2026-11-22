@@ -171,6 +171,7 @@ def main():
     p.add_argument("--route_key", default="route", choices=["route", "route_original"])
     p.add_argument("--use_augmented_camera", type=int, default=0)
     p.add_argument("--grid", default="4", help="token grid of the head, 'N' or 'HxW' (= train_wor.py --vision_grid)")
+    p.add_argument("--extra_grid", default="", help="2026-11-21: also write a second complete cache at this grid (e.g. 4) from the SAME float32 encoder output, own prefix / index / done flags (one encoder pass gives the 9x24 map and the exact 4x4 tokens)")
     p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--num_workers", type=int, default=16)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -276,6 +277,22 @@ def main():
     init_cache(prefix, keys, int(encoder.out_channels), (gh, gw), meta)  # idempotent: verifies the layout is the one this shard indexed
     mm = np.memmap(fp, dtype=np.float16, mode="r+", shape=(len(keys), int(encoder.out_channels), gh, gw))
     done = np.memmap(dp, dtype=np.uint8, mode="r+", shape=(len(keys),))
+    mm2 = done2 = None
+    if a.extra_grid:   # 2026-11-21: the second grid, built exactly like the first (layout lock, idempotent init, shard-safe rows)
+        eh, ew = _size(a.extra_grid) if "x" in a.extra_grid.lower() else (int(a.extra_grid), int(a.extra_grid))
+        assert (eh, ew) != (gh, gw), "--extra_grid must differ from --grid"
+        prefix2 = prefix.replace(f"_g{gh}x{gw}", f"_g{eh}x{ew}")
+        jp2, fp2, dp2 = cache_files(prefix2)
+        try:
+            os.close(os.open(prefix2 + ".lock", os.O_CREAT | os.O_EXCL))
+            init_cache(prefix2, keys, int(encoder.out_channels), (eh, ew), meta)
+        except FileExistsError:
+            while not os.path.exists(jp2):
+                time.sleep(2)
+        init_cache(prefix2, keys, int(encoder.out_channels), (eh, ew), meta)
+        mm2 = np.memmap(fp2, dtype=np.float16, mode="r+", shape=(len(keys), int(encoder.out_channels), eh, ew))
+        done2 = np.memmap(dp2, dtype=np.uint8, mode="r+", shape=(len(keys),))
+        print(f"--> extra grid {eh}x{ew} from the same encoder pass -> {prefix2}", flush=True)
     C = int(encoder.out_channels)
     N = len(keys)
 
@@ -317,7 +334,8 @@ def main():
         lm, lv = _mm(lp, (N, 2, 4, 4)), _mm(vp, (N,), np.uint8)
         print(f"--> box labels -> {lp}", flush=True)
     use_amp = a.amp and a.device.startswith("cuda") and torch.cuda.is_bf16_supported(including_emulation=False)
-    todo = [i for i in range(len(keys)) if i % a.num_shards == a.shard and not done[i] and (val_keys is None or keys[i] in val_keys)]
+    todo = [i for i in range(len(keys)) if i % a.num_shards == a.shard and (not done[i] or (done2 is not None and not done2[i]))
+            and (val_keys is None or keys[i] in val_keys)]
     if a.limit_frames:
         todo = todo[:a.limit_frames]
     pm = pca_mean = pca_basis = None
@@ -387,16 +405,18 @@ def main():
                 lv[rn] = item[4].numpy().astype(np.uint8)
             if pm is not None:
                 pm[rn] = torch.einsum("bchw,kc->bkhw", feats.float() - pca_mean.view(1, -1, 1, 1), pca_basis).half().cpu().numpy()
+            if mm2 is not None:   # before the main grid flags the rows done
+                pool_and_store(feats, rn, mm2, done2, (eh, ew))
             pool_and_store(feats, rn, mm, done, (gh, gw))
             n += len(rows)
             if b % 20 == 19:
-                for m_ in (mm, done, wm, fwm, lm, lv, pm, swm, dsm, *side.values()):
+                for m_ in (mm, done, mm2, done2, wm, fwm, lm, lv, pm, swm, dsm, *side.values()):
                     if m_ is not None:
                         m_.flush()
             if time.time() - last > 30:
                 last = time.time()
                 print(f"--> {n}/{len(todo)} ({n / (last - t0):.0f} frames/s, ~{(len(todo) - n) / max(n / (last - t0), 1e-6) / 60:.1f} min left)", flush=True)
-    for m_ in (mm, done, wm, fwm, lm, lv, pm, swm, dsm, *side.values()):
+    for m_ in (mm, done, mm2, done2, wm, fwm, lm, lv, pm, swm, dsm, *side.values()):
         if m_ is not None:
             m_.flush()
     if a.window_labels and K:

@@ -20,6 +20,7 @@ from torch.optim.lr_scheduler import LambdaLR
 
 from src.models.world_on_rails.wor_policy import WorldOnRailsPolicy
 from src.training.wor_dataset import SCENARIO_CLASSES, create_wor_train_val_dataloaders
+from src.training.wor_dataloaders import make_train_eval_loader
 from src.training.wor_eval import run_validation, to_device_batch_with_features, waypoint_losses
 from src.models.world_on_rails.aux_heads import target_speed_loss
 from src.models.world_on_rails.qwen_wor_policy import route_label_loss   # TODO A83: scenario-label loss on the waypoint router
@@ -97,8 +98,18 @@ class WorldOnRailsTrainer:
         # backs off), so their *count* is the useful signal, not their magnitude.
         "nonfinite_grad_batches", "clipped_grad_batches", "grad_clip", "seed",
         "is_best", "save_sec",
-        "gpu_mem_used_mb", "gpu_mem_pct", "sys_cpu_pct", "sys_ram_used_gb"
+        "gpu_mem_used_mb", "gpu_mem_pct", "sys_cpu_pct", "sys_ram_used_gb",
+        # 2026-11-21 memorization readout (--train_eval_frames): fixed training frames scored like the held-out set (eval mode, main
+        # camera, no noise / dropout). Blank when off. val_wp_ade_m / train_clean_wp_ade_m is the memorization ratio.
+        "train_clean_loss", "train_clean_wp_ade_m", "train_clean_wp_fde_m",
+        "train_clean_wp_lateral_error_m", "train_clean_wp_longitudinal_error_m",
+        # 2026-11-21: the waypoint experts' own numbers, never logged before (blank without experts): balance loss, largest expert share,
+        # load entropy (1 = even), mean top-1 router probability, mean size of the correction along (x) and across (y) the path
+        "moe_aux", "moe_load_max", "moe_load_entropy", "moe_gate_conf", "moe_delta_x", "moe_delta_y"
     ]
+    MOE_KEYS = ("moe_aux", "moe_load_max", "moe_load_entropy", "moe_gate_conf", "moe_delta_x", "moe_delta_y")
+    #: run_validation keys copied to the train_clean_* columns
+    TRAIN_CLEAN_KEYS = ("loss", "wp_ade_m", "wp_fde_m", "wp_lateral_error_m", "wp_longitudinal_error_m")
 
     def __init__(
         self,
@@ -129,6 +140,7 @@ class WorldOnRailsTrainer:
         use_augmented_camera: bool = False,
         color_aug_prob: float = 0.0,
         val_every: int = 1,
+        train_eval_frames: int = 0,   # 2026-11-21: fixed training frames scored at every validation (train_clean_* columns; 0 = off)
         max_batches: int = 0,
         target_speed_loss_weight: float = 0.0,
         speed_loss_kwargs: Optional[dict] = None,
@@ -265,6 +277,8 @@ class WorldOnRailsTrainer:
             "moe_experts": getattr(model, "moe_experts", None),
             "moe_hidden": getattr(model, "moe_hidden", None),
             "moe_top_k": getattr(model, "moe_top_k", None),
+            "moe_lateral_only": bool(getattr(model, "moe_lateral_only", False)),
+            "route_mode": os.environ.get("WOR_ROUTE_MODE", "dense") or "dense",   # 2026-11-21 A87: dense_tp = near points + TF++'s target points   # 2026-11-21 (the loader rebuilds the mask)
             "speed_moe_experts": getattr(model, "speed_moe_experts", None),   # TODO A81: adds the speed_moe tensors
             "speed_moe_hidden": getattr(model, "speed_moe_hidden", None),
             "speed_moe_top_k": getattr(model, "speed_moe_top_k", None),
@@ -283,6 +297,10 @@ class WorldOnRailsTrainer:
             "win_aux": getattr(model, "win_aux", None),
             "win_aux_weight": getattr(model, "win_aux_weight", None),
             "privileged_boxes": getattr(model, "privileged_boxes", None),
+            "object_tokens": getattr(model, "object_tokens", 0),
+            "object_det_cfg": getattr(model, "object_det_cfg", None) if getattr(model, "object_tokens", 0) else None,
+            "object_max_range": getattr(model, "object_max_range", None),
+            "object_threshold": getattr(model, "object_threshold", None),
             "full_adapter": getattr(model, "full_adapter", None),
             "full_aux_weight": getattr(model, "full_aux_weight", None),
             "distill_weight": float(os.environ.get("WOR_DISTILL_WEIGHT", "0") or 0),
@@ -310,7 +328,12 @@ class WorldOnRailsTrainer:
             "vision_grid": getattr(model, "vision_grid", ""),
             "pool_vision": getattr(model, "pool_vision", ""),
             "use_augmented_camera": use_augmented_camera,
-            "color_aug_prob": color_aug_prob
+            "color_aug_prob": color_aug_prob,
+            # 2026-11-21 memorization test: training-only regularizers (policy attributes) and the clean training readout
+            "feature_noise": float(getattr(model, "feature_noise", 0.0)),
+            "token_drop": float(getattr(model, "token_drop", 0.0)),
+            "train_eval_frames": int(train_eval_frames),
+            "weight_decay": float(weight_decay)   # 2026-11-21 (A87 wd arm)
         })
         if offline_rl is not None:
             self.logger.log_params({f"offline_rl_{k}": v for k, v in dataclasses.asdict(offline_rl).items()})
@@ -352,6 +375,15 @@ class WorldOnRailsTrainer:
             use_augmented_camera=use_augmented_camera,
             color_aug_prob=color_aug_prob
         )
+        # 2026-11-21 memorization readout: the same training frames for every arm of a split (picked with split_seed, not the run seed)
+        self.train_eval_loader = None
+        if int(train_eval_frames) > 0:
+            if self.val_loader is None:
+                raise ValueError("train_eval_frames > 0 needs a held-out set to compare against (val_split > 0)")
+            self.train_eval_loader = make_train_eval_loader(self.train_loader, int(train_eval_frames), split_seed,
+                                                            batch_size, min(int(num_workers), 2))
+            if self.train_eval_loader is None:
+                raise ValueError("train_eval_frames > 0 but no main-camera training frame could be sampled from the route split")
         if self.moe_route_label_weight > 0:   # (review finding) a run with no labelled frame would train the router on nothing, silently
             _base = getattr(self.train_loader.dataset, "dataset", self.train_loader.dataset)
             _n_lab = sum(1 for s in (getattr(_base, "samples", None) or []) if isinstance(s, dict) and int(s.get("scenario", -1)) >= 0)
@@ -415,6 +447,7 @@ class WorldOnRailsTrainer:
         q_loss_accum = 0.0
         aux_accum = {"target_speed": 0.0, "path": 0.0, "q_critic": 0.0, "rl_v": 0.0, "rl_q": 0.0, "rl_cql": 0.0, "reason": 0.0}      # TODO A15 / A39 / A71 / A84: the auxiliary losses were never in the epoch metrics (MLflow)
         split_sum, split_batches = 0.0, 0   # TODO A81: mean routing split (standing vs moving) over batches that hold both groups
+        moe_acc, moe_batches = {}, 0        # 2026-11-21: the waypoint experts' per-batch statistics (MoEWaypointDelta.last_stats)
         route_ce_sum, route_ce_batches = 0.0, 0   # TODO A83: mean scenario-label cross-entropy of the waypoint router
         wp_loss_accum = 0.0
         ade_accum = 0.0
@@ -511,6 +544,11 @@ class WorldOnRailsTrainer:
                 _split = float(out["speed_moe_split"])
                 if math.isfinite(_split):
                     split_sum, split_batches = split_sum + _split, split_batches + 1
+            _ms = getattr(getattr(getattr(self.model, "trunk", None), "moe", None), "last_stats", None)
+            if _ms:   # 2026-11-21
+                for _k, _v in _ms.items():
+                    moe_acc[_k] = moe_acc.get(_k, 0.0) + float(_v)
+                moe_batches += 1
             if "cell_logits" in out and "cell_labels" in batch:   # 2026-11-07: per-cell box targets on the trunk's vision tokens (training only)
                 lab = batch["cell_labels"].to(self.device).float().flatten(2).transpose(1, 2)        # (B, 16, 2): occupancy, distance / 40 m
                 valid = batch["cell_valid"].to(self.device).float()
@@ -669,6 +707,7 @@ class WorldOnRailsTrainer:
             "rl_cql_loss": aux_accum["rl_cql"] / max(1, num_batches),
             "speed_moe_split": (split_sum / split_batches) if split_batches else float("nan"),   # TODO A81: 0 = experts ignore standing vs moving
             "route_label_ce": (route_ce_sum / route_ce_batches) if route_ce_batches else float("nan"),   # TODO A83
+            **{k: moe_acc[k] / moe_batches for k in self.MOE_KEYS if moe_batches and k in moe_acc},   # 2026-11-21
             "grad_norm": avg_grad_norm,
             "nonfinite_grad_batches": nonfinite_batches,
             "clipped_grad_batches": clipped_batches,
@@ -688,6 +727,18 @@ class WorldOnRailsTrainer:
             self.wp_loss_weight, self.q_loss_weight, self.lateral_loss_weight,
             max_batches=self.max_batches
         )
+
+    def validate_train_clean(self) -> Dict[str, float]:
+        """2026-11-21: the fixed training frames, scored exactly like the held-out set (run_validation: eval mode, so no noise or token
+        dropout). Only the core error columns are kept, renamed val_* -> train_clean_*. Empty dict when the readout is off."""
+        if self.train_eval_loader is None:
+            return {}
+        res = run_validation(
+            self.model, self.train_eval_loader, self.device, autocast, self.use_amp,
+            self.wp_loss_weight, self.q_loss_weight, self.lateral_loss_weight,
+            max_batches=self.max_batches
+        )
+        return {f"train_clean_{k}": res[f"val_{k}"] for k in self.TRAIN_CLEAN_KEYS if f"val_{k}" in res}
 
     def _build_scheduler(self, num_epochs: int) -> LambdaLR:
         return build_warmup_cosine_scheduler(
@@ -752,6 +803,10 @@ class WorldOnRailsTrainer:
             if self.val_loader is not None and (epoch % self.val_every == 0
                                                 or epoch == last_epoch):
                 metrics.update(self.validate())
+                metrics.update(self.validate_train_clean())   # 2026-11-21: {} unless --train_eval_frames
+                if "train_clean_wp_ade_m" in metrics and "val_wp_ade_m" in metrics and metrics["train_clean_wp_ade_m"] > 0:
+                    print(f"[memorization] epoch {epoch:03d} clean train ADE {metrics['train_clean_wp_ade_m']:.4f} m | held-out ADE "
+                          f"{metrics['val_wp_ade_m']:.4f} m | ratio {metrics['val_wp_ade_m'] / metrics['train_clean_wp_ade_m']:.2f}", flush=True)
             # `select_on` is absent from metrics on a skipped-validation epoch, which is
             # exactly when no checkpoint should be promoted to best - not a failure case.
             is_best = select_on in metrics and metrics[select_on] < best_loss
@@ -825,6 +880,7 @@ class WorldOnRailsTrainer:
                 scalar_tags += ["speed_moe_split"]
             if self.moe_route_label_weight > 0:
                 scalar_tags += ["route_label_ce"]
+            scalar_tags += [k for k in self.MOE_KEYS if k in metrics]   # 2026-11-21: the experts' numbers -> MLflow + TB
             scalar_tags += [k for k, w in (("speed_head_loss", self.target_speed_loss_weight), ("path_loss", self.path_loss_weight),
                                            ("q_critic_loss", self.q_critic_loss_weight), ("reason_loss", self.reason_loss_weight)) if w > 0]
             if self.offline_rl is not None:
@@ -833,6 +889,7 @@ class WorldOnRailsTrainer:
                                         "val_wp_lateral_error_m", "val_wp_longitudinal_error_m",
                                         "val_wp_heading_err", "val_wp_curvature_err", "val_q_critic_loss")
                             if k in metrics]
+            scalar_tags += [f"train_clean_{k}" for k in self.TRAIN_CLEAN_KEYS if f"train_clean_{k}" in metrics]   # 2026-11-21 -> MLflow + TB
             for tag in scalar_tags:
                 self.logger.add_scalar(f"wor/{tag}", metrics[tag], epoch)
             obst = {k: float(v) for k, v in metrics.items() if k.startswith(("val_obst_", "val_reason_"))}   # TODO A84: reason metrics ride along
@@ -851,6 +908,9 @@ class WorldOnRailsTrainer:
                 "val_wp_lateral_error_m", "val_wp_longitudinal_error_m",
                 "val_wp_heading_err", "val_wp_curvature_err", "val_time_sec"
             ) if k in metrics}
+            val_cols.update({k: round(metrics[k], 5) for k in self.MOE_KEYS if k in metrics})   # 2026-11-21: blank without experts
+            val_cols.update({f"train_clean_{k}": round(metrics[f"train_clean_{k}"], 5)
+                             for k in self.TRAIN_CLEAN_KEYS if f"train_clean_{k}" in metrics})   # 2026-11-21: blank when off
 
             self.csv_logger.log_step({
                 "epoch": epoch, "num_batches": metrics["num_batches"],

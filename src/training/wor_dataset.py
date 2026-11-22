@@ -169,8 +169,8 @@ class WorldOnRailsDataset(Dataset):
         # be set identically at evaluation or it becomes another 11.4 entry - the agent reads
         # the same flag off the checkpoint's run_config.json.
         self.route_overlay = route_overlay
-        if os.environ.get("WOR_ROUTE_MODE", "dense") not in ("dense", "tp"):
-            raise ValueError(f"WOR_ROUTE_MODE must be dense or tp, got {os.environ.get('WOR_ROUTE_MODE')!r}")
+        if os.environ.get("WOR_ROUTE_MODE", "dense") not in ("dense", "tp", "dense_tp"):   # dense_tp: 2026-11-21 A87 target-point arm
+            raise ValueError(f"WOR_ROUTE_MODE must be dense, tp or dense_tp, got {os.environ.get('WOR_ROUTE_MODE')!r}")
         if os.environ.get("WOR_ROUTE_MODE", "dense") == "tp" and route_overlay:   # checked here: _route_input runs inside the per-frame try/except
             raise ValueError("WOR_ROUTE_MODE=tp needs route_overlay 0: the overlay would still draw the dense route into the image")
         self.overlay_kwargs = overlay_kwargs or {}
@@ -313,8 +313,14 @@ class WorldOnRailsDataset(Dataset):
         mode = os.environ.get("WOR_ROUTE_MODE", "dense")
         if mode == "dense":
             return self._subsample_route(meas.get(self.route_key) or meas.get("route"))
+        if mode == "dense_tp":   # 2026-11-21 A87: route_points - 2 near route points, then TF++'s target point and next target point
+            dense = self._subsample_route(meas.get(self.route_key) or meas.get("route"), n=self.route_points - 2)
+            tp, tpn = meas.get("target_point"), meas.get("target_point_next")
+            tp = tp or dense[-1]
+            tpn = tpn or tp
+            return dense + [[float(tp[0]), float(tp[1])], [float(tpn[0]), float(tpn[1])]]
         if mode != "tp":
-            raise ValueError(f"WOR_ROUTE_MODE must be dense or tp, got {mode!r}")
+            raise ValueError(f"WOR_ROUTE_MODE must be dense, tp or dense_tp, got {mode!r}")
         tp, tpn = meas.get("target_point"), meas.get("target_point_next")
         if not tp:
             dense = self._subsample_route(meas.get(self.route_key) or meas.get("route"))
@@ -324,13 +330,13 @@ class WorldOnRailsDataset(Dataset):
         h = max(1, n // 2)
         return [[float(tp[0]), float(tp[1])]] * h + [[float(tpn[0]), float(tpn[1])]] * (n - h)
 
-    def _subsample_route(self, route) -> List[List[float]]:
+    def _subsample_route(self, route, n: Optional[int] = None) -> List[List[float]]:
         """Reduces the ego-frame planned route to `self.route_points` evenly spaced
         points. Routes shorten near the end of an episode, so short ones are padded
         by repeating the last point rather than dropped - a truncated route still
         carries the turn direction.
         """
-        n = self.route_points
+        n = self.route_points if n is None else int(n)
         if not route:
             return [[0.0, 0.0] for _ in range(n)]
         arr = np.asarray(route, dtype=np.float32)
@@ -535,6 +541,12 @@ class WorldOnRailsDataset(Dataset):
             arr = self._pooled.get(key)
             if self._fuse is not None:   # 2026-11-09 two-encoder arm: [primary pooled map | second encoder's PCA full map], flattened; the policy splits it
                 arr = np.concatenate([np.asarray(arr, dtype=np.float32).reshape(-1), np.asarray(self._fuse.get(key), dtype=np.float32).reshape(-1)])
+            m_obj = int(os.environ.get("WOR_OBJECT_TOKENS", "0") or 0)
+            if m_obj:   # 2026-11-19 R1: [pooled grid | M detector tokens], flattened; the policy splits it (object_tokens)
+                if self._fuse is not None or self._prev_frame:
+                    raise RuntimeError("WOR_OBJECT_TOKENS cannot be combined with the two-encoder cache or prev_frame")
+                tok = self._pooled.object_tokens(key, m_obj, os.environ.get("WOR_OBJECT_VARIANT", "_det") or "_det")
+                arr = np.concatenate([np.asarray(arr, dtype=np.float32).reshape(-1), tok.reshape(-1)])
             return arr
         cache_path = self._feature_cache_path(rgb_path)
         try:
