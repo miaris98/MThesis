@@ -133,9 +133,8 @@ def main():
     if a.use_mlflow:
         try:
             import mlflow
-            from src.config.paths import mlruns_dir
-            os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
-            mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "file:" + str(mlruns_dir())))
+            from src.config.paths import mlflow_tracking_uri
+            mlflow.set_tracking_uri(mlflow_tracking_uri())
             mlflow.set_experiment("A74_maneuver_ppo")
             mlflow.start_run(run_name=a.run_name or "_".join(os.path.normpath(a.out).replace("\\", "/").split("/")[-2:]))
             mlflow.log_params({k: str(v) for k, v in vars(a).items()})

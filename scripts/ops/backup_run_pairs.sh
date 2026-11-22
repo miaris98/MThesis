@@ -1,8 +1,9 @@
 #!/bin/bash
-# PC side (2026-10-26, generic form of backup_b100k_pairs.sh): every 30 min, copy each run's resumable pair (checkpoint_latest.pt +
+# PC side (2026-10-26, generic form of backup_b100k_pairs.sh, retired 2026-11-22): every 30 min, copy each run's resumable pair (checkpoint_latest.pt +
 # replay_latest.npz) from a box to E:, sha256-verified against a box-side snapshot (snapshot_run_pair.sh), so the copied files cannot
 # change under the transfer. Both files are pulled to .part and moved into place only when both verify.
-# usage: BOX=root@HOST PORT=N REMOTE_OUT=/workspace/b66/out DST=/e/MThesis_EXP/live_X backup_run_pairs.sh LABEL [LABEL ...]
+# usage: BOX=root@HOST PORT=N REMOTE_OUT=$RWS/b66/out DST=$EXP/live_X backup_run_pairs.sh LABEL [LABEL ...]
+RWS=${REMOTE_WORKSPACE:-/workspace}   # the boxes' workspace (the Vast layout); REMOTE_WORKSPACE overrides
 SO="-o StrictHostKeyChecking=no -o ConnectTimeout=40 -o BatchMode=yes"
 : "${BOX:?}" "${PORT:?}" "${REMOTE_OUT:?}" "${DST:?}"
 LOG=$DST/save.log
@@ -31,7 +32,7 @@ pull() {  # box path, local path: 100 MiB chunks, each retried until its length 
   rm -f $OUT.part
   return 1
 }
-ssh $SO -p $PORT $BOX "mkdir -p /workspace/bk && cat > /workspace/bk/snapshot_run_pair.sh && chmod +x /workspace/bk/snapshot_run_pair.sh" < "$SNAP_SCRIPT"
+ssh $SO -p $PORT $BOX "mkdir -p $RWS/bk && cat > $RWS/bk/snapshot_run_pair.sh && chmod +x $RWS/bk/snapshot_run_pair.sh" < "$SNAP_SCRIPT"
 while true; do
   for label in "$@"; do
     OUTDIR=$DST/$label/checkpoints
@@ -40,7 +41,7 @@ while true; do
       echo "$(date -u +%H:%M) $label no pair on the box yet" >> $LOG
       continue
     fi
-    SNAP=$(ssh $SO -p $PORT $BOX "bash /workspace/bk/snapshot_run_pair.sh $REMOTE_OUT/$label/checkpoints /workspace/bk/snap/$label" | tr -d '\r' | tail -1)
+    SNAP=$(ssh $SO -p $PORT $BOX "bash $RWS/bk/snapshot_run_pair.sh $REMOTE_OUT/$label/checkpoints $RWS/bk/snap/$label" | tr -d '\r' | tail -1)
     if [ -z "$SNAP" ] || [ "$SNAP" = "FAILED" ]; then
       echo "$(date -u +%H:%M) $label no consistent snapshot this pass" >> $LOG
       continue

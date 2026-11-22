@@ -43,21 +43,15 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+from scripts.training.build_feature_cache import _parse_img_size  # noqa: E402  ('288x768' or '256')
 from src.models.world_on_rails.wor_loader import load_wor_model
+from src.config.paths import WORKSPACE  # noqa: E402  (the box workspace, $WORKSPACE)
 import src.training.wor_dataset  # noqa: F401  (import order: wor_dataset must load before wor_dataloaders, which it imports back)
 from src.training.wor_dataloaders import create_wor_train_val_dataloaders
 from src.training.wor_eval import to_device_batch_with_features, waypoint_losses
 from src.training.wor_trainer import autocast
 
 VARIANTS = ("real", "zero", "batch_mean", "scene_shuffle", "cell_shuffle")
-
-
-def _parse_img_size(spec):
-    if "x" in spec.lower():
-        h, w = spec.lower().split("x")
-        return int(h), int(w)
-    n = int(spec)
-    return n, n
 
 
 def transform(vf, mode, gen):
@@ -85,7 +79,7 @@ def main():
     p.add_argument("--pooled_cache", type=str, required=True,
                    help="prefix of the pooled cache built with this arm's overlay setting (pooled_ov1 or pooled_ov0)")
     p.add_argument("--route_overlay", type=int, required=True, help="1 for pooled_ov1 arms, 0 for pooled_ov0")
-    p.add_argument("--data_dir", type=str, default="/workspace/dataset/wor_trajectories")
+    p.add_argument("--data_dir", type=str, default=f"{WORKSPACE}/dataset/wor_trajectories")
     p.add_argument("--backbone", type=str, default="regnety_032")
     p.add_argument("--policy_arch", type=str, default="qwen30m")
     p.add_argument("--vision_grid", type=str, default="4",

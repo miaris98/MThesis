@@ -25,13 +25,13 @@ Stdlib only, on purpose: this has to work before mlflow is installed locally.
 Examples
 --------
     # Pull metrics + telemetry (fast) and merge into the local store
-    python scripts/sync/sync_experiments.py --ssh-cmd "ssh -p 12345 root@ssh5.vast.ai"
+    python scripts/sync/sync_experiments.py --ssh-cmd "ssh -p PORT root@sshN.vast.ai"
 
     # Everything, including checkpoints, TensorBoard events and videos
     python scripts/sync/sync_experiments.py --ssh-cmd "..." --include all
 
     # Merge a snapshot pulled earlier, without touching the network
-    python scripts/sync/sync_experiments.py --merge-only "E:/MThesis_EXP/imports/ssh5-12345_20260906-1200"
+    python scripts/sync/sync_experiments.py --merge-only "$EXP/imports/sshN-PORT_20260906-1200"
 
     # Repair artifact paths after the disk changed drive letter
     python scripts/sync/sync_experiments.py --relink
@@ -476,7 +476,7 @@ def main() -> int:
         description="Sync vast.ai experiments onto the external disk and into one MLflow store.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--ssh-cmd", help="Vast.ai SSH string, e.g. 'ssh -p 12345 root@ssh5.vast.ai'")
+    parser.add_argument("--ssh-cmd", help="Vast.ai SSH string, e.g. 'ssh -p PORT root@sshN.vast.ai'")
     parser.add_argument("-p", "--port", help="SSH port (alternative to --ssh-cmd)")
     parser.add_argument("-H", "--host", help="user@host (alternative to --ssh-cmd)")
     parser.add_argument("--remote-root", default="/workspace",
@@ -542,7 +542,7 @@ def main() -> int:
         if args.ssh_cmd:
             port, user_host = parse_ssh_cmd(args.ssh_cmd)
         if not port or not user_host:
-            entered = input("Paste the vast.ai SSH command (e.g. ssh -p 12345 root@ssh5.vast.ai): ").strip()
+            entered = input("Paste the vast.ai SSH command (e.g. ssh -p PORT root@sshN.vast.ai): ").strip()
             if not entered:
                 raise SystemExit("An SSH port and host are required.")
             port, user_host = parse_ssh_cmd(entered)

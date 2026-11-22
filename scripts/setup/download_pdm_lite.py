@@ -42,6 +42,7 @@ import time
 import urllib.request
 import zipfile
 from typing import Dict, List, Tuple
+WORKSPACE = os.environ.get("WORKSPACE", "/workspace").rstrip("/")   # the box workspace (src/config/paths.py: WORKSPACE)
 
 REPO_ID = "autonomousvision/PDM_Lite_Carla_LB2"
 API_TREE = "https://huggingface.co/api/datasets/%s/tree/main/%%s?recursive=1" % REPO_ID
@@ -56,7 +57,7 @@ HUGE_TOWNS = {"Town12", "Town13"}
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--dest", default="/workspace/dataset/wor_trajectories")
+    p.add_argument("--dest", default=f"{WORKSPACE}/dataset/wor_trajectories")
     p.add_argument("--reserve-gb", type=float, default=25.0,
                    help="Free space to leave behind for checkpoints, CARLA and logs.")
     p.add_argument("--max-gb", type=float, default=None,

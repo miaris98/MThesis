@@ -3,7 +3,7 @@
 
 Run this yourself (it reads HF_TOKEN from .env): a single push each time you
 call it, or wrap it in your own loop (e.g. `while ($true) { py hf_push_phase4.py; sleep 600 }`
-in PowerShell) if you want it repeating alongside sync_phase4_pull_loop.py.
+in PowerShell) if you want it repeating alongside pull_loop.py (sync_phase4_pull_loop.py was retired 2026-11-22).
 
 Usage:
     py hf_push_phase4.py
@@ -30,7 +30,7 @@ def main() -> int:
     b2d_dir = paths.imports_dir() / TAG / "bench2drive_out"
     if not b2d_dir.is_dir():
         raise SystemExit(
-            "No bench2drive_out at %s yet - run sync_phase4_pull_loop.py "
+            "No bench2drive_out at %s yet - run pull_loop.py "
             "(or sync_experiments.py --include results --tag %s) first." % (b2d_dir, TAG)
         )
 

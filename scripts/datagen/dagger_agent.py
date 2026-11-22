@@ -37,8 +37,9 @@ import os
 import sys
 
 import numpy as np
+WORKSPACE = os.environ.get("WORKSPACE", "/workspace").rstrip("/")   # the box workspace (src/config/paths.py: WORKSPACE)
 
-MTHESIS_ROOT = os.environ.get("MTHESIS_ROOT", "/workspace/MThesis")
+MTHESIS_ROOT = os.environ.get("MTHESIS_ROOT", f"{WORKSPACE}/MThesis")
 if MTHESIS_ROOT not in sys.path:
     sys.path.insert(0, MTHESIS_ROOT)
 

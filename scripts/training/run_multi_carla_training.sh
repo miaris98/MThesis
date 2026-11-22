@@ -5,6 +5,7 @@
 # ==============================================================================
 
 # Default configuration
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
 NUM_ENVS=2
 START_PORT=2000
 TOTAL_STEPS=70000
@@ -92,10 +93,10 @@ if ! id "carlauser" &>/dev/null; then
     useradd -m -s /bin/bash carlauser 2>/dev/null || true
 fi
 usermod -aG video,render,sudo carlauser 2>/dev/null || true
-mkdir -p /home/carlauser/.config /home/carlauser/.local/share /home/carlauser/Documents /home/carlauser/Desktop /workspace/carla/CarlaUE4/Saved /tmp/runtime-carlauser
+mkdir -p /home/carlauser/.config /home/carlauser/.local/share /home/carlauser/Documents /home/carlauser/Desktop $WORKSPACE/carla/CarlaUE4/Saved /tmp/runtime-carlauser
 chmod 700 /tmp/runtime-carlauser 2>/dev/null || true
-chown -R carlauser:carlauser /home/carlauser /workspace/carla /tmp/runtime-carlauser 2>/dev/null || true
-chmod -R 777 /workspace/carla 2>/dev/null || true
+chown -R carlauser:carlauser /home/carlauser $WORKSPACE/carla /tmp/runtime-carlauser 2>/dev/null || true
+chmod -R 777 $WORKSPACE/carla 2>/dev/null || true
 
 # Ensure xdg-user-dir binary is available for Unreal Engine
 if ! command -v xdg-user-dir &>/dev/null; then
@@ -155,7 +156,7 @@ if [ "$START_FRESH" = true ]; then
     echo "🧹 [START FRESH] Requested fresh training run from scratch."
     echo "   Clearing previous checkpoints and telemetry logs..."
     echo "=============================================================="
-    rm -rf /workspace/checkpoints/* /workspace/runs/* /workspace/telemetry.csv 2>/dev/null || true
+    rm -rf $WORKSPACE/checkpoints/* $WORKSPACE/runs/* $WORKSPACE/telemetry.csv 2>/dev/null || true
     rm -rf ./runs/* ./checkpoints/* ./telemetry.csv 2>/dev/null || true
     echo "✓ Previous checkpoints and run logs cleared!"
 fi
@@ -164,7 +165,7 @@ fi
 PYTHON_BIN=""
 for p in "/venv/carla_py38/bin/python" \
          "/opt/conda/envs/carla_py38/bin/python" \
-         "/workspace/miniconda/envs/carla_py38/bin/python" \
+         "$WORKSPACE/miniconda/envs/carla_py38/bin/python" \
          "$HOME/miniconda3/envs/carla_py38/bin/python" \
          "$HOME/anaconda3/envs/carla_py38/bin/python" \
          "/root/miniconda3/envs/carla_py38/bin/python" \
@@ -181,7 +182,7 @@ if [ -z "$PYTHON_BIN" ]; then
 fi
 
 # Auto-activate carla_py38 environment if available
-for p in "/workspace/miniconda" "/opt/conda" "$HOME/miniconda3" "$HOME/anaconda3" "/root/miniconda3" "/usr/local/miniconda3"; do
+for p in "$WORKSPACE/miniconda" "/opt/conda" "$HOME/miniconda3" "$HOME/anaconda3" "/root/miniconda3" "/usr/local/miniconda3"; do
     if [ -f "$p/etc/profile.d/conda.sh" ]; then
         source "$p/etc/profile.d/conda.sh"
         conda activate carla_py38 2>/dev/null || true
@@ -248,10 +249,10 @@ else
     sleep 1
     echo "--> 📊 Launching persistent MLflow UI server on port ${MLFLOW_PORT}..."
     # MLflow >= 3.16 refuses a filesystem backend store unless this is set, and
-    # /workspace/MThesis/mlruns is exactly that. Without it the server dies on
+    # $WORKSPACE/MThesis/mlruns is exactly that. Without it the server dies on
     # startup after any mlflow upgrade. Same opt-out as ExperimentLogger.
     tmux new-session -d -s mlflow_server \
-        "MLFLOW_ALLOW_FILE_STORE=true $PYTHON_BIN -m mlflow ui --host 0.0.0.0 --port ${MLFLOW_PORT} --backend-store-uri /workspace/MThesis/mlruns > /workspace/mlflow_server.log 2>&1"
+        "MLFLOW_ALLOW_FILE_STORE=true $PYTHON_BIN -m mlflow ui --host 0.0.0.0 --port ${MLFLOW_PORT} --backend-store-uri $WORKSPACE/MThesis/mlruns > $WORKSPACE/mlflow_server.log 2>&1"
     
     # Wait until MLflow server is responding
     for i in $(seq 1 15); do
@@ -263,165 +264,8 @@ else
     echo "✓ MLflow UI server active on port ${MLFLOW_PORT}"
 fi
 
-# Function to test if a cloudflared executable is genuinely valid and working
-is_valid_cloudflared() {
-    local bin="$1"
-    [ -n "$bin" ] && [ -x "$bin" ] && "$bin" --version &>/dev/null
-}
-
-# Extract Cloudflare tunnel URL from log file
-extract_cf_url() {
-    local logfile="$1"
-    [ -f "$logfile" ] || return 1
-    local url=""
-    url=$("$PYTHON_BIN" -c "
-import re
-try:
-    with open('$logfile', 'r', encoding='utf-8', errors='ignore') as f:
-        txt = f.read()
-    m = re.search(r'https://[-a-zA-Z0-9]+\.trycloudflare\.com', txt)
-    if m:
-        print(m.group(0))
-except Exception:
-    pass
-" 2>/dev/null || true)
-    # grep fallback
-    if [ -z "$url" ]; then
-        url=$(grep -oE 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "$logfile" 2>/dev/null | head -1 || true)
-    fi
-    [ -n "$url" ] && echo "$url" && return 0
-    return 1
-}
-
-# Locate or install working cloudflared binary
-CLOUDFLARED_BIN=""
-for candidate in "$(command -v cloudflared 2>/dev/null)" "/usr/local/bin/cloudflared" "/usr/bin/cloudflared"; do
-    if is_valid_cloudflared "$candidate"; then
-        CLOUDFLARED_BIN="$candidate"
-        break
-    fi
-done
-
-if [ -z "$CLOUDFLARED_BIN" ]; then
-    echo "--> Installing cloudflared binary for public HTTPS dashboard access..."
-    rm -f /usr/local/bin/cloudflared /tmp/cloudflared*
-    # Try direct binary download first, then .deb package
-    if curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" -o /usr/local/bin/cloudflared 2>/dev/null || \
-       wget -q "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" -O /usr/local/bin/cloudflared 2>/dev/null; then
-        chmod +x /usr/local/bin/cloudflared 2>/dev/null || true
-    fi
-    if is_valid_cloudflared "/usr/local/bin/cloudflared"; then
-        CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
-    else
-        if wget -q "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -O /tmp/cloudflared.deb 2>/dev/null; then
-            dpkg -i /tmp/cloudflared.deb >/dev/null 2>&1 || true
-            rm -f /tmp/cloudflared.deb
-        fi
-        for candidate in "$(command -v cloudflared 2>/dev/null)" "/usr/local/bin/cloudflared"; do
-            if is_valid_cloudflared "$candidate"; then
-                CLOUDFLARED_BIN="$candidate"
-                break
-            fi
-        done
-    fi
-fi
-
-# --- Tunnel launch with tmux persistence, reuse + retry on 429 rate-limit ---
-CLOUDFLARE_URL=""
-
-# 1) Reuse: check if tmux 'mlflow_tunnel' session is already running with a valid URL
-if tmux has-session -t mlflow_tunnel 2>/dev/null && [ -f /tmp/mlflow_tunnel.log ]; then
-    CLOUDFLARE_URL=$(extract_cf_url /tmp/mlflow_tunnel.log) || true
-    if [ -n "$CLOUDFLARE_URL" ]; then
-        echo "✓ Reusing active Cloudflare HTTPS tunnel from tmux session 'mlflow_tunnel': $CLOUDFLARE_URL"
-    fi
-fi
-
-# Also check cached URL file from a previous successful tunnel
-if [ -z "$CLOUDFLARE_URL" ] && [ -f /tmp/mlflow_cf_url ]; then
-    CACHED_URL=$(cat /tmp/mlflow_cf_url 2>/dev/null)
-    # Verify the cached tunnel is still responding
-    if [ -n "$CACHED_URL" ] && curl -s -k --max-time 3 -I "$CACHED_URL" >/dev/null 2>&1; then
-        CLOUDFLARE_URL="$CACHED_URL"
-        echo "✓ Reusing cached Cloudflare tunnel: $CLOUDFLARE_URL"
-    fi
-fi
-
-# 2) Launch new tunnel in protected tmux session if none exists
-if [ -z "$CLOUDFLARE_URL" ] && [ -n "$CLOUDFLARED_BIN" ]; then
-    tmux kill-session -t mlflow_tunnel 2>/dev/null || true
-    pkill -9 -f "cloudflared tunnel" 2>/dev/null || true
-    sleep 1
-
-    MAX_RETRIES=3
-    RETRY_DELAYS=(5 15 30)
-    
-    for attempt_num in $(seq 1 $MAX_RETRIES); do
-        rm -f /tmp/mlflow_tunnel.log
-        echo "--> 🌐 Launching Cloudflare HTTPS tunnel in protected tmux 'mlflow_tunnel' (port ${MLFLOW_PORT}) [attempt ${attempt_num}/${MAX_RETRIES}]..."
-        tmux new-session -d -s mlflow_tunnel \
-            "$CLOUDFLARED_BIN tunnel --url http://127.0.0.1:${MLFLOW_PORT} --no-autoupdate > /tmp/mlflow_tunnel.log 2>&1"
-
-        # Wait up to 15 seconds for URL to appear in log
-        for i in $(seq 1 15); do
-            if [ -f /tmp/mlflow_tunnel.log ]; then
-                CLOUDFLARE_URL=$(extract_cf_url /tmp/mlflow_tunnel.log) || true
-                [ -n "$CLOUDFLARE_URL" ] && break 2  # break both loops
-            fi
-            if ! tmux has-session -t mlflow_tunnel 2>/dev/null; then
-                break
-            fi
-            sleep 1
-        done
-
-        # If we get here, this attempt failed — check why
-        if [ -f /tmp/mlflow_tunnel.log ] && grep -q "429\|Too Many Requests\|rate" /tmp/mlflow_tunnel.log 2>/dev/null; then
-            DELAY=${RETRY_DELAYS[$((attempt_num - 1))]}
-            echo "--> ⚠️  Cloudflare rate-limited (429). Waiting ${DELAY}s before retry..."
-            tmux kill-session -t mlflow_tunnel 2>/dev/null || true
-            pkill -9 -f "cloudflared tunnel" 2>/dev/null || true
-            sleep "$DELAY"
-        elif [ -f /tmp/mlflow_tunnel.log ] && ! tmux has-session -t mlflow_tunnel 2>/dev/null; then
-            echo "--> [Note] cloudflared exited unexpectedly:"
-            head -n 3 /tmp/mlflow_tunnel.log 2>/dev/null | sed 's/^/    /' || true
-            tmux kill-session -t mlflow_tunnel 2>/dev/null || true
-            pkill -9 -f "cloudflared tunnel" 2>/dev/null || true
-            if [ "$attempt_num" -lt "$MAX_RETRIES" ]; then
-                DELAY=${RETRY_DELAYS[$((attempt_num - 1))]}
-                echo "--> Retrying in ${DELAY}s..."
-                sleep "$DELAY"
-            fi
-        else
-            tmux kill-session -t mlflow_tunnel 2>/dev/null || true
-            pkill -9 -f "cloudflared tunnel" 2>/dev/null || true
-            if [ "$attempt_num" -lt "$MAX_RETRIES" ]; then
-                echo "--> Timed out. Retrying..."
-                sleep 2
-            fi
-        fi
-    done
-fi
-
-# 3) Wait for public DNS propagation & verify reachability
-if [ -n "$CLOUDFLARE_URL" ]; then
-    echo "$CLOUDFLARE_URL" > /tmp/mlflow_cf_url
-    echo "--> Verifying Cloudflare public DNS propagation..."
-    for i in $(seq 1 10); do
-        if curl -s -k -m 3 -I "$CLOUDFLARE_URL" 2>/dev/null | grep -q -E "HTTP/|200|302|301|404|403|502|503"; then
-            break
-        fi
-        sleep 1
-    done
-fi
-
-echo "=============================================================="
-echo "   📊 MLFLOW DASHBOARD ONLINE (PORT ${MLFLOW_PORT})           "
-if [ -n "$CLOUDFLARE_URL" ]; then
-    echo -e "   👉 \033[1;32mlink to mlflow :     $CLOUDFLARE_URL\033[0m"
-else
-    echo "   👉 Vast.ai Tunnel:    Open Port ${MLFLOW_PORT} in Vast.ai Tunnels UI"
-fi
-echo "=============================================================="
+# Public HTTPS link to the MLflow UI: the one copy of the tunnel launcher (it was pasted here in full until 2026-11-22).
+bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../sync/start_mlflow_tunnel.sh" "$MLFLOW_PORT"
 
 attempt=1
 
@@ -451,23 +295,23 @@ while true; do
     chown root:root /tmp/tmux-0 2>/dev/null || true
     chmod -R 666 /dev/nvidia* 2>/dev/null || true
     chmod -R 777 /dev/dri 2>/dev/null || true
-    chmod -R 777 /workspace/carla 2>/dev/null || true
+    chmod -R 777 $WORKSPACE/carla 2>/dev/null || true
     if id "carlauser" &>/dev/null; then
         usermod -aG video,render,sudo carlauser 2>/dev/null || true
-        chown -R carlauser:carlauser /workspace/carla 2>/dev/null || true
+        chown -R carlauser:carlauser $WORKSPACE/carla 2>/dev/null || true
     fi
 
     # 2. Launch CARLA servers (staggered by 2s to prevent GPU driver race conditions)
     for ((i=0; i<SERVER_COUNT; i++)); do
         PORT=${PORTS[$i]}
         SESSION_NAME="carla_server_${i}"
-        LOG_FILE="/workspace/carla_server_${PORT}.log"
+        LOG_FILE="$WORKSPACE/carla_server_${PORT}.log"
         GPU_IDX=$((i % NUM_GPUS))
         echo "--> Launching CARLA Server #$((i+1))/$SERVER_COUNT on port $PORT (tmux: $SESSION_NAME, GPU $GPU_IDX)..."
 
         > "$LOG_FILE" 2>/dev/null || true
         tmux new-session -d -s "$SESSION_NAME" \
-            "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -graphicsadapter=${GPU_IDX} -quality-level=Low -benchmark -fps=20' > ${LOG_FILE} 2>&1"
+            "su carlauser -c '$WORKSPACE/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -graphicsadapter=${GPU_IDX} -quality-level=Low -benchmark -fps=20' > ${LOG_FILE} 2>&1"
         sleep 3
     done
     sleep 3
@@ -478,7 +322,7 @@ while true; do
     for ((i=0; i<SERVER_COUNT; i++)); do
         PORT=${PORTS[$i]}
         SESSION_NAME="carla_server_${i}"
-        LOG_FILE="/workspace/carla_server_${PORT}.log"
+        LOG_FILE="$WORKSPACE/carla_server_${PORT}.log"
         echo -n "   [CARLA #$((i+1))/$SERVER_COUNT | Port $PORT] Waiting for server initialization"
         ready=false
         for attempt_check in $(seq 1 45); do
@@ -493,9 +337,9 @@ while true; do
                         echo "--- Last 20 lines of $LOG_FILE ---"
                         tail -n 20 "$LOG_FILE"
                         echo "-----------------------------------"
-                    elif [ -f "/workspace/carla/CarlaUE4/Saved/Logs/CarlaUE4.log" ]; then
+                    elif [ -f "$WORKSPACE/carla/CarlaUE4/Saved/Logs/CarlaUE4.log" ]; then
                         echo "--- Last 20 lines of CarlaUE4.log ---"
-                        tail -n 20 "/workspace/carla/CarlaUE4/Saved/Logs/CarlaUE4.log"
+                        tail -n 20 "$WORKSPACE/carla/CarlaUE4/Saved/Logs/CarlaUE4.log"
                         echo "-------------------------------------"
                     fi
                     break
@@ -536,7 +380,7 @@ if bp is None:
             fuser -k -9 ${PORT}/tcp $((PORT+1))/tcp $((PORT+2))/tcp 2>/dev/null || true
             sleep 2
             tmux new-session -d -s "$SESSION_NAME" \
-                "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -graphicsadapter=${GPU_IDX} -quality-level=Low -benchmark -fps=20' > ${LOG_FILE} 2>&1"
+                "su carlauser -c '$WORKSPACE/carla/CarlaUE4.sh -carla-port=${PORT} -RenderOffScreen -nosound -vulkan -graphicsadapter=${GPU_IDX} -quality-level=Low -benchmark -fps=20' > ${LOG_FILE} 2>&1"
             echo -n "   [CARLA #$((i+1))/$SERVER_COUNT | Port $PORT (Retry)] Waiting for initialization"
             for attempt_check in $(seq 1 40); do
                 echo -n "."
@@ -548,9 +392,9 @@ if bp is None:
                             echo "--- Last 20 lines of $LOG_FILE ---"
                             tail -n 20 "$LOG_FILE"
                             echo "-----------------------------------"
-                        elif [ -f "/workspace/carla/CarlaUE4/Saved/Logs/CarlaUE4.log" ]; then
+                        elif [ -f "$WORKSPACE/carla/CarlaUE4/Saved/Logs/CarlaUE4.log" ]; then
                             echo "--- Last 20 lines of CarlaUE4.log ---"
-                            tail -n 20 "/workspace/carla/CarlaUE4/Saved/Logs/CarlaUE4.log"
+                            tail -n 20 "$WORKSPACE/carla/CarlaUE4/Saved/Logs/CarlaUE4.log"
                             echo "-------------------------------------"
                         fi
                         break
@@ -587,9 +431,9 @@ v = c.get_server_version()
                 echo "--- Last 25 lines of $LOG_FILE ---"
                 tail -n 25 "$LOG_FILE"
                 echo "-----------------------------------"
-            elif [ -f "/workspace/carla/CarlaUE4/Saved/Logs/CarlaUE4.log" ]; then
+            elif [ -f "$WORKSPACE/carla/CarlaUE4/Saved/Logs/CarlaUE4.log" ]; then
                 echo "--- Last 25 lines of CarlaUE4.log ---"
-                tail -n 25 "/workspace/carla/CarlaUE4/Saved/Logs/CarlaUE4.log"
+                tail -n 25 "$WORKSPACE/carla/CarlaUE4/Saved/Logs/CarlaUE4.log"
                 echo "-------------------------------------"
             fi
             all_ready=false
@@ -607,14 +451,14 @@ v = c.get_server_version()
     WEIGHTS_ARG=""
     if [ -n "$CUSTOM_WEIGHTS" ] && [ -f "$CUSTOM_WEIGHTS" ]; then
         WEIGHTS_ARG="--weights-path $CUSTOM_WEIGHTS"
-    elif [ -f "/workspace/checkpoints/wor_10k/best_model.pth" ]; then
-        WEIGHTS_ARG="--weights-path /workspace/checkpoints/wor_10k/best_model.pth"
-    elif [ -f "/workspace/checkpoints/carla_lav_pretrained.pth" ]; then
-        WEIGHTS_ARG="--weights-path /workspace/checkpoints/carla_lav_pretrained.pth"
+    elif [ -f "$WORKSPACE/checkpoints/wor_10k/best_model.pth" ]; then
+        WEIGHTS_ARG="--weights-path $WORKSPACE/checkpoints/wor_10k/best_model.pth"
+    elif [ -f "$WORKSPACE/checkpoints/carla_lav_pretrained.pth" ]; then
+        WEIGHTS_ARG="--weights-path $WORKSPACE/checkpoints/carla_lav_pretrained.pth"
     elif [ -f "./papers_and_code/LAV/lav_pretrained.pth" ]; then
         WEIGHTS_ARG="--weights-path ./papers_and_code/LAV/lav_pretrained.pth"
-    elif [ -f "/workspace/pretrained_carla/model_0030_0.pth" ]; then
-        WEIGHTS_ARG="--weights-path /workspace/pretrained_carla/model_0030_0.pth"
+    elif [ -f "$WORKSPACE/pretrained_carla/model_0030_0.pth" ]; then
+        WEIGHTS_ARG="--weights-path $WORKSPACE/pretrained_carla/model_0030_0.pth"
     fi
 
     RESUME_ARG="--resume"
@@ -670,8 +514,8 @@ v = c.get_server_version()
         --reward-fn "$REWARD_FN" \
         --use-mlflow \
         --mlflow-port "$MLFLOW_PORT" \
-        --log-dir /workspace/runs \
-        --checkpoint-dir /workspace/checkpoints \
+        --log-dir $WORKSPACE/runs \
+        --checkpoint-dir $WORKSPACE/checkpoints \
         $WEIGHTS_ARG \
         $RESUME_ARG \
         $([ "$EARLY_STOPPING" = true ] && echo "--early-stopping --early-stopping-patience $PATIENCE --early-stopping-min-delta $MIN_DELTA" || echo "--no-early-stopping") \

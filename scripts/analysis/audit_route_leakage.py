@@ -60,6 +60,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from src.training.wor_dataset import WorldOnRailsDataset, route_group_split
+from src.config.paths import WORKSPACE  # noqa: E402  (the box workspace, $WORKSPACE)
 
 # Must match waypoint_losses(): longitudinal L1 + lateral_loss_weight * lateral L1.
 LATERAL_W = 3.0
@@ -67,7 +68,7 @@ LATERAL_W = 3.0
 
 def parse_args():
     p = argparse.ArgumentParser(description="Quantify route->waypoint leakage")
-    p.add_argument("--data_dir", type=str, default="/workspace/dataset/wor_trajectories")
+    p.add_argument("--data_dir", type=str, default=f"{WORKSPACE}/dataset/wor_trajectories")
     p.add_argument("--val_split", type=float, default=0.15)
     p.add_argument("--split_seed", type=int, default=0)
     p.add_argument("--route_points", type=int, default=4)

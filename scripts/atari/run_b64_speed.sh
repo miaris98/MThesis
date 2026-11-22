@@ -10,10 +10,11 @@
 # A probe is 4,000 env steps: 2,000 warm-up transitions, ~2,000 updates while collecting, ~2,000 after; the rate is read from the
 # env-3000 and env-4000 log lines (1,000 updates while collecting).
 # usage: run_b64_speed.sh CODE_DIR [WAIT_FILE]   (CODE_DIR = a repo copy with the B64 diagnostics; waits for WAIT_FILE if given)
-# results: /workspace/b64/logs/summary.log (one line per probe), per-probe logs next to it
+# results: $WORKSPACE/b64/logs/summary.log (one line per probe), per-probe logs next to it
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
 set -u
 C=$1; WAIT=${2:-}
-O=/workspace/b64/out; G=/workspace/b64/logs; mkdir -p $O $G
+O=$WORKSPACE/b64/out; G=$WORKSPACE/b64/logs; mkdir -p $O $G
 if [ -n "$WAIT" ]; then while [ ! -f "$WAIT" ]; do sleep 60; done; fi
 cd $C
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True OMP_NUM_THREADS=4 MLFLOW_ALLOW_FILE_STORE=true PYTHONPATH=$C CUDA_VISIBLE_DEVICES=0
@@ -38,7 +39,7 @@ grep -E '^\[B64 split\]' $G/p2_split.log | tail -2 >> $G/summary.log
 probe p3_compile 1 --compile-model
 grep -E 'compiled|torch.compile failed' $G/p3_compile.log | head -1 >> $G/summary.log
 
-CK=/workspace/b63/out/b63_qnowd_10k_s1/checkpoints/checkpoint_env10000_upd10000.pt
+CK=$WORKSPACE/b63/out/b63_qnowd_10k_s1/checkpoints/checkpoint_env10000_upd10000.pt
 for m in eager graph; do
   X=""; [ $m = graph ] && X="--graph"
   $PY -u atari_qwen/training/eval_loop_stats.py $CK --episodes 10 --sims 16 --max-steps 3000 --out $O/eval_$m $X > $G/e_$m.log 2>&1

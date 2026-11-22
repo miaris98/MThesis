@@ -22,7 +22,7 @@ collects the screened ideas: Holm (family-wise) and Benjamini-Hochberg (false di
 The MDE table is the smallest difference resolved with 80% power at 5% two-sided, 2.8 SE, for N routes, s seeds and
 k runs per seed against a fixed checkpoint with one run per route (Y fixed) and between two recipes.
 
-    py scripts/analysis/thesis_stats.py E:/MThesis_EXP/live_2026092[89]_* E:/MThesis_EXP/live_2026093* E:/MThesis_EXP/live_2026100* \
+    py scripts/analysis/thesis_stats.py $EXP/live_2026092[89]_* $EXP/live_2026093* $EXP/live_2026100* \
         --pool J=J20,J20s1,J20s2,J20s3 --compare E15-WOR --compare J-WOR --compare J-E15
 """
 from __future__ import annotations
@@ -36,7 +36,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from a9_merge import collect, parse_arm_specs  # noqa: E402
+from a9_merge import boot_ci, collect, parse_arm_specs  # noqa: E402
 
 Z95, Z_MDE = 1.959964, 2.8016  # two-sided 95%; 1.96 + 0.8416 (80% power)
 
@@ -80,12 +80,6 @@ def components(seeds: dict, repeats: list | None = None, unbiased_sg: bool = Fal
         srun2 = sw2
     return {"seeds": s, "routes": n, "sw2": sw2, "sg2": sg2, "sg2_raw": sg2_raw, "sg2_unbiased": sg2_unb,
             "srun2": min(srun2, sw2) if dof else srun2, "srun_dof": dof, "sr2": max(sw2 - (srun2 if dof else sw2), 0.0), "seed_means": means}
-
-
-def boot_ci(d: list, n: int = 20000, seed: int = 0) -> tuple:
-    rnd = random.Random(seed)
-    ms = sorted(mean(rnd.choices(d, k=len(d))) for _ in range(n))
-    return ms[int(0.025 * n)], ms[int(0.975 * n)]
 
 
 def signflip_p(d: list, n: int = 20000, seed: int = 0) -> float:

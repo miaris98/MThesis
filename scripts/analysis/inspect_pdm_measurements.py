@@ -19,11 +19,12 @@ import os
 from collections import Counter
 
 import numpy as np
+WORKSPACE = os.environ.get("WORKSPACE", "/workspace").rstrip("/")   # the box workspace (src/config/paths.py: WORKSPACE)
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Inspect PDM-Lite measurement schema")
-    p.add_argument("--data_dir", type=str, default="/workspace/dataset/wor_trajectories")
+    p.add_argument("--data_dir", type=str, default=f"{WORKSPACE}/dataset/wor_trajectories")
     p.add_argument("--sample", type=int, default=2000, help="How many measurement files to sample")
     return p.parse_args()
 

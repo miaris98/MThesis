@@ -7,7 +7,7 @@
 # lacked `local` and never killed the evaluator (S-099). One copy here, tested by
 # tests/test_scripts_common.py.
 
-: "${WORKSPACE:=/workspace}"
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # a template that sets WORKSPACE=/workspace/ must not give // paths
 : "${MTHESIS_ROOT:=$WORKSPACE/MThesis}"
 : "${CARLA_DIR:=$WORKSPACE/carla}"            # the real CARLA install (CARLA_ROOT may point at a shim)
 : "${GARAGE:=$WORKSPACE/carla_garage}"

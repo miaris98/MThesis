@@ -40,6 +40,10 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from check_leaderboard_results import subset_id as route_key  # noqa: E402  ('RouteScenario_12_rep0' -> '12')
 
 COORD_RE = re.compile(r"x=(-?[\d.]+),\s*y=(-?[\d.]+)")
 
@@ -63,12 +67,6 @@ def load_routes(path):
                 scen.append((s.attrib["type"], float(tp.attrib["x"]), float(tp.attrib["y"])))
         out[r.attrib["id"]] = {"start": wps[0] if wps else None, "scenarios": scen}
     return out
-
-
-def route_key(route_id):
-    """'RouteScenario_12_rep0' -> '12'"""
-    core = str(route_id).split("_rep")[0]
-    return core.split("_", 1)[1] if "_" in core else core
 
 
 def main():

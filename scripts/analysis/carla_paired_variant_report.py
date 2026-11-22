@@ -1,4 +1,8 @@
 import json, glob, re, sys, numpy as np
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from src.config.paths import exp_root  # noqa: E402  (the experiment archive: MTHESIS_EXP_ROOT, E:/MThesis_EXP on the PC)
 
 SP, NEWGLOB, NEWNAME = sys.argv[1], sys.argv[2], sys.argv[3]
 
@@ -23,7 +27,7 @@ def recs(globs):
     return out
 
 
-M = "E:\\MThesis_EXP"
+M = str(exp_root())
 new = recs([NEWGLOB.replace("{SP}", SP)])
 base = {
     "plain E15 (2026-09-28 official run)": [M + "\\bench2drive_live_20260928\\a9_E15_c*_x.json"],

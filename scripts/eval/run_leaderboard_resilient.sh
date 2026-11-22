@@ -20,15 +20,16 @@
 # The loop also stops as soon as an attempt stops making progress: if a retry pass fails on
 # exactly the same routes as the pass before it, the fault is deterministic (a real bug, like
 # 11.14's AttributeError) and further attempts would only burn hours reproducing it.
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
 set -u
 LABEL="$1"; ARCH="$2"; CKPT="$3"; ROUTES="$4"
 SUBSET="${5:-}"; PORT="${6:-2000}"; TM_PORT="${7:-8000}"; MAX_ATTEMPTS="${8:-3}"
 
-MTHESIS=/workspace/MThesis
-OUT=/workspace/leaderboard_official_out
-PY=/workspace/venv_carla/bin/python
-GARAGE=/workspace/carla_garage
-REAL_CARLA=/workspace/carla
+MTHESIS=$WORKSPACE/MThesis
+OUT=$WORKSPACE/leaderboard_official_out
+PY=$WORKSPACE/venv_carla/bin/python
+GARAGE=$WORKSPACE/carla_garage
+REAL_CARLA=$WORKSPACE/carla
 mkdir -p "$OUT"
 
 # merge_leaderboard_results.py imports leaderboard.utils.statistics_manager directly (it reuses

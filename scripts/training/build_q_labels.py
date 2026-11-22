@@ -212,9 +212,8 @@ def main():
             json.dump({"summary": summary, "per_scenario": per_scenario, "config": dataclasses.asdict(cfg), "routes": results}, f, indent=1)
     try:  # MLflow (project rule); tracking must never fail the build
         import mlflow
-        from src.config.paths import mlruns_dir
-        os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
-        mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "file:" + str(mlruns_dir())))
+        from src.config.paths import mlflow_tracking_uri
+        mlflow.set_tracking_uri(mlflow_tracking_uri())
         mlflow.set_experiment("A71_q_labels")
         with mlflow.start_run(run_name=a.tag):
             mlflow.log_params({**{k: str(v) for k, v in dataclasses.asdict(cfg).items()}, "data_dir": a.data_dir, "tag": a.tag, "stride": a.stride,

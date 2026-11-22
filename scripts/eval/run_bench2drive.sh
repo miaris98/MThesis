@@ -23,8 +23,8 @@ ROUTES_SUBSET="${8:-}"
 # common.sh. PCI order matters here: launch_b2d20.sh sets CUDA_VISIBLE_DEVICES=$GPU for the agent and this
 # script passes the same index as --gpu-rank, which becomes CARLA's -graphicsadapter (PCI order).
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
-# 2026-09-15: was /workspace/Bench2Drive, which does not exist on this box - Bench2Drive lives
-# as a subdirectory of the carla_garage checkout (/workspace/carla_garage/Bench2Drive). That path
+# 2026-09-15: was $WORKSPACE/Bench2Drive, which does not exist on this box - Bench2Drive lives
+# as a subdirectory of the carla_garage checkout ($WORKSPACE/carla_garage/Bench2Drive). That path
 # predates this box; never actually exercised here until now.
 B2D="$GARAGE/Bench2Drive"
 REAL_CARLA="$CARLA_DIR"
@@ -50,7 +50,7 @@ fi
 # 2026-09-15: was $B2D/leaderboard/team_code/bench2drive_agent.py, which has never existed -
 # bench2drive_agent.py is this project's own adapter, at $MTHESIS_ROOT, not part of the vendored
 # Bench2Drive checkout. This script had never actually been run to completion before (no prior
-# output under /workspace/bench2drive_out). The evaluator itself resolves the module via
+# output under $WORKSPACE/bench2drive_out). The evaluator itself resolves the module via
 # `sys.path.insert(0, os.path.dirname(args.agent))` (leaderboard_evaluator.py:126), so pointing
 # --agent at the right file is sufficient - no separate PYTHONPATH entry needed for it.
 AGENT="${EVAL_AGENT:-$MTHESIS_ROOT/scripts/eval/bench2drive_agent.py}"
@@ -74,7 +74,7 @@ AGENT_PYTHONPATH=""
 # launch path); the PythonAPI paths below still point at the real install.
 #
 # 2026-09-15: both the shim path and its XDG_RUNTIME_DIR are now keyed by LABEL. They used to be
-# one shared /workspace/carla_shim/CarlaUE4.sh with no XDG_RUNTIME_DIR override at all, which is
+# one shared $WORKSPACE/carla_shim/CarlaUE4.sh with no XDG_RUNTIME_DIR override at all, which is
 # fine for one arm at a time but not for two: run_leaderboard_official.sh's own history records
 # two CARLA processes sharing one XDG_RUNTIME_DIR corrupting each other's Vulkan ICD/session
 # state. This script never needed the fix before because it had never actually been run to

@@ -7,8 +7,9 @@
 # SIMNORM (optional 5th arg, default 0): SimNorm group size on the latent (B22). The 2026-10-23 sn0 screen collapsed in 3 of 6 runs
 # (both trunks; the Qwen mixer's |W| grew 60 -> 202 in the collapsed seed); SimNorm sits after the mixer, so it bounds the mixer's output.
 # usage: run_b61_screen.sh GPU TRUNK SIZE SEED [SIMNORM]       (TRUNK = qwen | gtrxl, SIZE = small | 30m)
-# label: B61_<trunk><size>_10k_s<seed> (sn0) or ..._s<seed>_sn<SIMNORM>; results under /workspace/b61/out/<label>
-cd /workspace/MThesis
+# label: B61_<trunk><size>_10k_s<seed> (sn0) or ..._s<seed>_sn<SIMNORM>; results under $WORKSPACE/b61/out/<label>
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
+cd $WORKSPACE/MThesis
 # B62=1 (env): the anti-collapse fixes on top (training-time stagnation exploration after 300 reward-free steps, 30-step random burst;
 # policy-target smoothing 0.05); label suffix _b62. Evaluation is unchanged (paper protocol, no FIRE reset).
 GPU=$1; TRUNK=$2; SIZE=$3; SEED=$4; SIMNORM=${5:-0}
@@ -21,15 +22,15 @@ else
   LABEL=B61_gtrxl_10k_s${SEED}${SUF}
   ARM="--trunk gtrxl"
 fi
-L=/workspace/b61/out; mkdir -p $L/$LABEL/checkpoints /workspace/b61/logs
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True OMP_NUM_THREADS=4 MLFLOW_ALLOW_FILE_STORE=true PYTHONPATH=/workspace/MThesis
+L=$WORKSPACE/b61/out; mkdir -p $L/$LABEL/checkpoints $WORKSPACE/b61/logs
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True OMP_NUM_THREADS=4 MLFLOW_ALLOW_FILE_STORE=true PYTHONPATH=$WORKSPACE/MThesis
 for try in 1 2 3; do
   CK=$L/$LABEL/checkpoints/checkpoint_latest.pt; RES=""; [ -f $CK ] && RES="--resume-from $CK"
-  echo "$(date -u) start $LABEL try $try ${RES:-fresh}" >> /workspace/b61/logs/$LABEL.log
+  echo "$(date -u) start $LABEL try $try ${RES:-fresh}" >> $WORKSPACE/b61/logs/$LABEL.log
   CUDA_VISIBLE_DEVICES=$GPU /venv/main/bin/python -u atari_qwen/training/train_ez_offpolicy.py \
     $ARM $FIX --norm batch --priority-alpha 0 --seed $SEED --simnorm $SIMNORM \
     --total-steps 10000 --schedule-steps 100000 --eval-interval 10000 --eval-episodes 10 --eval-mode deferred \
-    --graph-search --run-label $LABEL --log-dir $L $RES >> /workspace/b61/logs/$LABEL.log 2>&1
-  rc=$?; echo "$(date -u) $LABEL exited rc=$rc" >> /workspace/b61/logs/$LABEL.log; [ $rc -eq 0 ] && break; sleep 30
+    --graph-search --run-label $LABEL --log-dir $L $RES >> $WORKSPACE/b61/logs/$LABEL.log 2>&1
+  rc=$?; echo "$(date -u) $LABEL exited rc=$rc" >> $WORKSPACE/b61/logs/$LABEL.log; [ $rc -eq 0 ] && break; sleep 30
 done
 echo SCREEN_DONE $LABEL

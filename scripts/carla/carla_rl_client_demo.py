@@ -18,16 +18,9 @@ def main():
     
     args = parser.parse_args()
 
-    import glob
-
-    # Auto-add local CARLA 0.9.15 client package from PythonAPI dist
-    carla_root = os.environ.get("CARLA_ROOT", "/workspace/carla")
-    carla_dist_path = os.path.join(carla_root, "PythonAPI", "carla", "dist")
-    if os.path.exists(carla_dist_path):
-        eggs = glob.glob(os.path.join(carla_dist_path, "carla-*-py3*.egg"))
-        for p in eggs:
-            if p not in sys.path:
-                sys.path.insert(0, p)
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    from src.config.carla_client import add_carla_to_path
+    add_carla_to_path(with_agents=False)
 
     try:
         import carla

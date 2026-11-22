@@ -14,7 +14,7 @@ position onto the route polyline of the route XML (the unshifted plan, = what th
 A speed-only fix (A37 / A38 / A39 / A43) can only help the first kind; the second needs the path or the pass decision (A15, A41,
 A48, A21).
 
-    py scripts/analysis/a3c_collision_anatomy.py E:/MThesis_EXP/live_2026092[89]_* E:/MThesis_EXP/live_2026093* E:/MThesis_EXP/live_2026100* \
+    py scripts/analysis/a3c_collision_anatomy.py $EXP/live_2026092[89]_* $EXP/live_2026093* $EXP/live_2026100* \
         --json-out a3c_0410.json
 """
 from __future__ import annotations

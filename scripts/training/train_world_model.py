@@ -105,9 +105,8 @@ def main(argv=None):
     if a.use_mlflow:
         try:
             import mlflow
-            from src.config.paths import mlruns_dir
-            os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
-            mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "file:" + str(mlruns_dir())))
+            from src.config.paths import mlflow_tracking_uri
+            mlflow.set_tracking_uri(mlflow_tracking_uri())
             mlflow.set_experiment("A73_world_model")
             mlflow.start_run(run_name=os.path.basename(os.path.normpath(a.save_dir)))
             mlflow.log_params({k: str(v) for k, v in vars(a).items()})

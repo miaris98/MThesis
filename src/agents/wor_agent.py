@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from src.models.world_on_rails.wor_policy import WorldOnRailsPolicy
+from src.config.paths import WORKSPACE  # noqa: E402  (the box workspace, $WORKSPACE)
 from src.models.world_on_rails.wor_loader import load_wor_model, download_pretrained_weights
 from src.config.camera import (
     camera_sensor_spec, preprocess_rgb, DEFAULT_IMG_SIZE, DEFAULT_CROP_BOTTOM_FRAC)
@@ -120,7 +121,7 @@ class WorldOnRailsAgent:
         from src.models.world_on_rails.fuse_encoder import FuseSecondEncoder, fuse_cache_backbone
         fuse_cache_backbone(self.fuse_cache)
         basis = os.environ.get("WOR_FUSE_BASIS") or os.path.join(os.path.dirname(os.path.abspath(checkpoint_path)), "fuse_basis.pt")
-        weights = os.environ.get("WOR_FUSE_WEIGHTS", "/workspace/simlingo_weights.pt")
+        weights = os.environ.get("WOR_FUSE_WEIGHTS", f"{WORKSPACE}/simlingo_weights.pt")
         for what, p in (("PCA basis (WOR_FUSE_BASIS)", basis), ("SimLingo weights (WOR_FUSE_WEIGHTS)", weights)):
             if not os.path.exists(p):
                 raise FileNotFoundError(f"two-encoder checkpoint {checkpoint_path}: {what} {p} is missing")

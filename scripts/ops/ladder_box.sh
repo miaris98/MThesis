@@ -12,7 +12,7 @@
 # like vf_clean (the student). A teacher never reads the camera tokens, so the overlay only changes pixels it ignores. The base cache also
 # stores the PCA-256 full 9x24 map (as spatial2 did) for step 2, the detector on the student's own features. Teachers read
 # true objects: diagnostics only, never a thesis agent (single RGB camera at inference, user 2026-11-18).
-# usage: scripts/ops/ladder_box.sh STEP [ARGS]        status lines -> /workspace/ladder/status
+# usage: scripts/ops/ladder_box.sh STEP [ARGS]        status lines -> $WORKSPACE/ladder/status
 #   setup               deps, both data sets (parallel per town), CARLA (background, waited for)
 #   audit               leak audit of both data sets (Town12/13 route folders on a Bench2Drive-220 route move out), then the merged dir
 #   cache D|DX          pooled 4x4 cache, no overlay, of the base data (D, + PCA-256 full map) or the six new families only (DX);
@@ -25,7 +25,7 @@
 #   targets_r1          detector targets (_visns on D) and all-object tokens on DX (the cut-in check)
 #   detector            train_object_detector.py on D, best checkpoint by val F1
 #   export              detector tokens (<prefix>.boxtok20_det.f16) for D and DX
-#   cutin               cut-in log-side token counts (scripts/analysis/cutin_token_check.py) -> /workspace/ladder/cutin_log_side.json
+#   cutin               cut-in log-side token counts (scripts/analysis/cutin_token_check.py) -> $WORKSPACE/ladder/cutin_log_side.json
 #   train r1_s0|r1_s1|r0ft   R1 seeds 0/1 and the same recipe without object tokens (the same-box RGB control), on D + DX
 #   gate                offline gate: R1's val waypoint ADE at epoch 30 must beat r0ft's
 # 2026-11-20 (ctl_chain.sh: controller study box; mx_chain.sh: R1 + experts box)
@@ -33,7 +33,7 @@
 #   train r1w4_s0       R1 + w4's waypoint experts (16 experts, top-4, hidden 32, aux 0.01; w4 = the best MoE arm of 11-15)
 #   train r0ftf         r0ft with a fresh AdamW (WOR_RESET_OPTIMIZER=1), so it restarts its optimizer as every R1 arm does
 #   valade              VALADE status line: val waypoint ADE of the r1d_* arms on this box
-#   ctl_winner          after the 80-route controller screen: the best non-pid controller -> /workspace/ladder/ctl_winner.env
+#   ctl_winner          after the 80-route controller screen: the best non-pid controller -> $WORKSPACE/ladder/ctl_winner.env
 #                       (LANE_SKIP=1 when it trails pid by more than 7 DS, the futility rule of docs/ops/fast_eval/carla-subset-proxy.md)
 # 2026-11-21 (mem_chain.sh: memorization ladder, a training-only box; plan: docs/ops/2026-11-21_memorization_ladder.md)
 #   NO_CARLA=1          setup installs the trainer's packages into /venv/main instead of provisioning CARLA (pass PYC=/venv/main/bin/python)
@@ -41,17 +41,18 @@
 #   train mem_L<k>[w]   the RGB control recipe (r0ftf: E15 -> 30, fresh AdamW) at regularization level k (0-3), w = + w4's experts;
 #                       SEED=1 trains seed 1 (label suffix _s1)
 #   memtable            MEMTABLE status lines: clean-train vs held-out ADE, ratio, experts' effect per level
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
 set -uo pipefail
-mkdir -p /workspace/ladder; S=/workspace/ladder/status
+mkdir -p $WORKSPACE/ladder; S=$WORKSPACE/ladder/status
 mark() { echo "$(date -u +%H:%M:%S) $1" >> $S; }
-cd /workspace/MThesis; export PYTHONPATH=/workspace/MThesis MLFLOW_ALLOW_FILE_STORE=true
+cd $WORKSPACE/MThesis; export PYTHONPATH=$WORKSPACE/MThesis MLFLOW_ALLOW_FILE_STORE=true
 PY=/venv/main/bin/python; PYC=${PYC:-/workspace/venv_carla/bin/python}
-D=/workspace/dataset/wor_trajectories            # w8_teacher's data: 6 towns + the Town12/13 obstacle archives
-DX=/workspace/dataset_cov/wor_trajectories       # the six uncovered families (Town12/13)
-DC=/workspace/dataset_all/wor_trajectories       # D + DX as hard links (no extra disk)
+D=$WORKSPACE/dataset/wor_trajectories            # w8_teacher's data: 6 towns + the Town12/13 obstacle archives
+DX=$WORKSPACE/dataset_cov/wor_trajectories       # the six uncovered families (Town12/13)
+DC=$WORKSPACE/dataset_all/wor_trajectories       # D + DX as hard links (no extra disk)
 ARCH='^Town(0[1-5]|10)/|^Town1[23]/.*(Accident|Obstacle|HazardAtSideLane|InvadingTurn|OpensDoor)'
 COV='^Town1[23]/data/(StaticCutIn|ParkingCutIn|OppositeVehicleTakingPriority|NonSignalizedJunctionLeftTurn|NonSignalizedJunctionRightTurn|EnterActorFlow)\.zip$'
-E15=/workspace/checkpoints/E15
+E15=$WORKSPACE/checkpoints/E15
 ENC=$E15/frozen_backbone.pth   # the TF++ image encoder tensor for tensor (2026-11-17: no 2.7 GB S3 zip); teachers do not read it anyway
 # spatial2's COMMON (w8_teacher's run_config) + its old geometry
 COMMON="--backbone regnety_032 --policy_arch qwen30m --epochs 50 --stop_epoch 30 --resume_from $E15/model_epoch_015.pth --route_key route_original
@@ -61,7 +62,7 @@ COMMON="--backbone regnety_032 --policy_arch qwen30m --epochs 50 --stop_epoch 30
  --val_every 5 --save_freq 5 --use_mlflow 1"
 COMMON_RGB="$COMMON --experiment_name r1_detector"          # R1 day: the student and its control read the camera tokens
 COMMON="$COMMON --experiment_name teacher_ladder --privileged_boxes 20"
-DET=/workspace/checkpoints/det_visns/detector_best.pt
+DET=$WORKSPACE/checkpoints/det_visns/detector_best.pt
 OBJ_RANGE=${OBJ_RANGE:-30}
 
 CORES=$(awk '{ if ($1 == "max") print 0; else printf "%d", $1 / $2 }' /sys/fs/cgroup/cpu.max 2>/dev/null)   # the cgroup quota, not nproc
@@ -73,35 +74,35 @@ prefix_grid() { local p; p=$(ls $1/*_g$2.json 2>/dev/null | head -1); echo "${p%
 case $1 in
 setup)
   mark SETUP_START
-  mkdir -p $D $DX /workspace/logs_prov
-  ( $PY -m pip install -q requests huggingface_hub > /workspace/ladder/pip.log 2>&1
+  mkdir -p $D $DX $WORKSPACE/logs_prov
+  ( $PY -m pip install -q requests huggingface_hub > $WORKSPACE/ladder/pip.log 2>&1
     for T in Town01 Town02 Town03 Town04 Town05 Town10 Town12 Town13; do
-      ( $PY scripts/setup/download_pdm_lite.py --towns $T --archive-regex "$ARCH" --reserve-gb 20 --dest $D > /workspace/ladder/data_$T.log 2>&1 ) &
+      ( $PY scripts/setup/download_pdm_lite.py --towns $T --archive-regex "$ARCH" --reserve-gb 20 --dest $D > $WORKSPACE/ladder/data_$T.log 2>&1 ) &
     done
     for T in Town12 Town13; do
-      ( $PY scripts/setup/download_pdm_lite.py --towns $T --archive-regex "$COV" --reserve-gb 20 --dest $DX > /workspace/ladder/datacov_$T.log 2>&1 ) &
+      ( $PY scripts/setup/download_pdm_lite.py --towns $T --archive-regex "$COV" --reserve-gb 20 --dest $DX > $WORKSPACE/ladder/datacov_$T.log 2>&1 ) &
     done
     wait
-    nf=$(cat /workspace/ladder/data_*.log /workspace/ladder/datacov_*.log | grep -c -E "FAILED|Traceback")
+    nf=$(cat $WORKSPACE/ladder/data_*.log $WORKSPACE/ladder/datacov_*.log | grep -c -E "FAILED|Traceback")
     [ "$nf" = 0 ] && mark "DATA_DONE D $(du -sh $D | cut -f1) DX $(du -sh $DX | cut -f1)" || mark "DATA_FAILED $nf error lines" ) &
   if [ "${NO_CARLA:-0}" = 1 ]; then   # training-only box: the cache builder and the trainers run in /venv/main
-    ( $PY -m pip install -q timm mlflow tensorboard opencv-python-headless pytest scipy jsonpickle shapely einops >> /workspace/logs_prov/prov.out 2>&1   # jsonpickle / shapely / einops: carla_garage (A86)
-      if $PY -c "import torch, torchvision, timm, mlflow, tensorboard, cv2, jsonpickle, shapely; assert torch.cuda.is_available(); print('torch', torch.__version__)" >> /workspace/logs_prov/prov.out 2>&1
+    ( $PY -m pip install -q timm mlflow tensorboard opencv-python-headless pytest scipy jsonpickle shapely einops >> $WORKSPACE/logs_prov/prov.out 2>&1   # jsonpickle / shapely / einops: carla_garage (A86)
+      if $PY -c "import torch, torchvision, timm, mlflow, tensorboard, cv2, jsonpickle, shapely; assert torch.cuda.is_available(); print('torch', torch.__version__)" >> $WORKSPACE/logs_prov/prov.out 2>&1
       then mark CARLA_PROV_END; else mark CARLA_PROV_FAILED; fi ) &
   else
-  ( bash scripts/ops/provision_carla_no_hf.sh > /workspace/logs_prov/prov.out 2>&1
-    bash scripts/ops/install_guard.sh carla_tools /workspace/venv_carla -- -q tensorboard mlflow pytest scipy >> /workspace/logs_prov/prov.out 2>&1
-    if grep -q PROVISION_DONE /workspace/setup_carla.log 2>/dev/null && \
-       $PYC -c "import torch, timm, carla, py_trees, tensorboard, mlflow" >> /workspace/logs_prov/prov.out 2>&1
+  ( bash scripts/ops/provision_carla_no_hf.sh > $WORKSPACE/logs_prov/prov.out 2>&1
+    bash scripts/ops/install_guard.sh carla_tools $WORKSPACE/venv_carla -- -q tensorboard mlflow pytest scipy >> $WORKSPACE/logs_prov/prov.out 2>&1
+    if grep -q PROVISION_DONE $WORKSPACE/setup_carla.log 2>/dev/null && \
+       $PYC -c "import torch, timm, carla, py_trees, tensorboard, mlflow" >> $WORKSPACE/logs_prov/prov.out 2>&1
     then mark CARLA_PROV_END; else mark CARLA_PROV_FAILED; fi ) &
   fi
   wait; mark SETUP_END ;;
 setup_carla)
-  mark SETUP_START; mkdir -p /workspace/logs_prov
-  bash scripts/ops/provision_carla_no_hf.sh > /workspace/logs_prov/prov.out 2>&1
-  bash scripts/ops/install_guard.sh carla_tools /workspace/venv_carla -- -q tensorboard mlflow pytest scipy >> /workspace/logs_prov/prov.out 2>&1
-  if grep -q PROVISION_DONE /workspace/setup_carla.log 2>/dev/null && \
-     $PYC -c "import torch, timm, carla, py_trees, tensorboard, mlflow" >> /workspace/logs_prov/prov.out 2>&1
+  mark SETUP_START; mkdir -p $WORKSPACE/logs_prov
+  bash scripts/ops/provision_carla_no_hf.sh > $WORKSPACE/logs_prov/prov.out 2>&1
+  bash scripts/ops/install_guard.sh carla_tools $WORKSPACE/venv_carla -- -q tensorboard mlflow pytest scipy >> $WORKSPACE/logs_prov/prov.out 2>&1
+  if grep -q PROVISION_DONE $WORKSPACE/setup_carla.log 2>/dev/null && \
+     $PYC -c "import torch, timm, carla, py_trees, tensorboard, mlflow" >> $WORKSPACE/logs_prov/prov.out 2>&1
   then mark CARLA_PROV_END; else mark CARLA_PROV_FAILED; fi
   mark SETUP_END ;;
 valade)
@@ -142,11 +143,11 @@ else:
 PYX
   ;;
 audit)
-  for pair in "$D:/workspace/dataset_excluded" "$DX:/workspace/dataset_excluded_cov"; do
+  for pair in "$D:$WORKSPACE/dataset_excluded" "$DX:$WORKSPACE/dataset_excluded_cov"; do
     DD=${pair%%:*}; XX=${pair#*:}; tag=$(basename $(dirname $DD))
-    $PY scripts/analysis/route_overlap_audit.py --eval_xml /workspace/ladder/bench2drive220.xml --data_dir $DD --out_json /workspace/ladder/leak_$tag.json \
-      > /workspace/ladder/audit_$tag.log 2>&1 || { mark "AUDIT_FAILED $tag"; exit 1; }
-    $PY - "$DD" "$XX" /workspace/ladder/leak_$tag.json >> /workspace/ladder/audit_$tag.log 2>&1 <<'PYX' || { mark "AUDIT_MOVE_FAILED $tag"; exit 1; }
+    $PY scripts/analysis/route_overlap_audit.py --eval_xml $WORKSPACE/ladder/bench2drive220.xml --data_dir $DD --out_json $WORKSPACE/ladder/leak_$tag.json \
+      > $WORKSPACE/ladder/audit_$tag.log 2>&1 || { mark "AUDIT_FAILED $tag"; exit 1; }
+    $PY - "$DD" "$XX" $WORKSPACE/ladder/leak_$tag.json >> $WORKSPACE/ladder/audit_$tag.log 2>&1 <<'PYX' || { mark "AUDIT_MOVE_FAILED $tag"; exit 1; }
 import json, os, shutil, sys
 D, X, J = sys.argv[1:4]
 rows = json.load(open(J))["routes"]
@@ -161,59 +162,59 @@ print(f"moved {moved} of {len(rows)} Town12/13 route folders to {X}")
 for k, (n, m) in sorted(by.items()):
     print(f"  {k}: {m} / {n} excluded")
 PYX
-    mark "AUDIT_DONE $tag $(grep -oE 'moved [0-9]+ of [0-9]+' /workspace/ladder/audit_$tag.log)"
+    mark "AUDIT_DONE $tag $(grep -oE 'moved [0-9]+ of [0-9]+' $WORKSPACE/ladder/audit_$tag.log)"
   done
   rm -rf $DC; mkdir -p $DC && cp -al $D/. $DC/ && cp -al $DX/. $DC/ || { mark MERGE_FAILED; exit 1; }
   mark "MERGED $(find $D -mindepth 4 -maxdepth 4 -type d | wc -l) + $(find $DX -mindepth 4 -maxdepth 4 -type d | wc -l) route folders -> $(find $DC -mindepth 4 -maxdepth 4 -type d | wc -l)" ;;
 cache)
-  W=${2:?D or DX}; DD=$D; OUTD=/workspace/pooled_ov0; PCA="--pca_full 256 --pca_fit_frames 3000"
+  W=${2:?D or DX}; DD=$D; OUTD=$WORKSPACE/pooled_ov0; PCA="--pca_full 256 --pca_fit_frames 3000"
   [ "${D_PCA:-1}" = 0 ] && PCA=""
-  [ "$W" = DX ] && { DD=$DX; OUTD=/workspace/pooled_cov_ov0; PCA=""; }
+  [ "$W" = DX ] && { DD=$DX; OUTD=$WORKSPACE/pooled_cov_ov0; PCA=""; }
   mkdir -p $OUTD
   if [ "$W" = DX ] && [ "${DX_PCA:-1}" = 1 ]; then   # R1: the detector reads the coverage frames too, so their map is compressed in D's basis
-    PD=$(prefix_of /workspace/pooled_ov0); B=$PD.pca256.f16.basis.pt
+    PD=$(prefix_of $WORKSPACE/pooled_ov0); B=$PD.pca256.f16.basis.pt
     [ -n "$PD" ] && [ -f "$B" ] || { mark "CACHE_REFUSED DX: no base-cache PCA basis to reuse"; exit 1; }
     cp $B $OUTD/$(basename $PD).pca256.f16.basis.pt && PCA="--pca_full 256"
   fi
   $PYC scripts/training/build_pooled_cache.py --data_dir $DD --out_dir $OUTD --backbone regnety_032 --frozen_backbone $ENC \
     --img_size 288x768 --crop_bottom_frac 0.0 --route_overlay 0 --route_points 4 --route_key route_original --use_augmented_camera 1 --grid 4 $PCA \
     --device cuda:0 --shard 0 --num_shards 1 --num_workers $(( CORES > 20 ? 16 : CORES - 4 )) --batch_size 128 \
-    > /workspace/ladder/cache_$W.log 2>&1 && [ -n "$(prefix_of $OUTD)" ] && mark "CACHE_DONE $W $(prefix_of $OUTD)" || { mark "CACHE_FAILED $W"; exit 1; } ;;
+    > $WORKSPACE/ladder/cache_$W.log 2>&1 && [ -n "$(prefix_of $OUTD)" ] && mark "CACHE_DONE $W $(prefix_of $OUTD)" || { mark "CACHE_FAILED $W"; exit 1; } ;;
 targets)
-  PD=$(prefix_of /workspace/pooled_ov0); PC=$(prefix_of /workspace/pooled_cov_ov0)
+  PD=$(prefix_of $WORKSPACE/pooled_ov0); PC=$(prefix_of $WORKSPACE/pooled_cov_ov0)
   [ -n "$PD" ] && [ -n "$PC" ] || { mark "TARGETS_REFUSED caches missing"; exit 1; }
   NW=$(( CORES / 3 > 2 ? CORES / 3 : 2 ))
-  ( $PY scripts/training/build_box_targets.py --prefix $PD --data_dir $D --box_tokens 20 --box_variant _vis --workers $NW > /workspace/ladder/targets_vis.log 2>&1 ) & a=$!
-  ( $PY scripts/training/build_box_targets.py --prefix $PD --data_dir $D --box_tokens 20 --box_variant _visns --workers $NW > /workspace/ladder/targets_visns.log 2>&1 ) & b=$!
-  ( $PY scripts/training/build_box_targets.py --prefix $PC --data_dir $DX --box_tokens 20 --workers $NW > /workspace/ladder/targets_cov.log 2>&1 ) & c=$!
-  ( $PY scripts/training/build_box_targets.py --prefix $PD --data_dir $D --box_tokens 20 --workers $NW > /workspace/ladder/targets_all.log 2>&1 ) & e=$!
+  ( $PY scripts/training/build_box_targets.py --prefix $PD --data_dir $D --box_tokens 20 --box_variant _vis --workers $NW > $WORKSPACE/ladder/targets_vis.log 2>&1 ) & a=$!
+  ( $PY scripts/training/build_box_targets.py --prefix $PD --data_dir $D --box_tokens 20 --box_variant _visns --workers $NW > $WORKSPACE/ladder/targets_visns.log 2>&1 ) & b=$!
+  ( $PY scripts/training/build_box_targets.py --prefix $PC --data_dir $DX --box_tokens 20 --workers $NW > $WORKSPACE/ladder/targets_cov.log 2>&1 ) & c=$!
+  ( $PY scripts/training/build_box_targets.py --prefix $PD --data_dir $D --box_tokens 20 --workers $NW > $WORKSPACE/ladder/targets_all.log 2>&1 ) & e=$!
   wait $a; ra=$?; wait $b; rb=$?; wait $c; rc=$?; wait $e; re=$?
   [ $ra = 0 ] && [ $rb = 0 ] && [ $rc = 0 ] && [ $re = 0 ] && [ -f $PD.boxtok20.f16 ] && [ -f $PD.boxtok20_vis.f16 ] && [ -f $PD.boxtok20_visns.f16 ] && [ -f $PC.boxtok20.f16 ] \
     && mark TARGETS_DONE || { mark "TARGETS_FAILED rc $ra $rb $rc $re"; exit 1; } ;;
 targets_r1)
-  PD=$(prefix_of /workspace/pooled_ov0); PC=$(prefix_of /workspace/pooled_cov_ov0)
+  PD=$(prefix_of $WORKSPACE/pooled_ov0); PC=$(prefix_of $WORKSPACE/pooled_cov_ov0)
   [ -n "$PD" ] && [ -n "$PC" ] || { mark "TARGETS_REFUSED caches missing"; exit 1; }
   NW=$(( CORES / 2 > 2 ? CORES / 2 : 2 ))
-  ( $PY scripts/training/build_box_targets.py --prefix $PD --data_dir $D --box_tokens 20 --box_variant _visns --workers $NW > /workspace/ladder/targets_visns.log 2>&1 ) & a=$!
-  ( $PY scripts/training/build_box_targets.py --prefix $PC --data_dir $DX --box_tokens 20 --workers $NW > /workspace/ladder/targets_cov.log 2>&1 ) & c=$!
+  ( $PY scripts/training/build_box_targets.py --prefix $PD --data_dir $D --box_tokens 20 --box_variant _visns --workers $NW > $WORKSPACE/ladder/targets_visns.log 2>&1 ) & a=$!
+  ( $PY scripts/training/build_box_targets.py --prefix $PC --data_dir $DX --box_tokens 20 --workers $NW > $WORKSPACE/ladder/targets_cov.log 2>&1 ) & c=$!
   wait $a; ra=$?; wait $c; rc=$?
   [ $ra = 0 ] && [ $rc = 0 ] && [ -f $PD.boxtok20_visns.f16 ] && [ -f $PC.boxtok20.f16 ] && mark TARGETS_DONE || { mark "TARGETS_FAILED rc $ra $rc"; exit 1; } ;;
 detector)
-  PD=$(prefix_of /workspace/pooled_ov0); OUT=$(dirname $DET)
+  PD=$(prefix_of $WORKSPACE/pooled_ov0); OUT=$(dirname $DET)
   mark DETECTOR_START
   $PYC -u scripts/training/train_object_detector.py --prefix $PD --out_dir $OUT --epochs ${DET_EPOCHS:-12} --max_minutes ${DET_MINUTES:-170} \
-    --select f1 --num_workers $(( CORES > 12 ? 8 : 4 )) --experiment_name r1_detector > /workspace/ladder/detector.log 2>&1 && [ -f $DET ] \
-    && mark "DETECTOR_DONE $(grep -a '^FINAL' /workspace/ladder/detector.log | grep -oE '"(recall|precision|f1|recall_0_10m|recall_30_50m)": [0-9.]+' | tr '\n' ' ')" \
+    --select f1 --num_workers $(( CORES > 12 ? 8 : 4 )) --experiment_name r1_detector > $WORKSPACE/ladder/detector.log 2>&1 && [ -f $DET ] \
+    && mark "DETECTOR_DONE $(grep -a '^FINAL' $WORKSPACE/ladder/detector.log | grep -oE '"(recall|precision|f1|recall_0_10m|recall_30_50m)": [0-9.]+' | tr '\n' ' ')" \
     || { mark DETECTOR_FAILED; exit 1; } ;;
 export)
-  PD=$(prefix_of /workspace/pooled_ov0); PC=$(prefix_of /workspace/pooled_cov_ov0)
+  PD=$(prefix_of $WORKSPACE/pooled_ov0); PC=$(prefix_of $WORKSPACE/pooled_cov_ov0)
   $PYC -u scripts/training/export_detector_tokens.py --prefix $PD,$PC --detector $DET --m 20 --variant _det --max_range $OBJ_RANGE \
-    > /workspace/ladder/export.log 2>&1 && [ -f $PD.boxtok20_det.f16 ] && [ -f $PC.boxtok20_det.f16 ] \
-    && mark "EXPORT_DONE $(grep -oE 'objects per frame' -B0 /workspace/ladder/export.log | wc -l) caches, $(grep -oE '[0-9.]+ objects per frame' /workspace/ladder/export.log | tr '\n' ' ')" \
+    > $WORKSPACE/ladder/export.log 2>&1 && [ -f $PD.boxtok20_det.f16 ] && [ -f $PC.boxtok20_det.f16 ] \
+    && mark "EXPORT_DONE $(grep -oE 'objects per frame' -B0 $WORKSPACE/ladder/export.log | wc -l) caches, $(grep -oE '[0-9.]+ objects per frame' $WORKSPACE/ladder/export.log | tr '\n' ' ')" \
     || { mark EXPORT_FAILED; exit 1; } ;;
 cutin)
-  PC=$(prefix_of /workspace/pooled_cov_ov0)
-  $PY scripts/analysis/cutin_token_check.py --prefix $PC --out /workspace/ladder/cutin_log_side.json > /workspace/ladder/cutin.log 2>&1 \
+  PC=$(prefix_of $WORKSPACE/pooled_cov_ov0)
+  $PY scripts/analysis/cutin_token_check.py --prefix $PC --out $WORKSPACE/ladder/cutin_log_side.json > $WORKSPACE/ladder/cutin.log 2>&1 \
     && mark CUTIN_DONE || mark CUTIN_FAILED ;;
 gate)
   $PY - <<'PYX' >> $S
@@ -232,7 +233,7 @@ except Exception as e:
 PYX
   ;;
 train)
-  ARM=${2:?arm}; PD=$(prefix_of /workspace/pooled_ov0); PC=$(prefix_of /workspace/pooled_cov_ov0)
+  ARM=${2:?arm}; PD=$(prefix_of $WORKSPACE/pooled_ov0); PC=$(prefix_of $WORKSPACE/pooled_cov_ov0)
   BASE=$COMMON; LAB=ladder_$ARM
   OBJ="--object_tokens 20 --object_detector $DET --object_max_range $OBJ_RANGE"
   case $ARM in
@@ -251,8 +252,8 @@ train)
            [ "${ARM: -1}" = w ] && FL="$FL --moe_experts 16 --moe_hidden 32 --moe_top_k 4 --moe_aux_weight 0.01"
            LOGN=$LAB ;;   # seed 1 must not overwrite seed 0's log
     a87_fm|a87_tp|a87_moelat)   # 2026-11-21 A87 round 2 (tfpp_chain.sh), mem_L0's settings; the caches come from cache_full (9x24 + exact 4x4)
-           P9D=$(prefix_grid /workspace/pooled_ov0 9x24); P9C=$(prefix_grid /workspace/pooled_cov_ov0 9x24)
-           P4D=$(prefix_grid /workspace/pooled_ov0 4x4); P4C=$(prefix_grid /workspace/pooled_cov_ov0 4x4)
+           P9D=$(prefix_grid $WORKSPACE/pooled_ov0 9x24); P9C=$(prefix_grid $WORKSPACE/pooled_cov_ov0 9x24)
+           P4D=$(prefix_grid $WORKSPACE/pooled_ov0 4x4); P4C=$(prefix_grid $WORKSPACE/pooled_cov_ov0 4x4)
            BASE=$COMMON_RGB; LAB=$ARM; LOGN=$ARM
            FL="--experiment_name a87_tfpp_parts --reset_optimizer 1 --seed 0 --val_every 1 --train_eval_frames 20000 --data_dir $DC"
            case $ARM in
@@ -272,24 +273,24 @@ train)
   esac
   LOGN=${LOGN:-$ARM}
   mark "TRAIN_START $LOGN"
-  $PYC -u scripts/training/train_wor.py $BASE $FL --num_workers ${NW:-4} --run_label $LAB --save_dir /workspace/checkpoints/$LAB \
-    > /workspace/ladder/train_$LOGN.log 2>&1
+  $PYC -u scripts/training/train_wor.py $BASE $FL --num_workers ${NW:-4} --run_label $LAB --save_dir $WORKSPACE/checkpoints/$LAB \
+    > $WORKSPACE/ladder/train_$LOGN.log 2>&1
   rc=$?
-  CK=/workspace/checkpoints/$LAB
+  CK=$WORKSPACE/checkpoints/$LAB
   [ -f $CK/frozen_backbone.pth ] || cp $ENC $CK/frozen_backbone.pth 2>/dev/null
   if [ $rc = 0 ] && [ -f $CK/model_epoch_030.pth ]; then touch $CK/TRAINED; fi
-  mark "TRAIN_END $LOGN rc=$rc $(grep -aoE '\[memorization\].*' /workspace/ladder/train_$LOGN.log | tail -1)"; exit $rc ;;
+  mark "TRAIN_END $LOGN rc=$rc $(grep -aoE '\[memorization\].*' $WORKSPACE/ladder/train_$LOGN.log | tail -1)"; exit $rc ;;
 cache_full)   # 2026-11-21 (tfpp_chain.sh): D and DX at 9x24 (TF++ camera-only, a87_fm) + the exact 4x4 (one encoder pass), sharded over every GPU
   NG=$(nvidia-smi -L 2>/dev/null | wc -l); [ "$NG" -ge 1 ] || NG=1
   for W in D DX; do
-    DD=$D; OUTD=/workspace/pooled_ov0; [ $W = DX ] && { DD=$DX; OUTD=/workspace/pooled_cov_ov0; }
+    DD=$D; OUTD=$WORKSPACE/pooled_ov0; [ $W = DX ] && { DD=$DX; OUTD=$WORKSPACE/pooled_cov_ov0; }
     mkdir -p $OUTD
     pids=""
     for k in $(seq 0 $((NG - 1))); do
       ( $PYC scripts/training/build_pooled_cache.py --data_dir $DD --out_dir $OUTD --backbone regnety_032 --frozen_backbone $ENC --img_size 288x768 \
           --crop_bottom_frac 0.0 --route_overlay 0 --route_points 4 --route_key route_original --use_augmented_camera 1 --grid 9x24 --extra_grid 4 \
           --device cuda:$k --shard $k --num_shards $NG --num_workers $(( CORES / NG > 10 ? 10 : CORES / NG - 1 )) --batch_size 128 \
-          > /workspace/ladder/cachefull_${W}_$k.log 2>&1 ) & pids="$pids $!"
+          > $WORKSPACE/ladder/cachefull_${W}_$k.log 2>&1 ) & pids="$pids $!"
       sleep 20   # shard 0 creates the layout; the others wait for its json
     done
     rc=0; for p in $pids; do wait $p || rc=1; done
@@ -298,13 +299,13 @@ cache_full)   # 2026-11-21 (tfpp_chain.sh): D and DX at 9x24 (TF++ camera-only, 
     [ $rc = 0 ] && [ -n "$p9" ] && [ -n "$p4" ] && [ "$left" = 0 ] && mark "CACHE_FULL_DONE $W $p9 + 4x4" || { mark "CACHE_FULL_FAILED $W (rc $rc, frames left ${left:-?})"; exit 1; }
   done ;;
 train_tfpp)   # 2026-11-21 A86: TF++ camera-only on the 9x24 maps (scripts/training/train_tfpp_cam.py; TF++'s recipe: 31 epochs, batch 128)
-  P9D=$(prefix_grid /workspace/pooled_ov0 9x24); P9C=$(prefix_grid /workspace/pooled_cov_ov0 9x24); CK=/workspace/checkpoints/a86_tfpp_cam
+  P9D=$(prefix_grid $WORKSPACE/pooled_ov0 9x24); P9C=$(prefix_grid $WORKSPACE/pooled_cov_ov0 9x24); CK=$WORKSPACE/checkpoints/a86_tfpp_cam
   mark "TRAIN_START a86_tfpp_cam"
   $PYC -u scripts/training/train_tfpp_cam.py --data_dir $DC --pooled_cache $P9D,$P9C --frozen_backbone $ENC --save_dir $CK \
-    --num_workers ${NW:-6} --experiment_name a86_tfpp_cam --epochs ${TFPP_EPOCHS:-31} ${TFPP_RESUME:+--resume $TFPP_RESUME}     >> /workspace/ladder/train_a86_tfpp_cam.log 2>&1   # TFPP_EPOCHS=15 + TFPP_RESUME=snapshot (2026-11-22): the first cosine cycles only (ends at epoch 15)
+    --num_workers ${NW:-6} --experiment_name a86_tfpp_cam --epochs ${TFPP_EPOCHS:-31} ${TFPP_RESUME:+--resume $TFPP_RESUME}     >> $WORKSPACE/ladder/train_a86_tfpp_cam.log 2>&1   # TFPP_EPOCHS=15 + TFPP_RESUME=snapshot (2026-11-22): the first cosine cycles only (ends at epoch 15)
   rc=$?
   [ $rc = 0 ] && [ -f $CK/tfpp_cam/model_$(printf %04d ${TFPP_EPOCHS:-31}).pth ] && [ -f $CK/tfpp_cam/config.json ] && touch $CK/TRAINED
-  mark "TRAIN_END a86_tfpp_cam rc=$rc $(grep -a '\[tfpp_cam\] epoch' /workspace/ladder/train_a86_tfpp_cam.log | tail -1 | cut -c1-150)"; exit $rc ;;
+  mark "TRAIN_END a86_tfpp_cam rc=$rc $(grep -a '\[tfpp_cam\] epoch' $WORKSPACE/ladder/train_a86_tfpp_cam.log | tail -1 | cut -c1-150)"; exit $rc ;;
 memtable)   # 2026-11-21: one MEMTABLE line per arm (latest validated epoch) + the experts' held-out effect per level
   $PY - <<'PYX' >> $S
 import csv, glob, os
@@ -327,7 +328,7 @@ PYX
   ;;
 lanes)
   N=${2:?lanes}; shift 2
-  mkdir -p /workspace/evlogs
+  mkdir -p $WORKSPACE/evlogs
   for k in $(seq 1 $N); do
     JOBS=()
     for spec in "$@"; do
@@ -336,7 +337,7 @@ lanes)
       [ -n "$R" ] && JOBS+=("CKE:${LABEL}_L$k:$CK:$R:$FLAGS")
     done
     P=$((2000 + 10 * k))
-    (setsid nohup bash scripts/eval/queue_A9c.sh $P 0 "${JOBS[@]}" > /workspace/evlogs/ladder_L$k.out 2>&1 < /dev/null &)
+    (setsid nohup bash scripts/eval/queue_A9c.sh $P 0 "${JOBS[@]}" > $WORKSPACE/evlogs/ladder_L$k.out 2>&1 < /dev/null &)
     mark "LANE$k START port $P jobs ${#JOBS[@]}: $(printf '%s ' "${JOBS[@]}" | grep -oE 'CKE:[^:]+' | tr '\n' ' ')"
     sleep 20
   done ;;

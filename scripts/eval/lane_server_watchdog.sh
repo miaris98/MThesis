@@ -2,7 +2,7 @@
 # Box side (2026-10-28, A69): a Bench2Drive lane can hang with its leaderboard evaluator alive and its CARLA server gone (seen twice on
 # the TF++ 220-route lanes). b2d_guardian.sh only relaunches when the evaluator exits, so this kills an evaluator whose server
 # (-carla-rpc-port=PORT) has been missing on two checks in a row; the guardian then resumes the lane.
-# usage: setsid nohup bash scripts/eval/lane_server_watchdog.sh LABEL:PORT [LABEL:PORT ...] > /workspace/a69/watchdog.log 2>&1 &
+# usage: setsid nohup bash scripts/eval/lane_server_watchdog.sh LABEL:PORT [LABEL:PORT ...] > $WORKSPACE/a69/watchdog.log 2>&1 &
 # PITFALL (2026-10-28 evening): a lane's server came up on PORT+1 (2101 for lane 2100) after a crash relaunch; this script then killed a
 # healthy evaluator every 4 min and used up the guardian's 25 attempts. Do not run it unattended until it matches the server by the
 # evaluator's own child process (or by PORT..PORT+2) instead of the exact port.

@@ -4,16 +4,17 @@
 # Exit 0 only if EVERY box took the file (rotate_gdrive_token.sh relies on that before it revokes the old token).
 #
 # usage:  scripts/ops/push_gdrive_token_to_boxes.sh                 # every running Vast.ai instance (vastai show instances)
-#         scripts/ops/push_gdrive_token_to_boxes.sh PORT HOST ...   # explicit boxes, e.g. 15895 ssh3.vast.ai 21207 ssh4.vast.ai
+#         scripts/ops/push_gdrive_token_to_boxes.sh PORT HOST ...   # explicit boxes, e.g. PORT1 sshN.vast.ai PORT2 HOST2
 # Rotation: scripts/ops/rotate_gdrive_token.sh  (docs/ops/google_drive_sync.md)
 RCLONE_VERSION=v1.75.1
 cd "$(dirname "$0")/../.." || exit 1
 [ -s .gdrive_rclone.conf ] || { echo "missing .gdrive_rclone.conf in repo root"; exit 1; }
 
-# Git Bash on this PC: `python`/`python3` are Microsoft Store stubs, `py` is real; vastai lives in the graphtools conda env.
+# Git Bash on this PC: `python`/`python3` are Microsoft Store stubs, `py` is real; vastai lives in a conda env (scripts/lib/pc.sh).
 PY=""; for c in python3 python py; do "$c" -c 'import json' >/dev/null 2>&1 && { PY=$c; break; }; done
 [ -n "$PY" ] || { echo "no working python (tried python3, python, py)"; exit 1; }
-VAST=${VAST_CLI:-$(command -v vastai || echo /c/Users/miari/anaconda3/envs/graphtools/Scripts/vastai.exe)}
+. scripts/lib/pc.sh
+VAST=$(vast_cli) || VAST=vastai
 
 if [ "$#" -gt 0 ]; then
   BOXES=()

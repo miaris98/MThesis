@@ -3,9 +3,10 @@ eval JSONs from the HF relay into the run folders, sha256-checked against HF's L
 Also times one 200 MB upload to HF (box uplink check)."""
 import hashlib, os, re, sys, time
 from huggingface_hub import HfApi, hf_hub_download
+WORKSPACE = os.environ.get("WORKSPACE", "/workspace").rstrip("/")   # the box workspace (src/config/paths.py: WORKSPACE)
 
 api = HfApi(token=open("/dev/shm/hf_token").read().strip()); repo = api.whoami()["name"] + "/mthesis-relay"
-ROOT = "/workspace/MThesis/results/100k_benchmark/S058_ezv2_match"
+ROOT = f"{WORKSPACE}/MThesis/results/100k_benchmark/S058_ezv2_match"
 WANT = ("checkpoint_env30000_upd28004.pt", "eval_env30000_upd28004.json")
 RUN = re.compile(r"(S058[hi]_(gtrxl|resnet)_(?:30k|100k)_s\d+_uniform)")
 
@@ -34,18 +35,18 @@ bad = 0
 for (run, f), x in sorted(pick.items()):
     dest = f"{ROOT}/{run}/checkpoints/{f}"
     os.makedirs(os.path.dirname(dest), exist_ok=True)
-    p = hf_hub_download(repo, x.path, token=api.token, local_dir="/workspace/hf_dl")
+    p = hf_hub_download(repo, x.path, token=api.token, local_dir=f"{WORKSPACE}/hf_dl")
     os.replace(p, dest)
     ok = x.lfs is None or sha(dest) == x.lfs.sha256
     bad += not ok
     print("OK " if ok else "BAD", x.path, os.path.getsize(dest), flush=True)
 print(f"RESTORE {'DONE' if bad == 0 else 'FAILED'} files={len(pick)} bad={bad}", flush=True)
 
-os.makedirs("/workspace/hftest", exist_ok=True)
-with open("/workspace/hftest/t.bin", "wb") as fh:
+os.makedirs(f"{WORKSPACE}/hftest", exist_ok=True)
+with open(f"{WORKSPACE}/hftest/t.bin", "wb") as fh:
     fh.write(os.urandom(200_000_000))
 t = time.time()
-api.upload_file(path_or_fileobj="/workspace/hftest/t.bin", path_in_repo="speedtest/P.bin", repo_id=repo)
+api.upload_file(path_or_fileobj=f"{WORKSPACE}/hftest/t.bin", path_in_repo="speedtest/P.bin", repo_id=repo)
 dt = time.time() - t
 api.delete_file("speedtest/P.bin", repo_id=repo)
 print(f"UPLINK to HF: 200 MB in {dt:.0f} s = {200 / dt:.1f} MB/s", flush=True)

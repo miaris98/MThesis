@@ -15,8 +15,13 @@ import glob
 import json
 import random
 import statistics as st
+import sys
+from pathlib import Path
 
-HOME = "E:/MThesis_EXP"
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from src.config.paths import exp_root  # noqa: E402  (the experiment archive: MTHESIS_EXP_ROOT, E:/MThesis_EXP on the PC)
+
+HOME = exp_root().as_posix()
 
 
 def load(sims: int) -> dict:

@@ -6,9 +6,10 @@
 #             restores model, target net, optimizer, RNG, step AND replay_latest.npz beside it.
 #   scratch : fresh run into results/100k_benchmark/<name>.
 # env: GPU (default 0)
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
 set -euo pipefail
 MODE=$1; NAME=$2; CORES=$3; SIMS=$4; SEED=$5; TOTAL=$6; shift 6
-cd /workspace/MThesis
+cd $WORKSPACE/MThesis
 PY=/venv/main/bin/python
 T=atari_qwen/training/train_mcts_offpolicy.py
 GPU="${GPU:-0}"
@@ -24,5 +25,5 @@ else
   OUT="$NAME"; EXTRA=""
 fi
 CUDA_VISIBLE_DEVICES="$GPU" taskset -c "$CORES" nohup $PY $T $COMMON $EXTRA "$@" \
-  --log-dir "results/100k_benchmark/$OUT" </dev/null > "/workspace/$OUT.log" 2>&1 &
+  --log-dir "results/100k_benchmark/$OUT" </dev/null > "$WORKSPACE/$OUT.log" 2>&1 &
 echo "launched $OUT (GPU $GPU, cores $CORES, $SIMS sims, seed $SEED, total $TOTAL) pid $! ${EXTRA}"

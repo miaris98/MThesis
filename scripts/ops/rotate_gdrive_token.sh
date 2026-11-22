@@ -19,8 +19,8 @@ log() { echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
 
 PY=""; for c in python3 python py; do "$c" -c 'import json' >/dev/null 2>&1 && { PY=$c; break; }; done
 [ -n "$PY" ] || { log "no working python"; exit 1; }
-RC=$(command -v rclone || ls /c/Users/miari/AppData/Local/Microsoft/WinGet/Packages/Rclone.Rclone_*/rclone-*/rclone.exe 2>/dev/null | head -1)
-[ -n "$RC" ] || { log "rclone not found"; exit 1; }
+. scripts/lib/pc.sh   # rclone_cli, GDRIVE_ROOT
+RC=$(rclone_cli) || { log "rclone not found"; exit 1; }
 CONF=.gdrive_rclone.conf
 [ -s "$CONF" ] || { log "missing $CONF"; exit 1; }
 
@@ -28,7 +28,7 @@ refresh_token() { "$PY" -c "
 import json, re, sys
 m = re.search(r'^token\s*=\s*(\{.*\})\s*$', open(sys.argv[1], encoding='utf-8').read(), re.M)
 print(json.loads(m.group(1)).get('refresh_token', '') if m else '')" "$1" | tr -d '\r'; }
-works() { "$RC" --config "$CONF" lsd gdrive:MThesis_backups >/dev/null 2>&1; }
+works() { "$RC" --config "$CONF" lsd "$GDRIVE_ROOT" >/dev/null 2>&1; }
 
 OLD=$(refresh_token "$CONF")
 [ -n "$OLD" ] || { log "no refresh token in $CONF"; exit 1; }

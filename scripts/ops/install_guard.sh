@@ -7,7 +7,7 @@
 #   * if uv fails every attempt, the same packages are installed with pip (bootstrapped into the venv with uv);
 #   * exit status 0 only if the install succeeded; the caller must stop on a nonzero status.
 # usage: scripts/ops/install_guard.sh LABEL VENV_DIR -- uv-pip-install-args...
-#   e.g. scripts/ops/install_guard.sh carla_torch /workspace/venv_carla -- torch torchvision --index-url https://download.pytorch.org/whl/cu128
+#   e.g. scripts/ops/install_guard.sh carla_torch $WORKSPACE/venv_carla -- torch torchvision --index-url https://download.pytorch.org/whl/cu128
 set -uo pipefail
 LABEL=${1:?label}; VENV=${2:?venv dir}; shift 2
 [ "${1:-}" = "--" ] && shift

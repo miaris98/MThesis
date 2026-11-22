@@ -6,10 +6,10 @@ Usage examples:
     python scripts/sync/download_from_vastai.py
 
     # 2. Command-line flags:
-    python scripts/sync/download_from_vastai.py --ssh-cmd "ssh -p 12345 root@ssh5.vast.ai"
-    python scripts/sync/download_from_vastai.py -p 12345 -H ssh5.vast.ai --all
-    python scripts/sync/download_from_vastai.py -p 12345 -H ssh5.vast.ai --telemetry-only
-    python scripts/sync/download_from_vastai.py -p 12345 -H ssh5.vast.ai --checkpoints-only
+    python scripts/sync/download_from_vastai.py --ssh-cmd "ssh -p PORT root@sshN.vast.ai"
+    python scripts/sync/download_from_vastai.py -p PORT -H sshN.vast.ai --all
+    python scripts/sync/download_from_vastai.py -p PORT -H sshN.vast.ai --telemetry-only
+    python scripts/sync/download_from_vastai.py -p PORT -H sshN.vast.ai --checkpoints-only
 """
 import os
 import sys
@@ -34,7 +34,7 @@ DEFAULT_REMOTE_PATHS = {
 
 
 def parse_ssh_cmd(ssh_cmd: str):
-    """Extract port, user, and host from a typical ssh string like 'ssh -p 12345 root@ssh5.vast.ai'."""
+    """Extract port, user, and host from a typical ssh string like 'ssh -p PORT root@sshN.vast.ai'."""
     port_match = re.search(r'-p\s+(\d+)', ssh_cmd)
     port = port_match.group(1) if port_match else "22"
     
@@ -73,9 +73,9 @@ def run_scp_download(port: str, user_host: str, remote_file_or_dir: str, local_d
 
 def main():
     parser = argparse.ArgumentParser(description="Download CARLA RL artifacts & telemetry from Vast.ai to local PC.")
-    parser.add_argument("--ssh-cmd", type=str, help="Full SSH command string from Vast.ai console (e.g. 'ssh -p 12345 root@ssh5.vast.ai')")
-    parser.add_argument("-p", "--port", type=str, help="SSH Port (e.g. 12345)")
-    parser.add_argument("-H", "--host", type=str, help="SSH Host or user@host (e.g. root@ssh5.vast.ai)")
+    parser.add_argument("--ssh-cmd", type=str, help="Full SSH command string from Vast.ai console (e.g. 'ssh -p PORT root@sshN.vast.ai')")
+    parser.add_argument("-p", "--port", type=str, help="SSH Port (from the instance record)")
+    parser.add_argument("-H", "--host", type=str, help="SSH Host or user@host (e.g. root@sshN.vast.ai)")
     parser.add_argument("--dest", type=str, default=str(paths.exp_root()),
                         help="Local destination directory (default: the experiment root - the external "
                              "disk when it is mounted; see src/config/paths.py)")
@@ -96,13 +96,13 @@ def main():
         port, user_host = parse_ssh_cmd(args.ssh_cmd)
     elif not port or not user_host:
         print("\nPaste your Vast.ai SSH command or enter connection details.")
-        print("Example: ssh -p 38472 root@ssh5.vast.ai\n")
+        print("Example: ssh -p PORT root@sshN.vast.ai\n")
         user_input = input("Enter SSH command or press Enter to input Port/Host manually: ").strip()
         if user_input:
             port, user_host = parse_ssh_cmd(user_input)
         else:
             port = input("Enter SSH Port (e.g. 38472): ").strip()
-            host = input("Enter Host (e.g. ssh5.vast.ai or root@ssh5.vast.ai): ").strip()
+            host = input("Enter Host (e.g. sshN.vast.ai or root@sshN.vast.ai): ").strip()
             user_host = host if "@" in host else f"root@{host}"
 
     if not port or not user_host:

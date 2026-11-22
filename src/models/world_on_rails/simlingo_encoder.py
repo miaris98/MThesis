@@ -20,6 +20,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from src.config.paths import WORKSPACE  # the box workspace ($WORKSPACE)
 
 _MEAN = (0.485, 0.456, 0.406)
 _STD = (0.229, 0.224, 0.225)
@@ -30,11 +31,11 @@ class SimLingoEncoder(nn.Module):
     def __init__(self, weights_path: Optional[str] = None, freeze_backbone: bool = True, internvl_dir: Optional[str] = None, dtype: torch.dtype = torch.bfloat16):
         super().__init__()
         import sys
-        extra = os.environ.get("SIMLINGO_PKGS", "/workspace/simlingo_pkgs")
+        extra = os.environ.get("SIMLINGO_PKGS", f"{WORKSPACE}/simlingo_pkgs")
         if os.path.isdir(extra) and extra not in sys.path:
             sys.path.insert(0, extra)                      # only transformers + its small deps live there (--no-deps), so torch / timm / numpy of the venv are not shadowed
         from transformers import AutoConfig, AutoModel
-        d = internvl_dir or os.environ.get("SIMLINGO_INTERNVL", "/workspace/internvl2_1b")
+        d = internvl_dir or os.environ.get("SIMLINGO_INTERNVL", f"{WORKSPACE}/internvl2_1b")
         cfg = AutoConfig.from_pretrained(d, trust_remote_code=True)
         m = AutoModel.from_config(cfg, trust_remote_code=True)
         m.language_model = None                       # only the vision tower + mlp1 are used

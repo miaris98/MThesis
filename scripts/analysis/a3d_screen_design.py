@@ -12,7 +12,7 @@ with no box:
    Var per route = interaction + (ckpt + eval / k) / T + (ckpt / 4 + eval / 8); the smallest gain detectable at 80% power (5% two-sided), in the subset's
    own DS units and as the overall-DS equivalent *if the whole effect sits on that subset*, with its route-runs and box-hours.
 
-    py scripts/analysis/a3d_screen_design.py E:/MThesis_EXP/live_2026092[89]_* E:/MThesis_EXP/live_2026093* E:/MThesis_EXP/live_2026100* \
+    py scripts/analysis/a3d_screen_design.py $EXP/live_2026092[89]_* $EXP/live_2026093* $EXP/live_2026100* \
         --runs-per-hour 90 --json-out a3d_0410.json
 """
 from __future__ import annotations

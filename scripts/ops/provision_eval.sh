@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # S-115 eval-only CARLA box: CARLA 0.9.15 + venv_carla + leaderboard, and the checkpoints the repeat evals need from the
 # HF relay (sha-checked). No dataset, no training env. Writes PROVISION_DONE where queue_A9c.sh waits for it.
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
 set -uo pipefail
-cd /workspace && mkdir -p checkpoints logs_prov
-( cd /workspace/MThesis && bash scripts/eval/launch_b2d20.sh setup > /workspace/logs_prov/setup_carla.log 2>&1 && \
-  VIRTUAL_ENV=/workspace/venv_carla uv pip install --reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu128 >> /workspace/logs_prov/setup_carla.log 2>&1 && \
-  VIRTUAL_ENV=/workspace/venv_carla uv pip install lmdb wandb pyyaml >> /workspace/logs_prov/setup_carla.log 2>&1 && \
-  /workspace/venv_carla/bin/python -c "import torch,timm,carla,py_trees;x=torch.ones(2,device='cuda');print('venv_carla torch',torch.__version__,x.sum().item())" >> /workspace/logs_prov/setup_carla.log 2>&1 \
-  && echo CARLA_DONE >> /workspace/logs_prov/status || echo CARLA_FAILED >> /workspace/logs_prov/status ) &
+cd $WORKSPACE && mkdir -p checkpoints logs_prov
+( cd $WORKSPACE/MThesis && bash scripts/eval/launch_b2d20.sh setup > $WORKSPACE/logs_prov/setup_carla.log 2>&1 && \
+  VIRTUAL_ENV=$WORKSPACE/venv_carla uv pip install --reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu128 >> $WORKSPACE/logs_prov/setup_carla.log 2>&1 && \
+  VIRTUAL_ENV=$WORKSPACE/venv_carla uv pip install lmdb wandb pyyaml >> $WORKSPACE/logs_prov/setup_carla.log 2>&1 && \
+  $WORKSPACE/venv_carla/bin/python -c "import torch,timm,carla,py_trees;x=torch.ones(2,device='cuda');print('venv_carla torch',torch.__version__,x.sum().item())" >> $WORKSPACE/logs_prov/setup_carla.log 2>&1 \
+  && echo CARLA_DONE >> $WORKSPACE/logs_prov/status || echo CARLA_FAILED >> $WORKSPACE/logs_prov/status ) &
 ( (/venv/main/bin/python -c "import huggingface_hub" 2>/dev/null || uv pip install --python /venv/main/bin/python -q huggingface_hub) && \
-  /venv/main/bin/python - > /workspace/logs_prov/ckpts.log 2>&1 <<'PY' && echo CKPT_DONE >> /workspace/logs_prov/status || echo CKPT_FAILED >> /workspace/logs_prov/status
+  /venv/main/bin/python - > $WORKSPACE/logs_prov/ckpts.log 2>&1 <<'PY' && echo CKPT_DONE >> $WORKSPACE/logs_prov/status || echo CKPT_FAILED >> $WORKSPACE/logs_prov/status
 import hashlib, os
 from huggingface_hub import HfApi, hf_hub_download
 api = HfApi(token=open("/dev/shm/hf_token").read().strip()); repo = api.whoami()["name"] + "/mthesis-relay"
@@ -34,10 +35,10 @@ PY
 wait
 # original WoR (the thesis baseline, `WORL:` jobs): ship pcla_wor.tgz (built from Carla-utils/PCLA, 0.6 MB, E:/MThesis_EXP/live_20260929_ops_scripts/)
 # with the code tgz; the weights come from the public PCLA HF repo. Without the tgz this step is skipped.
-if [ -f /workspace/pcla_wor.tgz ]; then
-  ( tar -xzf /workspace/pcla_wor.tgz -C /workspace && cd /workspace/PCLA &&     /venv/main/bin/python pcla_functions/download_weights.py --agents wor > /workspace/logs_prov/pcla.log 2>&1 &&     test -s pcla_agents/wor_pretrained/leaderboard_weights/main_model_10.th && echo PCLA_DONE >> /workspace/logs_prov/status ) || echo PCLA_FAILED >> /workspace/logs_prov/status
-else echo PCLA_SKIPPED >> /workspace/logs_prov/status; fi
+if [ -f $WORKSPACE/pcla_wor.tgz ]; then
+  ( tar -xzf $WORKSPACE/pcla_wor.tgz -C $WORKSPACE && cd $WORKSPACE/PCLA &&     /venv/main/bin/python pcla_functions/download_weights.py --agents wor > $WORKSPACE/logs_prov/pcla.log 2>&1 &&     test -s pcla_agents/wor_pretrained/leaderboard_weights/main_model_10.th && echo PCLA_DONE >> $WORKSPACE/logs_prov/status ) || echo PCLA_FAILED >> $WORKSPACE/logs_prov/status
+else echo PCLA_SKIPPED >> $WORKSPACE/logs_prov/status; fi
 if grep -q CARLA_DONE logs_prov/status && grep -q CKPT_DONE logs_prov/status && ! grep -q PCLA_FAILED logs_prov/status; then
   cp logs_prov/setup_carla.log setup_carla.log && echo PROVISION_DONE >> setup_carla.log
 fi
-echo "PROVISION_END $(date -u)" >> /workspace/logs_prov/status
+echo "PROVISION_END $(date -u)" >> $WORKSPACE/logs_prov/status

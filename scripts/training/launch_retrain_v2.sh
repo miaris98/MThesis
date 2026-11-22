@@ -47,12 +47,13 @@
 # later, the cheap follow-up is re-running with --route_overlay 0 and with
 # --target_speed_loss_weight 0, which isolates the two genuinely optional pieces; the camera
 # parity fix is a bug fix and would not be reverted for an ablation.
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
 set -u
 
-MTHESIS=/workspace/MThesis
-DATA=/workspace/dataset/wor_trajectories
-CKPT_ROOT=/workspace/checkpoints/wor_v2
-TFPP=/workspace/tfpp_pretrained/pretrained_models/all_towns/model_0030_0.pth
+MTHESIS=$WORKSPACE/MThesis
+DATA=$WORKSPACE/dataset/wor_trajectories
+CKPT_ROOT=$WORKSPACE/checkpoints/wor_v2
+TFPP=$WORKSPACE/tfpp_pretrained/pretrained_models/all_towns/model_0030_0.pth
 PY=/venv/main/bin/python
 
 EPOCHS="${EPOCHS:-50}"
@@ -65,9 +66,9 @@ WORKERS="${WORKERS:-8}"
 
 if [ ! -f "$TFPP" ]; then
   echo "FATAL: TransFuser++ weights not found at $TFPP"
-  echo "Re-download:  curl -L -o /workspace/tfpp_pretrained.zip \\"
+  echo "Re-download:  curl -L -o $WORKSPACE/tfpp_pretrained.zip \\"
   echo "  https://s3.eu-central-1.amazonaws.com/avg-projects-2/garage_2/models/pretrained_models.zip"
-  echo "  && unzip -q /workspace/tfpp_pretrained.zip -d /workspace/tfpp_pretrained"
+  echo "  && unzip -q $WORKSPACE/tfpp_pretrained.zip -d $WORKSPACE/tfpp_pretrained"
   exit 1
 fi
 
@@ -91,7 +92,7 @@ echo "=== launching cnn arm (port-free, GPU shared) ==="
 setsid $PY scripts/training/train_wor.py $(common_args) \
   --policy_arch cnn \
   --save_dir "$CKPT_ROOT/cnn_s0" --run_label cnn_v2_full8town \
-  </dev/null >/workspace/train_v2_cnn.log 2>&1 &
+  </dev/null >$WORKSPACE/train_v2_cnn.log 2>&1 &
 echo "  cnn pid $!"
 
 # Stagger so the two runs do not build the decode cache for the same frames simultaneously -
@@ -104,11 +105,11 @@ setsid $PY scripts/training/train_wor.py $(common_args) \
   --policy_arch qwen30m --vision_grid 6x16 \
   --heading_loss_weight 0.5 --curvature_loss_weight 0.2 \
   --save_dir "$CKPT_ROOT/qwen30m_geom_s0" --run_label qwen30m_geom_v2_full8town \
-  </dev/null >/workspace/train_v2_qwen.log 2>&1 &
+  </dev/null >$WORKSPACE/train_v2_qwen.log 2>&1 &
 echo "  qwen pid $!"
 
 echo
 echo "=== launched. monitor with: ==="
-echo "  tail -f /workspace/train_v2_cnn.log"
-echo "  tail -f /workspace/train_v2_qwen.log"
+echo "  tail -f $WORKSPACE/train_v2_cnn.log"
+echo "  tail -f $WORKSPACE/train_v2_qwen.log"
 echo "  nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv"

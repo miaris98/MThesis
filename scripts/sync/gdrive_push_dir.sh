@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Push a folder to Google Drive under MThesis_backups/SUB and verify it by checksum (Drive stores MD5).
+# Push a folder to Google Drive under $GDRIVE_ROOT/SUB (default gdrive:MThesis_backups) and verify it by checksum (Drive stores MD5).
 # usage: gdrive_push_dir.sh DIR SUB [FILES_FROM]
 #   FILES_FROM: optional list of paths relative to DIR (one per line); only those are pushed and checked, so a box can push the
-#   files the E: pull takes straight from /workspace without staging a second copy (fleet_monitor/sync_boxes.sh).
+#   files the E: pull takes straight from $WORKSPACE without staging a second copy (fleet_monitor/sync_boxes.sh).
 #   config: $GDRIVE_CONF or /dev/shm/gdrive_rclone.conf (shipped by scripts/ops/push_gdrive_token_to_boxes.sh)
 # Prints one PUSH_VERIFY line (same shape as hf_push_dir.py); exit 0 only if every file matched.
 DIR=$1; SUB=$2; LIST=$3
 CONF=${GDRIVE_CONF:-/dev/shm/gdrive_rclone.conf}
 [ -d "$DIR" ] && [ -n "$SUB" ] && [ -s "$CONF" ] || { echo "usage: gdrive_push_dir.sh DIR SUB [FILES_FROM] (and $CONF must exist)"; exit 2; }
-DEST=gdrive:MThesis_backups/$SUB
+DEST=${GDRIVE_ROOT:-gdrive:MThesis_backups}/$SUB   # this file is shipped to boxes alone, so it keeps its own default (scripts/lib/pc.sh)
 RC="rclone --config $CONF --retries 4 --low-level-retries 10"
 SEL=()
 if [ -n "$LIST" ]; then

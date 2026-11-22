@@ -7,7 +7,8 @@
 
 Lanes per GPU = floor(VRAM_GB / 5.5) (S-126: a lane needs ~5 GB of VRAM at 288x768, 8 lanes on a 24 GB card gave 40 of 59 routes as agent OOM failures), capped at CPUS / 5 in total
 (CARLA needs ~5 cores per lane) and at 12 per box; fewer lanes if a lane would get fewer than 8 routes (job start-up and hand-over cost ~2 min per job).
-Output: one line `BOX PORT GPU JOBS` per lane for scripts/ops/launch_lanes_nokill.sh (arms in the given order: priority arms first).
+Output: one line `BOX PORT GPU JOBS` per lane for scripts/ops/launch_lanes_extra.sh (`--kill` for a full relaunch; arms in the given
+order: priority arms first).
 """
 import argparse
 import json

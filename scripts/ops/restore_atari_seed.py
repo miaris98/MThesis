@@ -5,12 +5,13 @@ Token from /dev/shm/hf_token (put there by scripts/ops/push_hf_token_to_boxes.sh
 Periodic checkpoint_env*.pt files are skipped (not needed to resume)."""
 import hashlib, os, shutil, sys
 from huggingface_hub import HfApi, hf_hub_download
+WORKSPACE = os.environ.get("WORKSPACE", "/workspace").rstrip("/")   # the box workspace (src/config/paths.py: WORKSPACE)
 
 seed, name = sys.argv[1], sys.argv[2]
 api = HfApi(token=open("/dev/shm/hf_token").read().strip()); repo = api.whoami()["name"] + "/mthesis-relay"
 rel = f"MThesis/results/100k_benchmark/S058_ezv2_match/S058h_gtrxl_100k_s{seed}_uniform"
 prefix = f"live_20261010/{name}/{rel}"
-dest_root = f"/workspace/{rel}"
+dest_root = f"{WORKSPACE}/{rel}"
 files = [t for t in api.list_repo_tree(repo, path_in_repo=prefix, recursive=True) if hasattr(t, "size")]
 keep = [f for f in files if not os.path.basename(f.path).startswith("checkpoint_env")]
 print(f"{len(files)} files under {prefix}; restoring {len(keep)}:")
@@ -25,7 +26,7 @@ if not need <= have:
 bad = 0
 for f in keep:
     sub = f.path[len(prefix) + 1:]
-    p = hf_hub_download(repo, f.path, token=api.token, local_dir="/workspace/hf_dl")
+    p = hf_hub_download(repo, f.path, token=api.token, local_dir=f"{WORKSPACE}/hf_dl")
     dest = os.path.join(dest_root, sub); os.makedirs(os.path.dirname(dest), exist_ok=True); shutil.copy(p, dest)
     sha = getattr(getattr(f, "lfs", None), "sha256", None)
     ok = (sha is None) or hashlib.sha256(open(dest, "rb").read()).hexdigest() == sha

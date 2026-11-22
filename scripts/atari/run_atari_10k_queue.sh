@@ -7,14 +7,15 @@
 #   job "evalp LABEL CKPT LAMBDA [SIMS]" score an existing checkpoint with the B38 step 0 pessimistic search (two-network disagreement, weight LAMBDA, default 16 sims)
 # Scoring = eval_loop_stats.py: 30 games, 16 sims, raw reward, cap 27,000 steps, mean + per-game loop statistics.
 # usage: run_atari_10k_queue.sh GPU "JOB" ["JOB" ...]      (quote every job)
-# Layout: /workspace/q/out/<label>/ training, /workspace/q/eval/*_loops.json scores, /workspace/q/logs/, /workspace/q/done/<label> marker.
+# Layout: $WORKSPACE/q/out/<label>/ training, $WORKSPACE/q/eval/*_loops.json scores, $WORKSPACE/q/logs/, $WORKSPACE/q/done/<label> marker.
 # SCORE_SKIP=1 trains only (no scoring after the training; a separate dispatcher scores the finished checkpoints, so a collapsed run whose games never end cannot block the next training, 2026-10-20).
 # SCORE_STICKY=0.25 in the environment makes the scoring after a training job use ALE sticky actions (about 30 distinct games, 3-4 minutes) instead of the deterministic 4-game protocol.
 # Labels: Q_<trunk>_10k_s<seed>_sn<simnorm>_pos<pos> (Q_gtrxl_10k_s0_sn0_posabs = the B22_gtrxl_10k_s0_sn0 runs of 2026-10-17).
-cd /workspace/MThesis
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
+cd $WORKSPACE/MThesis
 GPU=$1; shift
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True OMP_NUM_THREADS=4 MLFLOW_ALLOW_FILE_STORE=true PYTHONPATH=/workspace/MThesis
-Q=/workspace/q; mkdir -p $Q/out $Q/eval $Q/logs $Q/done
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True OMP_NUM_THREADS=4 MLFLOW_ALLOW_FILE_STORE=true PYTHONPATH=$WORKSPACE/MThesis
+Q=$WORKSPACE/q; mkdir -p $Q/out $Q/eval $Q/logs $Q/done
 
 score() {  # LABEL CKPT [STAGNATION] [PESS_LAMBDA] [SIMS] [STICKY]     (B38 step 0: PESS_LAMBDA = the two-network pessimism weight, eager search)
   local label=$1 ck=$2 stag=${3:-0} pl=${4:-} sims=${5:-16} sticky=${6:-} tag="" extra=""

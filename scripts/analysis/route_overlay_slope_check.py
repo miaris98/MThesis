@@ -26,9 +26,10 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from src.config.camera import PDM_LITE_CAMERA  # noqa: E402
+from src.config.paths import WORKSPACE  # noqa: E402  (the box workspace, $WORKSPACE)
 
 TRAIN_TOWNS = {"Town01", "Town02", "Town03", "Town04", "Town05", "Town10HD"}
-DEFAULT_XML = [Path(os.environ.get("GARAGE", "/workspace/carla_garage")) / "Bench2Drive/leaderboard/data/bench2drive220.xml",
+DEFAULT_XML = [Path(os.environ.get("GARAGE", f"{WORKSPACE}/carla_garage")) / "Bench2Drive/leaderboard/data/bench2drive220.xml",
                ROOT / "Carla-utils/carla_garage/Bench2Drive/leaderboard/data/bench2drive220.xml"]
 
 

@@ -1,0 +1,9 @@
+# R1 day (2026-11-19): E15 only (was W8_SHIP=0 ladder_deploy.sh). Box script: r1_chain.sh. SCRATCH = the folder with ids220.txt and fam_routes.txt.
+${REPO}/Carla-utils/carla_garage/Bench2Drive/leaderboard/data/bench2drive220.xml|${RWS}/ladder/bench2drive220.xml
+${SCRATCH}/ids220.txt|${RWS}/ladder/ids220.txt
+${SCRATCH}/fam_routes.txt|${RWS}/ladder/fam_routes.txt
+${REPO}/scripts/ops/carla_render_test.sh|${RWS}/carla_render_test.sh
+${EXP}/live_20261006_box0_train_3090ti/checkpoints/carla_armE_aug1_hires/model_epoch_015.pth|${RWS}/checkpoints/E15/model_epoch_015.pth
+${EXP}/live_20261006_box0_train_3090ti/checkpoints/carla_armE_aug1_hires/frozen_backbone.pth|${RWS}/checkpoints/E15/frozen_backbone.pth
+${EXP}/live_20261006_box0_train_3090ti/checkpoints/carla_armE_aug1_hires/run_config.json|${RWS}/checkpoints/E15/run_config.json
+READY ${RWS}/checkpoints/E15

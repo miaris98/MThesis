@@ -14,7 +14,6 @@ CPU only, no simulator, no images: one process per route. Each route gets `<rout
 """
 import argparse
 import collections
-import gzip
 import json
 import os
 import sys
@@ -26,17 +25,9 @@ for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):     # 
 import numpy as np  # noqa: E402
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-from scripts.training.build_q_labels import _usable_cpus, find_routes  # noqa: E402
+from scripts.training.build_q_labels import _read, _usable_cpus, find_routes  # noqa: E402
 from src.training.reason_labels import (BUCKETS, REASON_CLASSES, ReasonConfig, expert_consistency, label_path,  # noqa: E402
                                         label_route, save_labels)
-
-
-def _read(path):
-    try:
-        with gzip.open(path, "rt") as f:
-            return json.load(f)
-    except Exception:
-        return None
 
 
 def label_one(args):

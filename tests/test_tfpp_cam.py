@@ -17,7 +17,10 @@ from tests._tfpp_isolation import isolate_tfpp_imports
 
 _isolate = isolate_tfpp_imports()   # carla / shapely / agents stand-ins and team_code must not leak into later test modules
 
-FB = "E:/MThesis_EXP/live_20261006_box0_train_3090ti/checkpoints/carla_armE_aug1_hires/frozen_backbone.pth"
+from src.config.paths import exp_root  # noqa: E402
+
+# E15's frozen backbone in the experiment archive (MTHESIS_EXP_ROOT); the tests that need it skip without it
+FB = str(exp_root() / "live_20261006_box0_train_3090ti/checkpoints/carla_armE_aug1_hires/frozen_backbone.pth")
 need_fb = pytest.mark.skipif(not os.path.exists(FB), reason="E15's frozen backbone (E:) not available")
 
 

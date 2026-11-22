@@ -11,23 +11,22 @@ import argparse
 import os
 import sys
 import time
-import glob
 import subprocess
 from typing import Optional
 import numpy as np
 import cv2
 import torch
 
-# Ensure CARLA PythonAPI is accessible
-carla_root = os.environ.get("CARLA_ROOT", "/workspace/carla")
-carla_dist_path = os.path.join(carla_root, "PythonAPI", "carla", "dist")
-if os.path.exists(carla_dist_path):
-    eggs = glob.glob(os.path.join(carla_dist_path, "carla-*-py3*.egg"))
-    for p in eggs:
-        if p not in sys.path:
-            sys.path.insert(0, p)
-    if os.path.join(carla_root, "PythonAPI", "carla") not in sys.path:
-        sys.path.insert(0, os.path.join(carla_root, "PythonAPI", "carla"))
+# Repository root, so `src.*` and sibling `scripts.*` modules resolve whether this file is
+# run directly (`python scripts/eval/eval_wor.py`) or imported as `scripts.eval.eval_wor`.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from src.config.carla_client import add_carla_to_path  # noqa: E402
+from src.config.paths import WORKSPACE  # noqa: E402  (the box workspace, $WORKSPACE)
+
+add_carla_to_path()
 
 try:
     import carla
@@ -38,12 +37,6 @@ try:
     from agents.navigation.global_route_planner import GlobalRoutePlanner
 except ImportError:
     GlobalRoutePlanner = None
-
-# Repository root, so `src.*` and sibling `scripts.*` modules resolve whether this file is
-# run directly (`python scripts/eval/eval_wor.py`) or imported as `scripts.eval.eval_wor`.
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
 
 from src.agents.wor_agent import WorldOnRailsAgent  # noqa: E402
 from src.config.camera import PDM_LITE_CAMERA  # noqa: E402
@@ -71,7 +64,7 @@ WOR_COMMAND_NAMES = ["LEFT", "RIGHT", "STRAIGHT", "LANEFOLLOW", "CHANGE LANE LEF
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate World on Rails Agent and Record Video in CARLA")
-    parser.add_argument("--checkpoint", type=str, default="/workspace/checkpoints/wor_10k/best_model.pth", help="Path to custom model checkpoint (.pth)")
+    parser.add_argument("--checkpoint", type=str, default=f"{WORKSPACE}/checkpoints/wor_10k/best_model.pth", help="Path to custom model checkpoint (.pth)")
     parser.add_argument("--model_type", type=str, default="wor_nc", choices=["wor_nc", "wor_lb"], help="Pretrained PCLA model variant")
     parser.add_argument("--backbone", type=str, default="resnet34", help="Backbone architecture (resnet18/34/50)")
     parser.add_argument("--policy_arch", type=str, default="cnn", choices=["cnn", "qwen10m", "qwen30m", "qwen100m", "qwen500m", "qwen900m"], help="Decision-head architecture the checkpoint was trained with - must match train_wor.py's --policy_arch for this checkpoint")
@@ -81,7 +74,7 @@ def parse_args():
     parser.add_argument("--episodes", type=int, default=1, help="Number of evaluation episodes")
     parser.add_argument("--max_steps", type=int, default=600, help="Max steps per episode (600 steps ~ 30s)")
     parser.add_argument("--record_video", type=int, default=1, help="Record evaluation video (1=True, 0=False)")
-    parser.add_argument("--video_path", type=str, default="/workspace/wor_eval_video.mp4", help="Output MP4 video path")
+    parser.add_argument("--video_path", type=str, default=f"{WORKSPACE}/wor_eval_video.mp4", help="Output MP4 video path")
     parser.add_argument("--num_vehicles", type=int, default=10, help="Number of NPC vehicles")
     parser.add_argument("--num_walkers", type=int, default=10, help="Number of pedestrians")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Inference device")

@@ -4,6 +4,7 @@
 #   2. CARLA 0.9.15 server + AdditionalMaps (Town06/07/13/15 - NOT in the base package)
 #   3. A Python 3.10 venv, because the carla wheel has no cp312 ABI tag and /venv/main is 3.12
 # Follows carla_vulkan_driver_troubleshooting_guide.md sections 4.2 and setup_vastai.sh step 2.
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
 set -x
 
 echo "===== [1/7] apt prerequisites ====="
@@ -17,13 +18,13 @@ echo "===== [2/7] NVIDIA userspace driver (matching kernel module exactly) =====
 DRIVER_VERSION=$(head -1 /proc/driver/nvidia/version | grep -oE '[0-9]{3}\.[0-9]+(\.[0-9]+)?' | head -1)
 [ -n "$DRIVER_VERSION" ] || { echo "FATAL: could not parse driver version from /proc/driver/nvidia/version"; exit 1; }
 echo "Kernel driver version: ${DRIVER_VERSION}"
-cd /workspace
+cd $WORKSPACE
 if [ ! -f "NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run" ]; then
   wget -q --show-progress "https://us.download.nvidia.com/tesla/${DRIVER_VERSION}/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run" \
     || wget -q --show-progress "https://us.download.nvidia.com/XFree86/Linux-x86_64/${DRIVER_VERSION}/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run"
 fi
 # --no-kernel-module is mandatory: the kernel module belongs to the vast.ai host.
-sh "/workspace/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run" \
+sh "$WORKSPACE/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run" \
   --no-kernel-module --silent --install-libglvnd \
   --no-nvidia-modprobe --no-rebuild-initramfs
 
@@ -32,8 +33,8 @@ ls -la /usr/lib/x86_64-linux-gnu/libGLX_nvidia.so* || echo "MISSING libGLX_nvidi
 vulkaninfo --summary 2>&1 | head -20
 
 echo "===== [4/7] CARLA 0.9.15 ====="
-CARLA_DIR=/workspace/carla
-# fetch URL FILE: aria2 into /workspace/FILE. Success = aria2 exit 0 AND its .aria2 control file gone (aria2 removes it only when
+CARLA_DIR=$WORKSPACE/carla
+# fetch URL FILE: aria2 into $WORKSPACE/FILE. Success = aria2 exit 0 AND its .aria2 control file gone (aria2 removes it only when
 # every piece is in). A dead connection times out (--timeout) and aria2 retries; a failed run is resumed from the control file.
 # 2026-11-14 (box 60611716), what this replaces:
 #   1. aria2 had no timeout: one stalled connection hung the setup for 50 min;
@@ -47,17 +48,17 @@ fetch() {
   local url=$1 out=$2 i
   for i in 1 2 3 4 5; do
     aria2c -c -x 16 -s 16 -k 20M --check-certificate=false --timeout=60 --connect-timeout=30 --max-tries=10 --retry-wait=10 \
-      --summary-interval=60 --console-log-level=warn "$url" -d /workspace -o "$out" \
-      && [ ! -f "/workspace/$out.aria2" ] && [ -s "/workspace/$out" ] && { echo "FETCH_OK $out $(stat -c %s "/workspace/$out") bytes"; return 0; }
+      --summary-interval=60 --console-log-level=warn "$url" -d $WORKSPACE -o "$out" \
+      && [ ! -f "$WORKSPACE/$out.aria2" ] && [ -s "$WORKSPACE/$out" ] && { echo "FETCH_OK $out $(stat -c %s "$WORKSPACE/$out") bytes"; return 0; }
     echo "FETCH_RETRY $out: aria2 run $i of 5 did not finish, resuming from its control file"; sleep 15
   done
   echo "FETCH_FAILED $out"; return 1
 }
 unpack() {  # FILE DEST CHECK_PATH: verify the gzip stream, extract, check one file the archive must provide, then delete the archive
-  gzip -t "/workspace/$1" || { echo "FATAL: /workspace/$1 is corrupt (gzip -t), kept for inspection"; exit 1; }
-  tar -xzf "/workspace/$1" -C "$2" || { echo "FATAL: extracting /workspace/$1 failed, archive kept"; exit 1; }
+  gzip -t "$WORKSPACE/$1" || { echo "FATAL: $WORKSPACE/$1 is corrupt (gzip -t), kept for inspection"; exit 1; }
+  tar -xzf "$WORKSPACE/$1" -C "$2" || { echo "FATAL: extracting $WORKSPACE/$1 failed, archive kept"; exit 1; }
   [ -e "$3" ] || { echo "FATAL: $3 missing after extracting $1, archive kept"; exit 1; }
-  rm -f "/workspace/$1"
+  rm -f "$WORKSPACE/$1"
 }
 if [ -x "$CARLA_DIR/CarlaUE4.sh" ] && [ -d "$CARLA_DIR/PythonAPI/carla" ]; then
   echo "CARLA already present, skipping."
@@ -92,21 +93,21 @@ echo "--- shipped PythonAPI distributions ---"
 ls "$CARLA_DIR/PythonAPI/carla/dist/" 2>&1
 
 echo "===== [6/7] Python 3.10 venv for the carla client ====="
-cd /workspace/MThesis
-uv venv --python 3.10 /workspace/venv_carla
-/workspace/venv_carla/bin/python -V
+cd $WORKSPACE/MThesis
+uv venv --python 3.10 $WORKSPACE/venv_carla
+$WORKSPACE/venv_carla/bin/python -V
 # Prefer the wheel shipped with the server (guaranteed protocol match); fall back to PyPI.
-CARLA_WHL=$(ls /workspace/carla/PythonAPI/carla/dist/carla-*-cp310-*.whl 2>/dev/null | head -1)
+CARLA_WHL=$(ls $WORKSPACE/carla/PythonAPI/carla/dist/carla-*-cp310-*.whl 2>/dev/null | head -1)
 if [ -n "$CARLA_WHL" ]; then
-  VIRTUAL_ENV=/workspace/venv_carla uv pip install "$CARLA_WHL"
+  VIRTUAL_ENV=$WORKSPACE/venv_carla uv pip install "$CARLA_WHL"
 else
-  VIRTUAL_ENV=/workspace/venv_carla uv pip install carla==0.9.15
+  VIRTUAL_ENV=$WORKSPACE/venv_carla uv pip install carla==0.9.15
 fi
-VIRTUAL_ENV=/workspace/venv_carla uv pip install \
+VIRTUAL_ENV=$WORKSPACE/venv_carla uv pip install \
   "torch==2.5.1" "torchvision==0.20.1" --index-url https://download.pytorch.org/whl/cu121
-VIRTUAL_ENV=/workspace/venv_carla uv pip install numpy opencv-python pillow pandas pytest
+VIRTUAL_ENV=$WORKSPACE/venv_carla uv pip install numpy opencv-python pillow pandas pytest
 
 echo "===== [7/7] Verify client import ====="
-/workspace/venv_carla/bin/python -c "import carla, torch; print('carla', carla.__file__); print('torch', torch.__version__, torch.cuda.is_available())"
+$WORKSPACE/venv_carla/bin/python -c "import carla, torch; print('carla', carla.__file__); print('torch', torch.__version__, torch.cuda.is_available())"
 
 echo "SETUP_CARLA_EVAL_DONE"

@@ -6,11 +6,12 @@
 # when it gets there). Same host, routes, checkpoints and flags: pairing is unchanged (a lane is only a CARLA port).
 # The first lane to free up first reruns vf_ctrl on routes 3514 (Simulation crashed) and 3520 (never driven: queue_A9c's crash skip
 # took the route after the crashed one, because the evaluator had already written a record for 3514).
-# Run on the box:  cd /workspace; setsid nohup bash /workspace/MThesis/scripts/ops/arms_rebalance.sh > /workspace/arms/rebalance.out 2>&1 < /dev/null &
+# Run on the box:  cd $WORKSPACE; setsid nohup bash $WORKSPACE/MThesis/scripts/ops/arms_rebalance.sh > $WORKSPACE/arms/rebalance.out 2>&1 < /dev/null &
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
 set -uo pipefail
-S=/workspace/arms/drive_status; mark() { echo "$(date -u +%H:%M:%S) $1" >> $S; }
-cd /workspace/MThesis
-F="CARLA_QUALITY=Epic"; L1=$(sed -n 1p /workspace/lanes220.txt)
+S=$WORKSPACE/arms/drive_status; mark() { echo "$(date -u +%H:%M:%S) $1" >> $S; }
+cd $WORKSPACE/MThesis
+F="CARLA_QUALITY=Epic"; L1=$(sed -n 1p $WORKSPACE/lanes220.txt)
 J_RR="CKE:vf_ctrl_rr:vf_ctrl/model_epoch_030.pth:3514,3520:$F"
 J_WR="CKE:arm_wr_L1:arm_wr/model_epoch_030.pth:$L1:$F"
 J_EA="CKE:arm_ea_L1:arm_ea/model_epoch_030.pth:$L1:$F"
@@ -23,7 +24,7 @@ while [ $n -lt 2 ]; do
     busy $P && continue
     sleep 90; busy $P && continue                        # still free after 90 s: the lane's own queue has really ended
     if [ $n -eq 0 ]; then JOBS="$J_RR $J_WR $J_EA"; else JOBS="$J_WR $J_EA"; fi
-    setsid nohup bash scripts/eval/queue_A9c.sh $P 0 $JOBS > /workspace/evlogs/rebalance_$P.out 2>&1 < /dev/null &
+    setsid nohup bash scripts/eval/queue_A9c.sh $P 0 $JOBS > $WORKSPACE/evlogs/rebalance_$P.out 2>&1 < /dev/null &
     mark "REBALANCE_LANE port $P jobs: $(echo $JOBS | grep -oE 'CKE:[a-z0-9_]+' | tr '\n' ' ')"
     started="$started $P"; n=$((n + 1))
   done

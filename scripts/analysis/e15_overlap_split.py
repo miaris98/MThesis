@@ -27,16 +27,13 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import a9_merge as A  # noqa: E402  (collect, route_table, boot_ci, arm labels)
+sys.path.insert(0, str(HERE.parents[1]))
+from src.config.paths import exp_root  # noqa: E402  (the experiment archive: MTHESIS_EXP_ROOT)
 
 SIX = {"Town01", "Town02", "Town03", "Town04", "Town05", "Town10"}
-DEFAULT_ROOTS = [
-    "E:/MThesis_EXP/live_20260928_*",
-    "E:/MThesis_EXP/live_20260929_*",
-    "E:/MThesis_EXP/bench2drive_live_20260928",
-    "E:/MThesis_EXP/live_20261010_*",
-    "E:/MThesis_EXP/live_20261011_*",
-    "E:/MThesis_EXP/live_20261017_*",
-]
+EXP = exp_root().as_posix()
+DEFAULT_ROOTS = [f"{EXP}/{g}" for g in ("live_20260928_*", "live_20260929_*", "bench2drive_live_20260928",
+                                         "live_20261010_*", "live_20261011_*", "live_20261017_*")]
 
 
 def town_key(t: str) -> str:

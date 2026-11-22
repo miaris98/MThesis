@@ -1,5 +1,5 @@
 From 852832a59782e55290547c69797410316cd8b7f2 Mon Sep 17 00:00:00 2001
-From: dionushs <miaris54@gmail.com>
+From: dionushs
 Date: Tue, 15 Sep 2026 15:42:17 +0300
 Subject: [PATCH] debug(sensor_agent): verbose diagnostics for the safety-box
  creep deadlock

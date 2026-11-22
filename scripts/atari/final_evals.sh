@@ -5,9 +5,10 @@
 #   sticky025_ep60_sim16  the same with sticky actions p=0.25 (robustness column, S-138; ~21-27 distinct games instead of ~4)
 # The paper command equals the 2026-10-25 qnowd finals except --updates 120000 instead of --env-steps 100000 (which also matched 98,004).
 # A run without a final checkpoint (stopped early) is skipped and named in the log.
-# usage: final_evals.sh MARKER LABEL [LABEL ...]    logs: /workspace/b66/logs/eval_final_{paper,sticky}_<label>.log, marker evals_done_<first label>
-cd /workspace/MThesis
-export PYTHONPATH=/workspace/MThesis MLFLOW_ALLOW_FILE_STORE=true OMP_NUM_THREADS=4 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES=${GPU:-0}
+# usage: final_evals.sh MARKER LABEL [LABEL ...]    logs: $WORKSPACE/b66/logs/eval_final_{paper,sticky}_<label>.log, marker evals_done_<first label>
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
+cd $WORKSPACE/MThesis
+export PYTHONPATH=$WORKSPACE/MThesis MLFLOW_ALLOW_FILE_STORE=true OMP_NUM_THREADS=4 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES=${GPU:-0}
 export CUDA_MPS_PIPE_DIRECTORY=/tmp/mps_pipe CUDA_MPS_LOG_DIRECTORY=/tmp/mps_log
 G=${G:-/workspace/b66/logs}; O=${O:-/workspace/b66/out}   # env overrides G, O, GPU (B69, 2026-10-27)
 MARKER=$1; shift

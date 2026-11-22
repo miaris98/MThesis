@@ -2,7 +2,7 @@
 # Provisioning probe for a new Vast box (user rule, 2026-10-28). Run it once the box answers SSH, before any job or token is shipped.
 #   Box fit test: GPUs and their load before we use them, cores, CPU model, RAM, disk, pids limit.
 #   HF: DNS, a HEAD request and a 200 MB range download from huggingface.co.
-#   Box -> E: : a 200 MB file pulled over SSH to E:\MThesis_EXP\_probe (deleted afterwards).
+#   Box -> E: : a 200 MB file pulled over SSH to $EXP/_probe (the archive, scripts/lib/pc.sh; deleted afterwards).
 #   Box -> Google Drive: a 200 MB rclone upload (needs /dev/shm/gdrive_rclone.conf on the box, which the user ships with
 #     scripts/ops/push_gdrive_token_to_boxes.sh; without it this step is skipped). The test file is deleted afterwards.
 #   Box -> HF upload is not measured here: it needs a scratch repo the user approves. Measure it on the first sha-checked push.
@@ -12,7 +12,8 @@ set -u
 PORT=${1:?port}
 BOX=${2:?user@host}
 MIN_MBS=${MIN_MBS:-2}
-SCRATCH=${PROBE_DIR:-/e/MThesis_EXP/_probe}
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/pc.sh"   # EXP, GDRIVE_ROOT
+SCRATCH=${PROBE_DIR:-$EXP/_probe}
 SO="-o StrictHostKeyChecking=no -o ConnectTimeout=30 -o BatchMode=yes"
 mkdir -p "$SCRATCH"
 
@@ -51,13 +52,13 @@ else
 fi
 
 echo "== box -> Google Drive (rclone, 200 MB, then deleted)"
-DRV=$(ssh $SO -p "$PORT" "$BOX" 'bash -s' <<'REMOTE'
+DRV=$(ssh $SO -p "$PORT" "$BOX" "bash -s -- '$GDRIVE_ROOT'" <<'REMOTE'
 if [ ! -f /dev/shm/gdrive_rclone.conf ]; then echo "skipped (no token on the box)"; exit 0; fi
 t0=$(date +%s.%N)
-rclone --config /dev/shm/gdrive_rclone.conf --retries 2 copyto /dev/shm/probe_200m.bin gdrive:MThesis_backups/_speedtest/probe_200m.bin
+rclone --config /dev/shm/gdrive_rclone.conf --retries 2 copyto /dev/shm/probe_200m.bin "$1/_speedtest/probe_200m.bin"
 rc=$?
 t1=$(date +%s.%N)
-rclone --config /dev/shm/gdrive_rclone.conf deletefile gdrive:MThesis_backups/_speedtest/probe_200m.bin >/dev/null 2>&1
+rclone --config /dev/shm/gdrive_rclone.conf deletefile "$1/_speedtest/probe_200m.bin" >/dev/null 2>&1
 echo "rc=$rc $(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.2f", 200/(b-a)}') MB/s"
 REMOTE
 )

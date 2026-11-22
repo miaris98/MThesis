@@ -18,14 +18,15 @@
 # The agent file is shared with the Bench2Drive path unchanged: WorB2DAgent imports only
 # leaderboard.autoagents.autonomous_agent and srunner.scenariomanager.carla_data_provider,
 # both of which the vanilla checkout provides under the same module paths.
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
 set -u
 LABEL="$1"; ARCH="$2"; CKPT="$3"; ROUTES="$4"
 ROUTES_SUBSET="${5:-}"; PORT="${6:-2000}"; TM_PORT="${7:-8000}"
 
-GARAGE=/workspace/carla_garage
-REAL_CARLA=/workspace/carla
-MTHESIS=/workspace/MThesis
-OUT=/workspace/leaderboard_official_out
+GARAGE=$WORKSPACE/carla_garage
+REAL_CARLA=$WORKSPACE/carla
+MTHESIS=$WORKSPACE/MThesis
+OUT=$WORKSPACE/leaderboard_official_out
 mkdir -p "$OUT"
 
 # Agent selection. The default is this project's WoR agent; EVAL_AGENT / EVAL_AGENT_CONFIG

@@ -13,14 +13,15 @@
 # This probe is the cheap way to find out before committing to a download or a real run.
 #
 # usage: scripts/eval/run_town_probe.sh [town1,town2,...]   (default: Town11,Town12,Town13)
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
 set -x
 TOWNS="${1:-Town11,Town12,Town13}"
-REAL_CARLA=/workspace/carla
-SHIM=/workspace/carla_shim
+REAL_CARLA=$WORKSPACE/carla
+SHIM=$WORKSPACE/carla_shim
 PORT=3000
 TM_PORT=9000
 PER_TOWN_TIMEOUT=150
-RESULTS=/workspace/town_probe_results.txt
+RESULTS=$WORKSPACE/town_probe_results.txt
 
 mkdir -p "$SHIM"
 # CARLA/UE4 refuses to run as root (hence su carlauser) and separately requires a valid,
@@ -39,7 +40,7 @@ chmod 700 "$XDG_RUNTIME_DIR"
 # byte-for-byte rather than approximate it, so a probe pass actually predicts the real run.
 cat > "$SHIM/CarlaUE4.sh" <<SHIMEOF
 #!/usr/bin/env bash
-exec su carlauser -c "export XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR; /workspace/carla/CarlaUE4.sh \$* -RenderOffScreen -nosound -vulkan -quality-level=Low"
+exec su carlauser -c "export XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR; $WORKSPACE/carla/CarlaUE4.sh \$* -RenderOffScreen -nosound -vulkan -quality-level=Low"
 SHIMEOF
 chmod +x "$SHIM/CarlaUE4.sh"
 
@@ -47,7 +48,7 @@ chmod +x "$SHIM/CarlaUE4.sh"
 
 check_one_town() {
   local town="$1"
-  local log="/workspace/town_probe_${town}.log"
+  local log="$WORKSPACE/town_probe_${town}.log"
 
   pkill -9 -f "carla-rpc-port=${PORT} " 2>/dev/null
   sleep 2
@@ -57,7 +58,7 @@ check_one_town() {
   # Wait for the RPC port to actually accept connections rather than a fixed sleep --
   # the whole point is to isolate map-load behaviour, not startup-time variance.
   for i in $(seq 1 30); do
-    /workspace/venv_carla/bin/python -c "
+    $WORKSPACE/venv_carla/bin/python -c "
 import carla
 c = carla.Client('localhost', $PORT)
 c.set_timeout(2.0)
@@ -66,7 +67,7 @@ c.get_server_version()
     sleep 2
   done
 
-  timeout "$PER_TOWN_TIMEOUT" /workspace/venv_carla/bin/python -c "
+  timeout "$PER_TOWN_TIMEOUT" $WORKSPACE/venv_carla/bin/python -c "
 import carla
 c = carla.Client('localhost', $PORT)
 c.set_timeout(120.0)

@@ -1,0 +1,24 @@
+# TODO A84 (2026-11-17): reason heads + danger classifier. Box scripts: scripts/ops/a84_box.sh, a84_train_chain.sh
+# Delete the checkpoint blocks a box does not need. A trained a84_<arm> from E: is shipped the same way:
+#   ${EXP}/live_20261117_a84/checkpoints/a84_<arm>/model_epoch_030.pth|${RWS}/checkpoints/a84_<arm>/model_epoch_030.pth (+ frozen_backbone.pth, run_config.json)
+${EXP}/live_20261113_arms/lanes220.txt|${RWS}/lanes220.txt
+${REPO}/Carla-utils/carla_garage/Bench2Drive/leaderboard/data/bench2drive220.xml|${RWS}/vf/bench2drive220.xml
+${EXP}/live_20261006_box0_train_3090ti/checkpoints/carla_armE_aug1_hires/model_epoch_015.pth|${RWS}/checkpoints/E15/model_epoch_015.pth
+${EXP}/live_20261006_box0_train_3090ti/checkpoints/carla_armE_aug1_hires/frozen_backbone.pth|${RWS}/checkpoints/E15/frozen_backbone.pth
+${EXP}/live_20261006_box0_train_3090ti/checkpoints/carla_armE_aug1_hires/run_config.json|${RWS}/checkpoints/E15/run_config.json
+READY ${RWS}/checkpoints/E15
+${EXP}/live_20261104_visionfix/checkpoints/vf_clean/model_epoch_030.pth|${RWS}/checkpoints/vf_clean/model_epoch_030.pth
+${EXP}/live_20261104_visionfix/checkpoints/vf_clean/frozen_backbone.pth|${RWS}/checkpoints/vf_clean/frozen_backbone.pth
+${EXP}/live_20261104_visionfix/checkpoints/vf_clean/run_config.json|${RWS}/checkpoints/vf_clean/run_config.json
+${EXP}/live_20261104_visionfix/checkpoints/vf_clean_s1/model_epoch_030.pth|${RWS}/checkpoints/vf_clean_s1/model_epoch_030.pth
+${EXP}/live_20261104_visionfix/checkpoints/vf_clean_s1/frozen_backbone.pth|${RWS}/checkpoints/vf_clean_s1/frozen_backbone.pth
+${EXP}/live_20261104_visionfix/checkpoints/vf_clean_s1/run_config.json|${RWS}/checkpoints/vf_clean_s1/run_config.json
+${EXP}/live_20261104_visionfix/checkpoints/vf_clean_s2/model_epoch_030.pth|${RWS}/checkpoints/vf_clean_s2/model_epoch_030.pth
+${EXP}/live_20261104_visionfix/checkpoints/vf_clean_s2/frozen_backbone.pth|${RWS}/checkpoints/vf_clean_s2/frozen_backbone.pth
+${EXP}/live_20261104_visionfix/checkpoints/vf_clean_s2/run_config.json|${RWS}/checkpoints/vf_clean_s2/run_config.json
+${EXP}/live_20261104_visionfix/checkpoints/vf_ctrl/model_epoch_030.pth|${RWS}/checkpoints/vf_ctrl/model_epoch_030.pth
+${EXP}/live_20261104_visionfix/checkpoints/vf_ctrl/frozen_backbone.pth|${RWS}/checkpoints/vf_ctrl/frozen_backbone.pth
+${EXP}/live_20261104_visionfix/checkpoints/vf_ctrl/run_config.json|${RWS}/checkpoints/vf_ctrl/run_config.json
+${EXP}/live_20261104_visionfix/vf_s2d/checkpoints/model_epoch_030.pth|${RWS}/checkpoints/vf_s2d/model_epoch_030.pth
+${EXP}/live_20261104_visionfix/vf_s2d/checkpoints/frozen_backbone.pth|${RWS}/checkpoints/vf_s2d/frozen_backbone.pth
+${EXP}/live_20261104_visionfix/vf_s2d/checkpoints/run_config.json|${RWS}/checkpoints/vf_s2d/run_config.json

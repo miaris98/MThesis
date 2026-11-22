@@ -13,8 +13,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import os
+WORKSPACE = os.environ.get("WORKSPACE", "/workspace").rstrip("/")   # the box workspace (src/config/paths.py: WORKSPACE)
 
-sys.path.insert(0, "/workspace/MThesis")
+sys.path.insert(0, f"{WORKSPACE}/MThesis")
 from atari_qwen.training.eval_ez_checkpoints import load_model  # noqa: E402
 from atari_qwen.training import train_ez_offpolicy as T  # noqa: E402
 
@@ -75,7 +77,7 @@ def main():
         import os
         os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
         import mlflow
-        mlflow.set_tracking_uri("file:///workspace/mlruns_screen")
+        mlflow.set_tracking_uri(f"file://{WORKSPACE}/mlruns_screen")
         mlflow.set_experiment("B43_stoprule_screen")
         with mlflow.start_run(run_name=Path(a.out).stem):
             mlflow.log_params(dict(ckpt=Path(a.ckpt).name, episodes=n, sims=a.sims, max_depth=a.max_depth or 0, gap=a.gap, sticky=a.sticky))

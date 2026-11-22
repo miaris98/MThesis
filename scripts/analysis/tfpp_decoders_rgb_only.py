@@ -25,6 +25,7 @@ import types
 
 import numpy as np
 import torch
+WORKSPACE = os.environ.get("WORKSPACE", "/workspace").rstrip("/")   # the box workspace (src/config/paths.py: WORKSPACE)
 
 
 def stub_modules():
@@ -89,7 +90,7 @@ def main():
     ap.add_argument("--routes", type=int, default=60)
     ap.add_argument("--frames", type=int, default=400)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--workdir", default="/workspace/tfpp_check")
+    ap.add_argument("--workdir", default=f"{WORKSPACE}/tfpp_check")
     ap.add_argument("--use_mlflow", type=int, default=1)
     a = ap.parse_args()
 

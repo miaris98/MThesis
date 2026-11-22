@@ -3,11 +3,12 @@
 # and any route a finished set never drove (queue_A9c.sh's crash skip can skip the wrong route), so every set ends with all 220 routes.
 # Pass 1 on port 2010 once lane 1's own queue has ended: only sets that no lane is still driving. Pass 2 on port 2010 once every lane
 # has ended: whatever is still missing. One rerun label per set per pass (<set>_rr<pass>), records next to the others; the analysis
-# takes a route's rerun record over its failed one. Marks RERUNS_DONE in /workspace/arms/drive_status when both passes are through.
-# Run on the box:  cd /workspace; setsid nohup bash /workspace/MThesis/scripts/ops/arms_rerun_sweep.sh > /workspace/arms/sweep.out 2>&1 < /dev/null &
+# takes a route's rerun record over its failed one. Marks RERUNS_DONE in $WORKSPACE/arms/drive_status when both passes are through.
+# Run on the box:  cd $WORKSPACE; setsid nohup bash $WORKSPACE/MThesis/scripts/ops/arms_rerun_sweep.sh > $WORKSPACE/arms/sweep.out 2>&1 < /dev/null &
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
 set -uo pipefail
-S=/workspace/arms/drive_status; mark() { echo "$(date -u +%H:%M:%S) $1" >> $S; }
-cd /workspace/MThesis
+S=$WORKSPACE/arms/drive_status; mark() { echo "$(date -u +%H:%M:%S) $1" >> $S; }
+cd $WORKSPACE/MThesis
 P=2010
 busy() { pgrep -f "[q]ueue_A9c.sh $1 " > /dev/null; }
 anybusy() { pgrep -f "[q]ueue_A9c.sh 20[0-3]0 " > /dev/null; }
@@ -46,7 +47,7 @@ run_pass() {  # PASS
   JOBS=$(plan "$1" | tr '\n' ' ')
   if [ -z "${JOBS// /}" ]; then mark "RERUN_PASS_$1 nothing to rerun"; return; fi
   mark "RERUN_PASS_$1 port $P: $(echo $JOBS | grep -oE 'CKE:[a-z0-9_]+:[^:]+:[0-9,]+' | sed -E 's/CKE:([a-z0-9_]+):[^:]+:/\1 /' | tr '\n' ';')"
-  bash scripts/eval/queue_A9c.sh $P 0 $JOBS > /workspace/evlogs/rerun_pass$1.out 2>&1 < /dev/null
+  bash scripts/eval/queue_A9c.sh $P 0 $JOBS > $WORKSPACE/evlogs/rerun_pass$1.out 2>&1 < /dev/null
   mark "RERUN_PASS_$1 done"
 }
 if [ "${1:-}" = plan ]; then plan test; exit 0; fi   # dry run: print what a pass would rerun now

@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # A74 relay (2026-11-02): one PPO learner on this PC (its state on E:), the CARLA lanes on any number of boxes. Every A74_RELAY_POLL s
-# (45), for each box: pull its finished episodes (/workspace/a74/RUN/rollouts/*.npz) into LOCAL/rollouts as <box>_<file> (extracted into
+# (45), for each box: pull its finished episodes ($RWS/a74/RUN/rollouts/*.npz) into LOCAL/rollouts as <box>_<file> (extracted into
 # LOCAL/incoming first and then renamed, so the learner never reads a partial file), park the pulled ones in the box's rollouts/relayed/,
 # and push LOCAL/learner/head_latest.pth whenever it changed (to a .tmp, then renamed: the agents reload it at every route start).
 # Ends when LOCAL/STOP exists or LOCAL/learner.log has A74_LEARNER_DONE, and then stops the boxes' lanes (their STOP file).
 # usage: scripts/ops/a74_relay.sh LOCAL RUN name:port:host [name:port:host ...]          log: LOCAL/relay.log
 #   learner: py scripts/training/train_maneuver_ppo.py --rollouts LOCAL/rollouts --out LOCAL/learner ... >> LOCAL/learner.log
+RWS=${REMOTE_WORKSPACE:-/workspace}   # the boxes' workspace (the Vast layout); REMOTE_WORKSPACE overrides
 set -u
 L=$1; RUN=$2; shift 2
-R=/workspace/a74/$RUN
+R=$RWS/a74/$RUN
 mkdir -p "$L/rollouts" "$L/learner" "$L/incoming"
 declare -A last
 log() { echo "$(date -u +%H:%M:%S) $*" >> "$L/relay.log"; }

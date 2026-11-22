@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # sync_forever2.sh + modification time in the comparison (S-111): a file that is rewritten at the same size
 # (checkpoint_latest.pt) is copied again. mtime is compared in whole epoch seconds (tar -x keeps it).
+RWS=${REMOTE_WORKSPACE:-/workspace}   # the boxes' workspace (the Vast layout); REMOTE_WORKSPACE overrides
 PORT=$1; HOST=$2; D=$3; PATHS=$4; INT=${5:-300}
 # EXTRA_FIND (env, local): more find tests for the remote listing, e.g. EXTRA_FIND="! -name checkpoint_latest.pt" (Atari: 117 MB rewritten every few minutes)
 mkdir -p "$D"
 while true; do
   R=$(mktemp); L=$(mktemp); M=$(mktemp)
   timeout 300 ssh -o BatchMode=yes -o ConnectTimeout=20 -p $PORT root@$HOST \
-    "cd /workspace && find $PATHS -type f ! -name replay_latest.npz ! -path '*/wandb/*' ! -name '*.tmp*' $EXTRA_FIND -printf '%p\t%s\t%T@\n' 2>/dev/null" \
+    "cd $RWS && find $PATHS -type f ! -name replay_latest.npz ! -path '*/wandb/*' ! -name '*.tmp*' $EXTRA_FIND -printf '%p\t%s\t%T@\n' 2>/dev/null" \
     2>>"$D/.sync_err.log" | grep -v -E "^Welcome|^Have fun|^AI agents" | awk -F'\t' '{split($3,t,"."); print $1"\t"$2"\t"t[1]}' | sort > "$R"
   NR=$(wc -l < "$R")
   if [ "$NR" -eq 0 ]; then
@@ -18,7 +19,7 @@ while true; do
     NM=$(wc -l < "$M")
     if [ "$NM" -gt 0 ]; then
       scp -q -o BatchMode=yes -P $PORT "$M" root@$HOST:/tmp/sync_list_$$.txt 2>>"$D/.sync_err.log"
-      timeout 1500 ssh -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=4 -p $PORT root@$HOST "cd /workspace && tar -cf - -T /tmp/sync_list_$$.txt" 2>>"$D/.sync_err.log" | tar -xf - -C "$D" 2>>"$D/.sync_err.log"
+      timeout 1500 ssh -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=4 -p $PORT root@$HOST "cd $RWS && tar -cf - -T /tmp/sync_list_$$.txt" 2>>"$D/.sync_err.log" | tar -xf - -C "$D" 2>>"$D/.sync_err.log"
     fi
     (cd "$D" && find . -type f -printf '%P\t%s\t%T@\n' 2>/dev/null | awk -F'\t' '{split($3,t,"."); print $1"\t"$2"\t"t[1]}' | sort) > "$L"
     LEFT=$(comm -23 "$R" "$L" | wc -l)

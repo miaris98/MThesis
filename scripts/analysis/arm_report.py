@@ -4,7 +4,7 @@ carry far more power than DS (vehicle-collision events per run, share of runs wi
 
 References (existing records, free): E15 (arm E e15), J = the four J seeds' mean (J20, J20s1, J20s2, J20s3), WOR. Arms are the labels of `a9_merge.ARMS` (add a pattern there for a new label).
 
-    py scripts/analysis/arm_report.py E:/MThesis_EXP/live_2026092[89]_* E:/MThesis_EXP/live_2026093* E:/MThesis_EXP/live_20261* \
+    py scripts/analysis/arm_report.py $EXP/live_2026092[89]_* $EXP/live_2026093* $EXP/live_20261* \
         --arms M25,M50,M75,MSOUP,MESOUP [--routes lead_obstacle|all] [--json-out report.json]
 """
 from __future__ import annotations

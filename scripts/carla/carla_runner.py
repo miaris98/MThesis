@@ -1,8 +1,10 @@
+import glob
 import os
 import subprocess
 import time
 import sys
 import argparse
+WORKSPACE = os.environ.get("WORKSPACE", "/workspace").rstrip("/")   # the box workspace (src/config/paths.py: WORKSPACE)
 
 class CarlaRunner:
     def __init__(self, carla_path=None, port=2000, headless=True, graphics_api="vulkan", quality_level="Low", nosound=True, use_docker=False, docker_image="carlasim/carla:0.9.15"):
@@ -34,9 +36,9 @@ class CarlaRunner:
 
         # Common Linux / Vast.ai installation folders
         possible_dirs_linux = [
-            "/workspace/carla",
-            "/workspace/CARLA_0.9.15",
-            "/workspace/CARLA_0.9.16",
+            f"{WORKSPACE}/carla",
+            f"{WORKSPACE}/CARLA_0.9.15",
+            f"{WORKSPACE}/CARLA_0.9.16",
             os.path.expanduser("~/carla_simulator"),
             os.path.expanduser("~/CARLA_0.9.15"),
             os.path.expanduser("~/Carla"),
@@ -151,7 +153,7 @@ class CarlaRunner:
         # Handle root execution on Linux (Unreal Engine safety check bypass)
         if sys.platform != "win32" and hasattr(os, "geteuid") and os.geteuid() == 0:
             print("Notice: Running as root. Setting up 'carlauser' and launching via 'su' to bypass Unreal Engine root restriction...")
-            carla_dir = os.path.dirname(self.carla_path) if self.carla_path else "/workspace/carla"
+            carla_dir = os.path.dirname(self.carla_path) if self.carla_path else f"{WORKSPACE}/carla"
             
             # Ensure user 'carlauser' exists
             res = subprocess.run(["id", "-u", "carlauser"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)

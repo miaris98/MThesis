@@ -8,6 +8,7 @@
 # Run this after any pull that touches patches/easycarla_rl/carla_env.py.
 # ==============================================================================
 
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
 set -e
 
 GREEN='\033[0;32m'
@@ -26,8 +27,8 @@ fi
 
 # carla_env.py does `import carla` at module level, so locating the installed
 # package fails unless the CARLA .egg is on PYTHONPATH first.
-export CARLA_ROOT=/workspace/carla
-export PYTHONPATH="$(ls /workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg 2>/dev/null | tail -n 1):/workspace/carla/PythonAPI/carla:$PYTHONPATH"
+export CARLA_ROOT=$WORKSPACE/carla
+export PYTHONPATH="$(ls $WORKSPACE/carla/PythonAPI/carla/dist/carla-*-py3*.egg 2>/dev/null | tail -n 1):$WORKSPACE/carla/PythonAPI/carla:$PYTHONPATH"
 
 TARGET=$(python -c "import easycarla.envs.carla_env as m, os; print(os.path.abspath(m.__file__))" 2>/dev/null || true)
 

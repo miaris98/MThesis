@@ -22,6 +22,8 @@ Idempotent: a patched file is detected by its marker and left alone. Run by `lau
 """
 import sys
 from pathlib import Path
+import os
+WORKSPACE = os.environ.get("WORKSPACE", "/workspace").rstrip("/")   # the box workspace (src/config/paths.py: WORKSPACE)
 
 MARKER = "MThesis patch: kill only this evaluator's own CARLA server"
 OLD = """        if crashed:
@@ -57,4 +59,4 @@ def patch(garage: Path) -> str:
 
 
 if __name__ == "__main__":
-    print(patch(Path(sys.argv[1] if len(sys.argv) > 1 else "/workspace/carla_garage")))
+    print(patch(Path(sys.argv[1] if len(sys.argv) > 1 else f"{WORKSPACE}/carla_garage")))

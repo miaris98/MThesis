@@ -13,13 +13,14 @@ import torch
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import mixer_diag as md  # noqa: E402
+WORKSPACE = os.environ.get("WORKSPACE", "/workspace").rstrip("/")   # the box workspace (src/config/paths.py: WORKSPACE)
 
 torch.set_num_threads(4)
-OUT = os.environ.get("MECH_OUT", "/workspace/b66/out")
+OUT = os.environ.get("MECH_OUT", f"{WORKSPACE}/b66/out")
 # comma lists from the environment (B67 added runs while the watcher was live); it exits once every done marker exists and nothing is left
 LABELS = tuple(os.environ.get("MECH_LABELS", "b66_fix_s1,b66_sgd_s1").split(","))
-DONES = tuple(os.environ.get("MECH_DONE", "/workspace/b66/logs/done_s1.marker").split(","))
-RES = os.environ.get("MECH_RES", "/workspace/b66/mech/mech.jsonl")
+DONES = tuple(os.environ.get("MECH_DONE", f"{WORKSPACE}/b66/logs/done_s1.marker").split(","))
+RES = os.environ.get("MECH_RES", f"{WORKSPACE}/b66/mech/mech.jsonl")
 H = lambda p: -(p * np.log(np.clip(p, 1e-12, None))).sum(-1)
 
 

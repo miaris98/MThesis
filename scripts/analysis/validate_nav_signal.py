@@ -27,11 +27,12 @@ import json
 import os
 
 import numpy as np
+WORKSPACE = os.environ.get("WORKSPACE", "/workspace").rstrip("/")   # the box workspace (src/config/paths.py: WORKSPACE)
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Validate PDM-Lite navigation signals")
-    p.add_argument("--data_dir", type=str, default="/workspace/dataset/wor_trajectories")
+    p.add_argument("--data_dir", type=str, default=f"{WORKSPACE}/dataset/wor_trajectories")
     p.add_argument("--max_routes", type=int, default=40)
     p.add_argument("--pred_len", type=int, default=5)
     return p.parse_args()

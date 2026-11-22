@@ -25,10 +25,10 @@ position and heading in the ego frame at the impact); the ego and other speeds; 
 asked to stop before the impact (P(stop bin) >= 0.5 or a target speed <= 1 km/h). The other actor's distance at the moment
 the posterior moved is not recorded (actors are logged at the trigger only).
 
-    py scripts/analysis/a3_failure_classes.py E:/MThesis_EXP/live_2026092[89]_* E:/MThesis_EXP/live_2026093* E:/MThesis_EXP/live_2026100* \
+    py scripts/analysis/a3_failure_classes.py $EXP/live_2026092[89]_* $EXP/live_2026093* $EXP/live_2026100* \
         --pool J=J20,J20s1,J20s2,J20s3 --arms E15,J,WOR --pair J-E15 --json-out a3_0410.json
-    py scripts/analysis/a3_failure_classes.py E:/MThesis_EXP/live_2026092[89]_* E:/MThesis_EXP/live_20261019_fleet \
-        --arm A57_220='^c19v4_220(?!.*epic)' --arms A57_220,E15 --reference E15 --clips E:/MThesis_EXP/live_20261019_fleet
+    py scripts/analysis/a3_failure_classes.py $EXP/live_2026092[89]_* $EXP/live_20261019_fleet \
+        --arm A57_220='^c19v4_220(?!.*epic)' --arms A57_220,E15 --reference E15 --clips $EXP/live_20261019_fleet
 """
 from __future__ import annotations
 
@@ -38,14 +38,13 @@ import glob
 import json
 import math
 import os
-import random
 import re
 import statistics
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from a9_merge import arm_of, collect, parse_arm_specs  # noqa: E402
+from a9_merge import boot_ci, arm_of, collect, parse_arm_specs  # noqa: E402
 
 import xml.etree.ElementTree as ET  # noqa: E402
 
@@ -154,12 +153,6 @@ def transitions(rx: dict, rref: dict) -> list:
              "routes": [r for r, _ in sorted(v, key=lambda t: t[1])]} for (a, b), v in cells.items()]
     rows.sort(key=lambda row: (-abs(row["sum_diff"]), row["ref"], row["arm"]))
     return rows
-
-
-def boot_ci(diffs, n=20000, seed=0):
-    rnd = random.Random(seed)
-    means = sorted(statistics.fmean(rnd.choices(diffs, k=len(diffs))) for _ in range(n))
-    return means[int(0.025 * n)], means[int(0.975 * n)]
 
 
 # ---- A44 clips ---------------------------------------------------------------------------------------------------------------

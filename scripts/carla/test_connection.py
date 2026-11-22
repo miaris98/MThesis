@@ -2,7 +2,6 @@ import argparse
 import sys
 import os
 import time
-import glob
 
 def main():
     parser = argparse.ArgumentParser(description="Test connection to Carla Simulator.")
@@ -14,21 +13,18 @@ def main():
     
     args = parser.parse_args()
 
-    if args.restart and os.path.exists("/workspace/carla/CarlaUE4.sh"):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    from src.config.carla_client import add_carla_to_path, carla_root
+    root = carla_root()
+    log_dir = os.path.dirname(root)
+    if args.restart and os.path.exists(f"{root}/CarlaUE4.sh"):
         print(f"--> Restarting CARLA server session on map {args.town}...")
         os.system("pkill -9 -f CarlaUE4 2>/dev/null || true")
-        os.system("chmod 1777 /tmp; chmod 700 /tmp/tmux-*; chown root:root /tmp/tmux-0; chmod -R 777 /workspace/carla /dev/dri; chmod -R 666 /dev/nvidia* 2>/dev/null || true")
-        os.system(f"tmux new-session -d -s carla_server \"su carlauser -c 'export SDL_VIDEODRIVER=offscreen; /workspace/carla/CarlaUE4.sh /Game/Carla/Maps/{args.town} -carla-rpc-port={args.port} -port={args.port} -RenderOffScreen -nosound -quality-level=Low' > /workspace/carla_server.log 2>&1\"")
+        os.system(f"chmod 1777 /tmp; chmod 700 /tmp/tmux-*; chown root:root /tmp/tmux-0; chmod -R 777 {root} /dev/dri; chmod -R 666 /dev/nvidia* 2>/dev/null || true")
+        os.system(f"tmux new-session -d -s carla_server \"su carlauser -c 'export SDL_VIDEODRIVER=offscreen; {root}/CarlaUE4.sh /Game/Carla/Maps/{args.town} -carla-rpc-port={args.port} -port={args.port} -RenderOffScreen -nosound -quality-level=Low' > {log_dir}/carla_server.log 2>&1\"")
         time.sleep(10)
 
-    # Auto-add local CARLA 0.9.15 client package from PythonAPI dist
-    carla_root = os.environ.get("CARLA_ROOT", "/workspace/carla")
-    carla_dist_path = os.path.join(carla_root, "PythonAPI", "carla", "dist")
-    if os.path.exists(carla_dist_path):
-        eggs = glob.glob(os.path.join(carla_dist_path, "carla-*-py3*.egg"))
-        for p in eggs:
-            if p not in sys.path:
-                sys.path.insert(0, p)
+    add_carla_to_path(with_agents=False)
 
     try:
         import carla

@@ -4,7 +4,7 @@
     python fleet_monitor.py status     one line per box + ALERT lines + credit/burn   (run every 10 min)
     python fleet_monitor.py verify     box vs E: size/age of checkpoint_latest.pt and replay_latest.npz.gz per Atari box (run after a backup round)
 
-Boxes: boxes.txt next to this file (name|kind|port|host|label). Atari label = run label, CARLA label = result-file prefix
+Boxes: $FLEET_BOXES, else boxes.txt next to this file (name|kind|port|host|label; git-ignored, format in boxes.example.txt). Atari label = run label, CARLA label = result-file prefix
 (bench2drive_out/<label>*_x.json). Alerts (prefixed ALERT): unreachable box, trainer not running, log stale > 15 min, GPU < 40% under
 training, evaluator process competing with training, Traceback / nan-guard / gn-stop / OOM lines, checkpoint older than 40 min,
 CARLA routes never valid (infra failure: agent setup, simulator or agent crash, with no valid record anywhere in the
@@ -16,7 +16,15 @@ import datetime, json, os, re, subprocess, sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-VAST = os.environ.get("VAST", r"C:\Users\miari\anaconda3\envs\graphtools\Scripts\vastai.exe")
+sys.path.insert(0, str(HERE.parents[2]))
+from scripts.lib.vast_cli import vast_cli  # noqa: E402
+from src.config.paths import exp_root  # noqa: E402
+
+try:
+    VAST = vast_cli()
+except FileNotFoundError:
+    VAST = "vastai"   # only `status` calls it (credit); `verify` works without
+BOXES = Path(os.environ.get("FLEET_BOXES", HERE / "boxes.txt"))
 DAY = os.environ.get("FLEET_DAY", datetime.date.today().strftime("%Y%m%d"))
 RD = "MThesis/results/100k_benchmark/S058_ezv2_match"
 SSH = ["ssh", "-o", "ConnectTimeout=20", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes"]
@@ -102,7 +110,9 @@ def ssh_json(name, port, host, kind, label):
 
 
 def boxes():
-    for ln in (HERE / "boxes.txt").read_text().splitlines():
+    if not BOXES.exists():
+        sys.exit(f"no fleet file {BOXES}: copy boxes.example.txt to boxes.txt (git-ignored) or set FLEET_BOXES")
+    for ln in BOXES.read_text().splitlines():
         if ln.strip() and not ln.startswith("#"):
             yield ln.split("|")
 
@@ -191,7 +201,7 @@ def verify():
         if kind != "atari": continue
         o = ssh_json(name, port, host, kind, label)
         if "error" in o: print(f"VERIFY {name}: unreachable"); continue
-        edir = Path(f"E:/MThesis_EXP/live_{DAY}_{name}/{RD}/{label}/checkpoints")
+        edir = exp_root() / f"live_{DAY}_{name}/{RD}/{label}/checkpoints"
         for f, bf in (("checkpoint_latest.pt", "checkpoint_latest.pt"), ("replay_latest.npz.gz", "replay_latest.npz.gz")):
             b = o.get(bf); p = edir / f
             if not b: print(f"VERIFY {name} {f}: not on box yet"); continue

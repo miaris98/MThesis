@@ -1,0 +1,21 @@
+# TODO A81-A83 drives (2026-11-14): vf_ctrl (the paired baseline) and the five arms, epoch 30, from the 2026-11-13 E: save. Box script: arms_box.sh
+${EXP}/live_20261113_arms/lanes220.txt|${RWS}/lanes220.txt
+${REPO}/Carla-utils/carla_garage/Bench2Drive/leaderboard/data/bench2drive220.xml|${RWS}/vf/bench2drive220.xml
+${EXP}/live_20261113_arms/checkpoints/vf_ctrl/model_epoch_030.pth|${RWS}/checkpoints/vf_ctrl/model_epoch_030.pth
+${EXP}/live_20261113_arms/checkpoints/vf_ctrl/frozen_backbone.pth|${RWS}/checkpoints/vf_ctrl/frozen_backbone.pth
+${EXP}/live_20261113_arms/checkpoints/vf_ctrl/run_config.json|${RWS}/checkpoints/vf_ctrl/run_config.json
+${EXP}/live_20261113_arms/checkpoints/arm_s4/model_epoch_030.pth|${RWS}/checkpoints/arm_s4/model_epoch_030.pth
+${EXP}/live_20261113_arms/checkpoints/arm_s4/frozen_backbone.pth|${RWS}/checkpoints/arm_s4/frozen_backbone.pth
+${EXP}/live_20261113_arms/checkpoints/arm_s4/run_config.json|${RWS}/checkpoints/arm_s4/run_config.json
+${EXP}/live_20261113_arms/checkpoints/arm_w2/model_epoch_030.pth|${RWS}/checkpoints/arm_w2/model_epoch_030.pth
+${EXP}/live_20261113_arms/checkpoints/arm_w2/frozen_backbone.pth|${RWS}/checkpoints/arm_w2/frozen_backbone.pth
+${EXP}/live_20261113_arms/checkpoints/arm_w2/run_config.json|${RWS}/checkpoints/arm_w2/run_config.json
+${EXP}/live_20261113_arms/checkpoints/arm_w4/model_epoch_030.pth|${RWS}/checkpoints/arm_w4/model_epoch_030.pth
+${EXP}/live_20261113_arms/checkpoints/arm_w4/frozen_backbone.pth|${RWS}/checkpoints/arm_w4/frozen_backbone.pth
+${EXP}/live_20261113_arms/checkpoints/arm_w4/run_config.json|${RWS}/checkpoints/arm_w4/run_config.json
+${EXP}/live_20261113_arms/checkpoints/arm_ea/model_epoch_030.pth|${RWS}/checkpoints/arm_ea/model_epoch_030.pth
+${EXP}/live_20261113_arms/checkpoints/arm_ea/frozen_backbone.pth|${RWS}/checkpoints/arm_ea/frozen_backbone.pth
+${EXP}/live_20261113_arms/checkpoints/arm_ea/run_config.json|${RWS}/checkpoints/arm_ea/run_config.json
+${EXP}/live_20261113_arms/checkpoints/arm_wr/model_epoch_030.pth|${RWS}/checkpoints/arm_wr/model_epoch_030.pth
+${EXP}/live_20261113_arms/checkpoints/arm_wr/frozen_backbone.pth|${RWS}/checkpoints/arm_wr/frozen_backbone.pth
+${EXP}/live_20261113_arms/checkpoints/arm_wr/run_config.json|${RWS}/checkpoints/arm_wr/run_config.json

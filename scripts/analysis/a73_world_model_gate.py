@@ -87,9 +87,8 @@ def main(argv=None):
         json.dump(res, fh, indent=1)
     try:  # MLflow (project rule); tracking must never fail the gate
         import mlflow
-        from src.config.paths import mlruns_dir
-        os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
-        mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "file:" + str(mlruns_dir())))
+        from src.config.paths import mlflow_tracking_uri
+        mlflow.set_tracking_uri(mlflow_tracking_uri())
         mlflow.set_experiment("A73_world_model_gate")
         with mlflow.start_run(run_name=os.path.basename(a.ckpt)):
             mlflow.log_metrics({"disagreement_ratio": res["disagreement_ratio"], "reward_corr": res["reward_corr"],

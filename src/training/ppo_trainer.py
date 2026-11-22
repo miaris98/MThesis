@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from src.config.training_config import TrainingConfig
+from src.config.paths import WORKSPACE  # noqa: E402  (the box workspace, $WORKSPACE)
 from src.models.actor_critic import ActorCriticPPO
 from src.envs.vector_carla_env import create_vector_carla_env
 from src.logging.normalizer import RunningMeanStd
@@ -445,7 +446,7 @@ class PPOTrainer(TelemetryMixin):
             self.logger.log_artifact(state_path)
 
         # Sync evaluation videos if present
-        for v_path in ["/workspace/eval_video.mp4", "./eval_video.mp4", "/workspace/eval_video_best.mp4"]:
+        for v_path in [f"{WORKSPACE}/eval_video.mp4", "./eval_video.mp4", f"{WORKSPACE}/eval_video_best.mp4"]:
             if os.path.exists(v_path):
                 self.logger.log_artifact(v_path)
 

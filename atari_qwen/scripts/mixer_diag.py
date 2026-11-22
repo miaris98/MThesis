@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-REPO = r"C:\Users\miari\Desktop\MThesis"
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # the repo root
 sys.path.insert(0, REPO)
 from atari_qwen.models.ez_model import EZV2Model, DiscreteSupport  # noqa: E402
 

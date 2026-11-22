@@ -26,7 +26,7 @@ if ($SshCmd -ne "") {
 }
 
 if (-not $Port -or -not $HostName) {
-    $inputStr = Read-Host "Paste your Vast.ai SSH command (e.g. ssh -p 12345 root@ssh5.vast.ai)"
+    $inputStr = Read-Host "Paste your Vast.ai SSH command (e.g. ssh -p PORT root@sshN.vast.ai)"
     if ($inputStr -match "-p\s+(\d+)") { $Port = $Matches[1] }
     if ($inputStr -match "([a-zA-Z0-9_\-]+@[a-zA-Z0-9\.\-]+)") { $HostName = $Matches[1] }
 }

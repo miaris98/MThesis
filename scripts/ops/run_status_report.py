@@ -11,19 +11,22 @@ usage:
   python scripts/ops/run_status_report.py --label a_plain_v2 --log LOG --run RUN_DIR --total-upd 960
   python scripts/ops/run_status_report.py --ssh root@HOST --port P --label b66_sgd_s1 \\
       --log /workspace/b66/logs/b66_sgd_s1.log --run /workspace/b66/out/b66_sgd_s1 \\
-      --save-log /e/MThesis_EXP/live_20261026_b66/save.log --gpus --credit
+      --save-log $EXP/live_20261026_b66/save.log --gpus --credit
 """
 import argparse
 import datetime as dt
 import re
 import subprocess
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.lib.vast_cli import vast_cli  # noqa: E402
 
 ERR = r"Traceback|Error|out of memory|Killed|exited rc=[1-9]|non-finite"
 PROG = re.compile(r"^env\s+(\d+)/(\d+)\s+upd\s+(\d+)/(\d+)\s.*?train-life-ret\(20\)\s+([-\d.]+).*?([\d.]+) min\s*$")
 CKPT = re.compile(r"^checkpoint_env(\d+)_upd(\d+)\.pt$")
 PAIR_TOLERANCE_S = 180   # checkpoint_latest.pt and replay_latest.npz are written in one save, so their mtimes sit this close
-VASTAI = r"C:\Users\miari\anaconda3\envs\graphtools\Scripts\vastai.exe"
 
 
 class Where:
@@ -173,7 +176,7 @@ def main():
         print("gpus (index, name, util %, mem MiB used, mem MiB total): " + " | ".join(g) + f" | GPU processes: {procs}")
     if a.credit:
         try:
-            out = subprocess.run([VASTAI, "show", "user", "--raw"], capture_output=True, text=True, timeout=120).stdout
+            out = subprocess.run([vast_cli(), "show", "user", "--raw"], capture_output=True, text=True, timeout=120).stdout
         except (OSError, subprocess.TimeoutExpired):
             out = ""
         m = re.search(r'"credit":\s*([-\d.]+)', out or "")

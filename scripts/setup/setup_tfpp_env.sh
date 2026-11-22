@@ -21,14 +21,15 @@
 #
 # run_leaderboard_official.sh selects the interpreter with EVAL_PYTHON, so the harness itself
 # is unchanged - only which python executes it.
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
 set -u
 
-VENV=/workspace/venv_tfpp
-GARAGE=/workspace/carla_garage
+VENV=$WORKSPACE/venv_tfpp
+GARAGE=$WORKSPACE/carla_garage
 AGENT="$GARAGE/team_code/sensor_agent.py"
 
 probe() {
-  PYTHONPATH="$GARAGE/team_code:$GARAGE/leaderboard:$GARAGE/scenario_runner:/workspace/carla/PythonAPI:/workspace/carla/PythonAPI/carla" \
+  PYTHONPATH="$GARAGE/team_code:$GARAGE/leaderboard:$GARAGE/scenario_runner:$WORKSPACE/carla/PythonAPI:$WORKSPACE/carla/PythonAPI/carla" \
   "$VENV/bin/python" -c "
 import importlib.util, sys
 import leaderboard.leaderboard_evaluator
@@ -106,5 +107,5 @@ echo "=== venv_tfpp ready ==="
 echo "run TF++ with:"
 echo "  EVAL_PYTHON=$VENV/bin/python \\"
 echo "  EVAL_AGENT=$AGENT \\"
-echo "  EVAL_AGENT_CONFIG=/workspace/tfpp_pretrained/pretrained_models/town13_withheld \\"
+echo "  EVAL_AGENT_CONFIG=$WORKSPACE/tfpp_pretrained/pretrained_models/town13_withheld \\"
 echo "  bash scripts/eval/run_leaderboard_official.sh <label> tfpp - <routes.xml> <subset> <port> <tm_port>"

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Box side (2026-10-26, generic form of snapshot_b100k_pair.sh): take a consistent snapshot of one run's resumable pair
+# Box side (2026-10-26, generic form of snapshot_b100k_pair.sh, retired 2026-11-22): take a consistent snapshot of one run's resumable pair
 # (checkpoint_latest.pt + replay_latest.npz). The trainer rewrites both every 2,500 updates, so both are copied into a fresh
 # directory and the copy is kept only if neither file's mtime or size changed while it ran.
 # usage (on the box): snapshot_run_pair.sh CKPT_DIR SNAP_ROOT   -> prints the snapshot directory on success, FAILED otherwise

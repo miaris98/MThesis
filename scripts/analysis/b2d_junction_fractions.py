@@ -23,11 +23,12 @@ import sys
 import xml.etree.ElementTree as ET
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
+WORKSPACE = os.environ.get("WORKSPACE", "/workspace").rstrip("/")   # the box workspace (src/config/paths.py: WORKSPACE)
 
 ROOT = Path(__file__).resolve().parents[2]
 GARAGE = ROOT / "Carla-utils/carla_garage"
 if not GARAGE.exists():  # eval boxes keep carla_garage next to the repo
-    GARAGE = Path(os.environ.get("GARAGE", "/workspace/carla_garage"))
+    GARAGE = Path(os.environ.get("GARAGE", f"{WORKSPACE}/carla_garage"))
 XML = GARAGE / "Bench2Drive/leaderboard/data/bench2drive220.xml"
 TOOL = GARAGE / "Bench2Drive/tools/ability_benchmark.py"
 
@@ -65,7 +66,7 @@ def town_fractions(job):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--carla-root", default=os.environ.get("CARLA_ROOT", "/workspace/carla"))
+    ap.add_argument("--carla-root", default=os.environ.get("CARLA_ROOT", f"{WORKSPACE}/carla"))
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     ts = traffic_sign_scenarios()

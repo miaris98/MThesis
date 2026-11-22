@@ -1,6 +1,7 @@
 # S-115 follow-on lanes: start one single-route lane (E15 a, J20 s0..s3, E15 b) per route whenever a GPU has fewer
 # than CAP running lanes. usage: followon.sh BOX CAP NGPU PORT0 ROUTE... (no evaluator kills: lanes already run)
-BOX=$1; CAP=$2; NGPU=$3; PORT=$4; shift 4; cd /workspace
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
+BOX=$1; CAP=$2; NGPU=$3; PORT=$4; shift 4; cd $WORKSPACE
 E=carla_armE_aug1_hires/model_epoch_015.pth
 for R in "$@"; do
   while :; do
@@ -17,7 +18,7 @@ for R in "$@"; do
   JOBS="$JOBS CKL:a9_E15_r${BOX}b_$PORT:$E:$R"
   echo "$(date) follow-on lane $PORT GPU $G route $R"
   echo "$(date) S-115 follow-on lane $PORT" >> lane_${BOX}b$PORT.log
-  setsid nohup bash /workspace/MThesis/scripts/eval/queue_A9c.sh $PORT $G $JOBS >> lane_${BOX}b$PORT.log 2>&1 < /dev/null &
+  setsid nohup bash $WORKSPACE/MThesis/scripts/eval/queue_A9c.sh $PORT $G $JOBS >> lane_${BOX}b$PORT.log 2>&1 < /dev/null &
   PORT=$((PORT + 400))
   sleep 120
 done

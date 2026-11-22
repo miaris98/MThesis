@@ -2,7 +2,7 @@
 # Periodic off-box backup of live runs to the external archive (stage 1 of the two-stage sync).
 #
 # usage: scripts/sync/live_sync_loop.sh <ssh_port> <user@host> <dest_dir> [interval_s] [remote paths...]
-#   remote paths are relative to the box's /workspace (default: bench2drive_out guardian_logs checkpoints
+#   remote paths are relative to the box's $RWS (default: bench2drive_out guardian_logs checkpoints
 #   MThesis/results MThesis/mlruns *.log); globs are expanded on the box.
 #   env: MARGIN (s, default 900), FULL_EVERY (passes, default 12; 0 = only the first pass is full).
 #
@@ -16,6 +16,7 @@
 # After the first successful pass, a pass sends only files modified since the previous successful pass
 # started, minus MARGIN (clock skew between the box and this machine, files written during that pass);
 # every FULL_EVERY-th pass is full again. Every pass used to re-send every checkpoint, uncompressed.
+RWS=${REMOTE_WORKSPACE:-/workspace}   # the boxes' workspace (the Vast layout); REMOTE_WORKSPACE overrides
 PORT="$1"; HOST="$2"; DEST="$3"; INTERVAL="${4:-600}"; shift 4 2>/dev/null || shift $#
 PATHS="${*:-bench2drive_out guardian_logs checkpoints MThesis/results MThesis/mlruns *.log}"
 MARGIN="${MARGIN:-900}"; FULL_EVERY="${FULL_EVERY:-12}"
@@ -30,7 +31,7 @@ while true; do
   PASS=$((PASS + 1))
   STAGE=$(mktemp -d "$DEST/.staging.XXXXXX")
   ssh -o BatchMode=yes -o ConnectTimeout=20 -p "$PORT" "$HOST" \
-    "cd /workspace && tar -cf - --exclude='replay_latest.npz' --exclude='*.tmp' --exclude='*.tmp.*' \
+    "cd $RWS && tar -cf - --exclude='replay_latest.npz' --exclude='*.tmp' --exclude='*.tmp.*' \
        --exclude='*.tmp[0-9]*' $NEWER \$(ls -d $PATHS 2>/dev/null) 2>/dev/null" | tar -xf - -C "$STAGE"
   rc=("${PIPESTATUS[@]}")
   if [ "${rc[0]}" -le 1 ] && [ "${rc[1]}" -eq 0 ] && [ -n "$(ls -A "$STAGE")" ]; then

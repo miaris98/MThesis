@@ -45,6 +45,7 @@ from typing import List, Optional
 
 import torch
 import torch.nn as nn
+from src.config.paths import WORKSPACE  # the box workspace ($WORKSPACE)
 
 # The key TransFuser++ stores its image branch under.
 _TFPP_IMAGE_PREFIX = "backbone.image_encoder."
@@ -208,7 +209,7 @@ class CarlaPretrainedEncoder(nn.Module):
         return self.forward_pyramid(x)[-1]
 
 
-def default_tfpp_weights(root: str = "/workspace/tfpp_pretrained/pretrained_models",
+def default_tfpp_weights(root: str = f"{WORKSPACE}/tfpp_pretrained/pretrained_models",
                          variant: str = "all_towns", seed: int = 0) -> Optional[str]:
     """Conventional location of the released TransFuser++ checkpoints on the training box.
 

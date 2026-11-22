@@ -1,6 +1,7 @@
 #!/bin/bash
 # Script to launch dedicated Hardware Diagnostics Dashboard (nvitop GPU + btop CPU/RAM)
 
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
 SESSION_NAME="dashboard"
 MLFLOW_PORT=10100
 
@@ -29,7 +30,7 @@ tmux split-window -v -t $SESSION_NAME
 
 # Find Conda activation path dynamically
 CONDA_ACTIVATE="conda activate carla_py38"
-for p in "/workspace/miniconda" "/opt/conda" "$HOME/miniconda3" "$HOME/anaconda3" "/root/miniconda3" "/usr/local/miniconda3"; do
+for p in "$WORKSPACE/miniconda" "/opt/conda" "$HOME/miniconda3" "$HOME/anaconda3" "/root/miniconda3" "/usr/local/miniconda3"; do
     if [ -f "$p/etc/profile.d/conda.sh" ]; then
         CONDA_ACTIVATE="source $p/etc/profile.d/conda.sh && conda activate carla_py38"
         break

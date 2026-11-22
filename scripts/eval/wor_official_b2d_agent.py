@@ -17,8 +17,9 @@ import os
 import sys
 
 from leaderboard.autoagents.autonomous_agent import AutonomousAgent, Track
+WORKSPACE = os.environ.get("WORKSPACE", "/workspace").rstrip("/")   # the box workspace (src/config/paths.py: WORKSPACE)
 
-PCLA_ROOT = os.environ.get("PCLA_ROOT", "/workspace/PCLA")
+PCLA_ROOT = os.environ.get("PCLA_ROOT", f"{WORKSPACE}/PCLA")
 # WoR's released config has log_wandb: True, which calls wandb.init() in setup and renders a debug video
 # every step. Logging only - no effect on driving - and it needs a W&B account, so it is switched off.
 os.environ.setdefault("WANDB_MODE", "disabled")

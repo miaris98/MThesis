@@ -1,6 +1,8 @@
 import optuna
+import os
+WORKSPACE = os.environ.get("WORKSPACE", "/workspace").rstrip("/")   # the box workspace (src/config/paths.py: WORKSPACE)
 
-storage = "sqlite:////workspace/MThesis/results/atari_gtrxl_optuna.db"
+storage = f"sqlite:///{WORKSPACE}/MThesis/results/atari_gtrxl_optuna.db"
 study = optuna.load_study(study_name="gtrxl_ez2_hparam_study", storage=storage)
 print(f"=== Study: {study.study_name} ===")
 print(f"Total Trials: {len(study.trials)}")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and maintain the Graphify Knowledge Graph & Wiki for the External MThesis Experiment Archive (E:\\MThesis_EXP).
+"""Build and maintain the Graphify Knowledge Graph & Wiki for the External MThesis Experiment Archive (MTHESIS_EXP_ROOT, default E:\\MThesis_EXP).
 
 Usage:
     python scripts/sync/build_external_graph.py
@@ -10,6 +10,9 @@ import sys
 import json
 import argparse
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from src.config import paths  # noqa: E402
 
 from graphify.detect import detect
 from graphify.extract import extract
@@ -51,12 +54,12 @@ def update_catalog(exp_root: Path):
 
     catalog_md = f'''# MThesis External Experiments Catalog & Knowledge Base
 
-This document catalogs the historical experiments, model checkpoints, evaluations, and logs stored at `E:\\MThesis_EXP`.
+This document catalogs the historical experiments, model checkpoints, evaluations, and logs stored at `{exp_root.as_posix()}`.
 
-## Checkpoints Repository (`E:\\MThesis_EXP\\checkpoints`)
+## Checkpoints Repository (`{exp_root.as_posix()}/checkpoints`)
 {chr(10).join(checkpoints) if checkpoints else 'None found'}
 
-## Bench2Drive Evaluations (`E:\\MThesis_EXP\\bench2drive_eval`)
+## Bench2Drive Evaluations (`{exp_root.as_posix()}/bench2drive_eval`)
 {chr(10).join(b2d_runs) if b2d_runs else 'None found'}
 
 ### Key Evaluation Files:
@@ -67,10 +70,10 @@ This document catalogs the historical experiments, model checkpoints, evaluation
 - `bench2drive_eval/run_20260916/crash_rate.py`: Post-hoc collision, infraction, and route completion analyzer.
 - `bench2drive_eval/run_20260916/classify_failures.py`: Failure mode taxonomy and route-level categorization.
 
-## MLflow Runs & Experiments (`E:\\MThesis_EXP\\mlruns`)
+## MLflow Runs & Experiments (`{exp_root.as_posix()}/mlruns`)
 {chr(10).join(exp_dirs) if exp_dirs else 'None found'}
 
-## Atari Experiments (`E:\\MThesis_EXP\\atari_gtrxl_optuna_20260917`)
+## Atari Experiments (`{exp_root.as_posix()}/atari_gtrxl_optuna_20260917`)
 - Optuna Bayesian optimization study for `ImpalaGTrXLAgent` on `BreakoutNoFrameskip-v4`.
 - SQLite database: `atari_gtrxl_optuna.db`.
 - Runner: `optimize_gtrxl_optuna.py`.
@@ -79,8 +82,8 @@ This document catalogs the historical experiments, model checkpoints, evaluation
     print('Updated EXPERIMENTS_CATALOG.md')
 
 def main():
-    parser = argparse.ArgumentParser(description="Build external graphify knowledge graph on E:\\MThesis_EXP")
-    parser.add_argument("--root", default=r"E:\MThesis_EXP", help="External experiment root")
+    parser = argparse.ArgumentParser(description="Build the external graphify knowledge graph on the experiment archive")
+    parser.add_argument("--root", default=str(paths.exp_root()), help="External experiment root (default: MTHESIS_EXP_ROOT)")
     parser.add_argument("--wiki-only", action="store_true", help="Only re-export wiki from existing graph.json")
     args = parser.parse_args()
 

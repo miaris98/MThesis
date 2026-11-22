@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # A74 RL box driver (2026-11-02): closed-loop PPO of the maneuver head on top of E15. Runs on an eval-type box (CARLA provisioned,
-# E15 in /workspace/checkpoints/E15). usage: scripts/ops/a74_rl_box.sh STEP      status lines -> /workspace/a74/status
+# E15 in $WORKSPACE/checkpoints/E15). usage: scripts/ops/a74_rl_box.sh STEP      status lines -> $WORKSPACE/a74/status
 #   routes   training batches from carla_garage's PDM-Lite routes (build_a74_routes.py; never the 220 evaluation routes)
 #   learner  the PPO learner (train_maneuver_ppo.py; resumable: rerun it after a stop)
 #   lanes    A74_LANES RL lanes (ports 2000, 2400, 2800, ...; lane k on GPU k % A74_GPUS); each runs batch after batch through
@@ -11,20 +11,21 @@
 #   stop     lanes finish their current batch and exit; the learner keeps its state
 # env: A74_RUN (run1), A74_LANES (3), A74_BATCHES (400), A74_PER_BATCH (25), A74_SEED (0), A74_BATCH (4096 decisions per update),
 #      A74_MAX (300000 decisions), A74_EPS (0.01), A74_EPS_STUCK (0.1), A74_GPUS (1), A74_BOFF (0), A74_STAGGER_S (15),
-#      A74_THREADS (4: OpenMP / MKL threads per evaluator), A74_ROUTES (/workspace/a74/routes: the batch folder, e.g. a probe's own),
+#      A74_THREADS (4: OpenMP / MKL threads per evaluator), A74_ROUTES ($WORKSPACE/a74/routes: the batch folder, e.g. a probe's own),
 #      A74_OBST (0.5: obstacle-scenario share of a batch, routes step), A74_COMMIT (40 ticks a non-default maneuver is held)
 # The learner can also run elsewhere (scripts/ops/a74_relay.sh: learner on the PC, episodes and heads relayed); then skip the learner step.
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
 set -uo pipefail
-A=/workspace/a74; RUN=${A74_RUN:-run1}; R=$A/$RUN; RT=${A74_ROUTES:-$A/routes}
+A=$WORKSPACE/a74; RUN=${A74_RUN:-run1}; R=$A/$RUN; RT=${A74_ROUTES:-$A/routes}
 mkdir -p $R/logs; S=$A/status
 mark() { echo "$(date -u +%H:%M:%S) $RUN $1" >> $S; }
-cd /workspace/MThesis; export PYTHONPATH=/workspace/MThesis MLFLOW_ALLOW_FILE_STORE=true
+cd $WORKSPACE/MThesis; export PYTHONPATH=$WORKSPACE/MThesis MLFLOW_ALLOW_FILE_STORE=true
 . scripts/lib/common.sh
 PY=/venv/main/bin/python
-E15=/workspace/checkpoints/E15/model_epoch_015.pth
+E15=$WORKSPACE/checkpoints/E15/model_epoch_015.pth
 case $1 in
 routes)
-  $PY scripts/training/build_a74_routes.py --src /workspace/carla_garage/data --out $RT --batches ${A74_BATCHES:-400} \
+  $PY scripts/training/build_a74_routes.py --src $WORKSPACE/carla_garage/data --out $RT --batches ${A74_BATCHES:-400} \
     --per_batch ${A74_PER_BATCH:-25} --seed ${A74_SEED:-0} --obstacle_share ${A74_OBST:-0.5} > $RT.log 2>&1
   mark "ROUTES_EXIT $? $(tail -1 $RT.log)" ;;
 learner)

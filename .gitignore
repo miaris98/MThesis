@@ -78,19 +78,30 @@ graphify-out/
 
 # ---------------------------------------------------------------------------
 # One-off status/ops scripts written by agent sessions, and per-box sync scripts
-# with hardcoded hosts. They are archived on E:\MThesis_EXP\local_repo_logs_*;
-# the few scratch files committed before 2026-09-28 stay tracked.
+# with hardcoded hosts. They are archived on E:\MThesis_EXP\local_repo_logs_*.
+# The scratch files committed before 2026-09-28 were untracked on 2026-11-22
+# (an ignore rule does not stop a tracked file from being committed).
 # ---------------------------------------------------------------------------
 /scratch/
 /scripts/sync/sync_box_*.py
 offers.csv
 route_dur.json
 
-# Everything under docs/ (working notes, ops logs, TODOs) stays local
+# The live fleet file names real box hosts and ports: keep it local
+# (format: scripts/ops/fleet_monitor/boxes.example.txt).
+/scripts/ops/fleet_monitor/boxes.txt
+
+# Everything under docs/ (working notes, ops logs, TODOs) stays local. The 37
+# docs files tracked before this rule were untracked on 2026-11-22: TODO_ACTIVE.md
+# kept being committed (with box IPs) after the rule was added on 2026-10-12.
 /docs/
 
-# Local tool state (.antigravity): not committed
+# Local tool state (.antigravity, and other agent tools that keep settings or
+# keys in their folder): not committed
 /.antigravity/
+/.codebuddy/
+/.gemini/
+/.qoder/
 
 # Local agent definitions (.agents/agents): not committed
 /.agents/agents/

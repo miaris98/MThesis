@@ -1,20 +1,12 @@
 """Base CARLA environment helpers, server connection probing, and actor cleanup."""
 import os
 import sys
-import glob
 import time
 from typing import Optional, List, Any
 
-# Auto-add local CARLA PythonAPI egg package if present
-carla_root = os.environ.get("CARLA_ROOT", "/workspace/carla")
-carla_dist_path = os.path.join(carla_root, "PythonAPI", "carla", "dist")
-if os.path.exists(carla_dist_path):
-    eggs = glob.glob(os.path.join(carla_dist_path, "carla-*-py3*.egg"))
-    for p in eggs:
-        if p not in sys.path:
-            sys.path.insert(0, p)
-    if os.path.join(carla_root, "PythonAPI", "carla") not in sys.path:
-        sys.path.insert(0, os.path.join(carla_root, "PythonAPI", "carla"))
+from src.config.carla_client import add_carla_to_path
+
+add_carla_to_path()
 
 # Auto-add local EasyCarla-RL package if present
 easycarla_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "Carla-utils", "EasyCarla-RL")

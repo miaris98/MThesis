@@ -1,0 +1,8 @@
+# Fleet file format for fleet_monitor.py and sync_boxes.sh. Copy to boxes.txt (git-ignored) or point FLEET_BOXES at a copy.
+# One box per line: name|kind|port|host|label
+#   kind  atari | carla
+#   port  the SSH port from the instance record, host the bare host (root@ is added)
+#   label Atari: the run label; CARLA: the result-file prefix (bench2drive_out/<label>*_x.json)
+# Write a new file per fleet: a stale file sends checks and backups to hosts Vast may have reused.
+# atari1|atari|PORT|HOST|S058h_gtrxl_100k_s5_uniform
+# carla1|carla|PORT|HOST|e15x07nv

@@ -24,6 +24,7 @@ import time
 import numpy as np
 import torch
 import torch.nn.functional as F
+WORKSPACE = os.environ.get("WORKSPACE", "/workspace").rstrip("/")   # the box workspace (src/config/paths.py: WORKSPACE)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _ROOT not in sys.path:
@@ -226,7 +227,7 @@ def cmd_run(a):
     try:
         os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
         import mlflow
-        mlflow.set_tracking_uri("file:///workspace/mlruns_probe")
+        mlflow.set_tracking_uri(f"file://{WORKSPACE}/mlruns_probe")
         mlflow.set_experiment("A65_encoder_probe")
         with mlflow.start_run(run_name="regnety_vs_simlingo"):
             mlflow.log_params(dict(n_frames=len(idx), pca=256, grid="4x4"))

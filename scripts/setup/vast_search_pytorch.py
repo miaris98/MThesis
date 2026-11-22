@@ -30,23 +30,19 @@ import os
 import json
 import csv
 import argparse
-import shutil
 import subprocess
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-# Locate vastai CLI executable
-VAST_CLI_CANDIDATES = [
-    r"C:\Users\miari\anaconda3\envs\graphtools\Scripts\vastai.exe",
-    r"C:\Users\miari\anaconda3\Scripts\vastai.exe",
-    shutil.which("vastai") or "vastai"
-]
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.lib.vast_cli import vast_cli  # noqa: E402
+
 
 def get_vast_cli() -> str:
-    for cand in VAST_CLI_CANDIDATES:
-        if cand and Path(cand).exists():
-            return cand
-    return "vastai"
+    try:
+        return vast_cli()
+    except FileNotFoundError:
+        return "vastai"
 
 # Default template presets
 PYTORCH_TEMPLATES = {

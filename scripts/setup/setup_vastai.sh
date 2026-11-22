@@ -7,6 +7,7 @@
 # CARLA server in a background tmux session.
 # ==============================================================================
 
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
 set -e
 
 # --- Color Formatting ---
@@ -109,29 +110,29 @@ echo -e "${GREEN}✓ System dependencies installed successfully.${NC}"
 
 # --- 2. Download & Extract CARLA 0.9.15 ---
 echo -e "\n${CYAN}[2/7] Checking CARLA 0.9.15 Simulator installation...${NC}"
-CARLA_DIR="/workspace/carla"
+CARLA_DIR="$WORKSPACE/carla"
 
 if [ -f "$CARLA_DIR/CarlaUE4.sh" ]; then
     echo -e "${GREEN}✓ CARLA 0.9.15 already exists at $CARLA_DIR. Skipping download.${NC}"
 else
     echo -e "${YELLOW}--> Downloading CARLA 0.9.15 tarball via high-speed CDN mirror (16 streams)...${NC}"
     mkdir -p "$CARLA_DIR"
-    cd /workspace
+    cd $WORKSPACE
     
     URL_S3="https://carla-releases.s3.us-east-005.backblazeb2.com/Linux/CARLA_0.9.15.tar.gz"
     
     if command -v aria2c &>/dev/null; then
-        aria2c -x 16 -s 16 -k 1M --check-certificate=false "$URL_S3" -d /workspace -o CARLA_0.9.15.tar.gz || \
-        wget -c "$URL_S3" -O /workspace/CARLA_0.9.15.tar.gz
+        aria2c -x 16 -s 16 -k 1M --check-certificate=false "$URL_S3" -d $WORKSPACE -o CARLA_0.9.15.tar.gz || \
+        wget -c "$URL_S3" -O $WORKSPACE/CARLA_0.9.15.tar.gz
     else
-        wget -c "$URL_S3" -O /workspace/CARLA_0.9.15.tar.gz
+        wget -c "$URL_S3" -O $WORKSPACE/CARLA_0.9.15.tar.gz
     fi
     
     echo -e "${YELLOW}--> Extracting CARLA package to $CARLA_DIR...${NC}"
-    tar -xvf /workspace/CARLA_0.9.15.tar.gz -C "$CARLA_DIR"
+    tar -xvf $WORKSPACE/CARLA_0.9.15.tar.gz -C "$CARLA_DIR"
     
     echo -e "${YELLOW}--> Cleaning up tarball to save disk space...${NC}"
-    rm -f /workspace/CARLA_0.9.15.tar.gz
+    rm -f $WORKSPACE/CARLA_0.9.15.tar.gz
     echo -e "${GREEN}✓ CARLA 0.9.15 extracted successfully.${NC}"
 fi
 
@@ -150,7 +151,7 @@ echo -e "\n${CYAN}[4/7] Setting up Python 3.8 Conda environment ('carla_py38')..
 
 # Locate or auto-install Conda
 CONDA_PROFILE=""
-for p in "/opt/conda" "/workspace/miniconda" "$HOME/miniconda3" "$HOME/anaconda3" "/root/miniconda3" "/usr/local/miniconda3"; do
+for p in "/opt/conda" "$WORKSPACE/miniconda" "$HOME/miniconda3" "$HOME/anaconda3" "/root/miniconda3" "/usr/local/miniconda3"; do
     if [ -f "$p/etc/profile.d/conda.sh" ]; then
         CONDA_PROFILE="$p/etc/profile.d/conda.sh"
         break
@@ -158,13 +159,13 @@ for p in "/opt/conda" "/workspace/miniconda" "$HOME/miniconda3" "$HOME/anaconda3
 done
 
 if [ -z "$CONDA_PROFILE" ] && ! command -v conda &>/dev/null; then
-    echo -e "${YELLOW}--> Conda not detected. Installing Miniconda to /workspace/miniconda...${NC}"
-    mkdir -p /workspace/miniconda
-    wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /workspace/miniconda.sh
-    bash /workspace/miniconda.sh -b -u -p /workspace/miniconda
-    rm -f /workspace/miniconda.sh
-    CONDA_PROFILE="/workspace/miniconda/etc/profile.d/conda.sh"
-    /workspace/miniconda/bin/conda init bash
+    echo -e "${YELLOW}--> Conda not detected. Installing Miniconda to $WORKSPACE/miniconda...${NC}"
+    mkdir -p $WORKSPACE/miniconda
+    wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O $WORKSPACE/miniconda.sh
+    bash $WORKSPACE/miniconda.sh -b -u -p $WORKSPACE/miniconda
+    rm -f $WORKSPACE/miniconda.sh
+    CONDA_PROFILE="$WORKSPACE/miniconda/etc/profile.d/conda.sh"
+    $WORKSPACE/miniconda/bin/conda init bash
 fi
 
 if [ -n "$CONDA_PROFILE" ]; then
@@ -218,8 +219,8 @@ retry_cmd "EasyCarla-RL install" pip install git+https://github.com/silverwingsb
 PATCH_SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/../.." &> /dev/null && pwd )"
 # carla_env.py does `import carla` at module level, so PYTHONPATH must point at the CARLA
 # .egg before this check can succeed - export it now (step 5 also persists it to .bashrc).
-export CARLA_ROOT=/workspace/carla
-export PYTHONPATH="$(ls /workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg 2>/dev/null | tail -n 1):/workspace/carla/PythonAPI/carla:$PYTHONPATH"
+export CARLA_ROOT=$WORKSPACE/carla
+export PYTHONPATH="$(ls $WORKSPACE/carla/PythonAPI/carla/dist/carla-*-py3*.egg 2>/dev/null | tail -n 1):$WORKSPACE/carla/PythonAPI/carla:$PYTHONPATH"
 EASYCARLA_ENV_FILE=$(python -c "import easycarla.envs.carla_env as m, os; print(os.path.abspath(m.__file__))" 2>/dev/null || true)
 if [ -n "$EASYCARLA_ENV_FILE" ] && [ -f "$PATCH_SCRIPT_DIR/patches/easycarla_rl/carla_env.py" ]; then
     cp "$PATCH_SCRIPT_DIR/patches/easycarla_rl/carla_env.py" "$EASYCARLA_ENV_FILE"
@@ -229,7 +230,7 @@ else
 fi
 
 # Auto-download CARLA-domain pretrained vision weights (TransFuser++ / Leaderboard 2.0)
-PRETRAINED_DIR="/workspace/pretrained_carla"
+PRETRAINED_DIR="$WORKSPACE/pretrained_carla"
 if [ ! -f "$PRETRAINED_DIR/model_0030_0.pth" ]; then
     echo -e "${YELLOW}--> Downloading CARLA-domain TransFuser++ pretrained vision weights...${NC}"
     mkdir -p "$PRETRAINED_DIR"
@@ -263,7 +264,7 @@ fi
 #   WOR_DATASET_RESERVE_GB=40          leave more room for checkpoints
 #   WOR_DATASET_MAX_GB=60              cap the download regardless of free space
 WOR_DATASET_TOWNS="${WOR_DATASET_TOWNS:-auto}"
-WOR_DATASET_DIR="/workspace/dataset/wor_trajectories"
+WOR_DATASET_DIR="$WORKSPACE/dataset/wor_trajectories"
 WOR_DATASET_RESERVE_GB="${WOR_DATASET_RESERVE_GB:-25}"
 
 if [ "$WOR_DATASET_TOWNS" = "none" ] || [ -z "$WOR_DATASET_TOWNS" ]; then
@@ -299,9 +300,9 @@ echo -e "${GREEN}✓ Python environment, EasyCarla-RL package, CARLA pretrained 
 
 # --- 5. Configure Environment Variables ---
 echo -e "\n${CYAN}[5/7] Configuring environment variables (~/.bashrc & Conda activate hook)...${NC}"
-EGG_PATH=$(ls /workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg 2>/dev/null | tail -n 1)
+EGG_PATH=$(ls $WORKSPACE/carla/PythonAPI/carla/dist/carla-*-py3*.egg 2>/dev/null | tail -n 1)
 
-if ! grep -q "CARLA_ROOT=/workspace/carla" ~/.bashrc; then
+if ! grep -q "CARLA_ROOT=$WORKSPACE/carla" ~/.bashrc; then
     echo 'export CARLA_ROOT=/workspace/carla' >> ~/.bashrc
 fi
 
@@ -309,9 +310,9 @@ if ! grep -q "PythonAPI/carla/dist" ~/.bashrc; then
     echo 'export PYTHONPATH=$(ls /workspace/carla/PythonAPI/carla/dist/carla-*-py3*.egg 2>/dev/null | tail -n 1):/workspace/carla/PythonAPI/carla:$PYTHONPATH' >> ~/.bashrc
 fi
 
-export CARLA_ROOT=/workspace/carla
+export CARLA_ROOT=$WORKSPACE/carla
 if [ -n "$EGG_PATH" ]; then
-    export PYTHONPATH="$EGG_PATH:/workspace/carla/PythonAPI/carla:$PYTHONPATH"
+    export PYTHONPATH="$EGG_PATH:$WORKSPACE/carla/PythonAPI/carla:$PYTHONPATH"
 fi
 
 # Configure Conda environment activation hook so 'import carla' works automatically whenever carla_py38 is activated
@@ -319,7 +320,7 @@ CONDA_ENV_PATH=$(python -c "import sys; print(sys.prefix)" 2>/dev/null)
 if [ -n "$CONDA_ENV_PATH" ]; then
     mkdir -p "$CONDA_ENV_PATH/etc/conda/activate.d"
     echo 'export CARLA_ROOT=/workspace/carla' > "$CONDA_ENV_PATH/etc/conda/activate.d/env_vars.sh"
-    echo "export PYTHONPATH=\"$EGG_PATH:/workspace/carla/PythonAPI/carla:\$PYTHONPATH\"" >> "$CONDA_ENV_PATH/etc/conda/activate.d/env_vars.sh"
+    echo "export PYTHONPATH=\"$EGG_PATH:$WORKSPACE/carla/PythonAPI/carla:\$PYTHONPATH\"" >> "$CONDA_ENV_PATH/etc/conda/activate.d/env_vars.sh"
 fi
 
 echo -e "${GREEN}✓ Environment variables and Conda activation hooks configured.${NC}"
@@ -330,7 +331,7 @@ if tmux has-session -t carla_server 2>/dev/null; then
     echo -e "${GREEN}✓ CARLA server tmux session ('carla_server') is already running.${NC}"
 else
     echo -e "${YELLOW}--> Starting headless CARLA server in tmux session 'carla_server'...${NC}"
-    tmux new-session -d -s carla_server "su carlauser -c '/workspace/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' > /workspace/carla_server.log 2>&1"
+    tmux new-session -d -s carla_server "su carlauser -c '$WORKSPACE/carla/CarlaUE4.sh -carla-port=2000 -RenderOffScreen -nosound -vulkan -quality-level=Low' > $WORKSPACE/carla_server.log 2>&1"
     echo -e "${YELLOW}--> Waiting 10 seconds for CARLA engine initialization...${NC}"
     sleep 10
 fi
@@ -341,7 +342,7 @@ echo -e "\n${CYAN}[7/7] Verifying connection to CARLA Server...${NC}"
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/../.." &> /dev/null && pwd )"
 if [ -f "$SCRIPT_DIR/scripts/carla/test_connection.py" ]; then
     python "$SCRIPT_DIR/scripts/carla/test_connection.py" --host 127.0.0.1 --port 2000 || {
-        echo -e "${YELLOW}[NOTE] Server is still starting up. Check logs with: tail -n 20 /workspace/carla_server.log${NC}"
+        echo -e "${YELLOW}[NOTE] Server is still starting up. Check logs with: tail -n 20 $WORKSPACE/carla_server.log${NC}"
     }
 fi
 
@@ -351,6 +352,6 @@ echo -e "${GREEN}==============================================================$
 echo -e "Quick Commands:"
 echo -e "  1. Launch 3-Pane Dashboard:  ${CYAN}bash $SCRIPT_DIR/scripts/sync/start_dashboard.sh${NC}"
 echo -e "  2. Train Camera PPO Agent:   ${CYAN}python $SCRIPT_DIR/scripts/training/train_rl_agent.py --env-type camera_easycarla --backbone resnet18 --total-steps 2000${NC}"
-echo -e "  3. Start TensorBoard:        ${CYAN}tensorboard --logdir=/workspace/runs --port=6006 --host=0.0.0.0 &${NC}"
-echo -e "  4. View CARLA Server Logs:   ${CYAN}tail -f /workspace/carla_server.log${NC}"
+echo -e "  3. Start TensorBoard:        ${CYAN}tensorboard --logdir=$WORKSPACE/runs --port=6006 --host=0.0.0.0 &${NC}"
+echo -e "  4. View CARLA Server Logs:   ${CYAN}tail -f $WORKSPACE/carla_server.log${NC}"
 echo -e "==============================================================\n"

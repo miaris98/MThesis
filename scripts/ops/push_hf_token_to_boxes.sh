@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # RUN THIS YOURSELF (Claude must not read .env): puts the HF token from .env into /dev/shm/hf_token on each box. Prints only the byte count per box.
-# usage:  scripts/ops/push_hf_token_to_boxes.sh PORT HOST ...   # e.g. 40728 85.131.126.173 (the bare host; root@ is added here)
+# usage:  scripts/ops/push_hf_token_to_boxes.sh PORT HOST ...   # the bare host from the instance record; root@ is added here
 # Takes the boxes as arguments only. The old hard-coded list (2026-10-11 boxes, all gone) was removed so no token goes to a stale host.
 [ "$#" -ge 2 ] || { echo "usage: $0 PORT HOST [PORT HOST ...]"; exit 1; }
 cd "$(dirname "$0")/../.." || exit 1

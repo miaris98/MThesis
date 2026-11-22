@@ -47,6 +47,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import torch
+WORKSPACE = os.environ.get("WORKSPACE", "/workspace").rstrip("/")   # the box workspace (src/config/paths.py: WORKSPACE)
 
 # CARLA PythonAPI discovery. Deliberately NOT eval_wor.py's version, which prepends every
 # `carla-*-py3*.egg` it finds to sys.path unconditionally. CARLA 0.9.15 ships only cp27 and
@@ -54,7 +55,7 @@ import torch
 # perfectly good pip-installed client - it shadows the working import with a broken one.
 # Prefer whatever is already importable; fall back to the shipped egg only if there is
 # nothing else, which keeps the original py3.7 conda environment working.
-carla_root = os.environ.get("CARLA_ROOT", "/workspace/carla")
+carla_root = os.environ.get("CARLA_ROOT", f"{WORKSPACE}/carla")
 
 # The `agents.navigation` helpers are not packaged in the wheel and only ever live in the
 # server tree, so this path is needed regardless of where `carla` itself comes from.

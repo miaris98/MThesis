@@ -1,6 +1,6 @@
 # Box operations (S-115, 2026-10-03; S-126 / S-127, 2026-10-05)
 
-Tools used on rented Vast.ai boxes; every one was run for real that day. HF token only ever lives in `/dev/shm/hf_token` on the box
+Tools used on rented Vast.ai boxes; every one was run for real that day. One-off scripts of finished experiments were retired on 2026-11-22 (verbatim in `E:\MThesis_EXP\local_repo_logs_20261122etired_scripts`, with a sha256 MANIFEST). HF token only ever lives in `/dev/shm/hf_token` on the box
 (sent over stdin, never printed). Never `pkill -f` a pattern in the same ssh command that relaunches a matching script.
 
 | Script | Where | What |
@@ -10,22 +10,17 @@ Tools used on rented Vast.ai boxes; every one was run for real that day. HF toke
 | `finisher.sh HF_SUBDIR "[p]attern" PATH...` | box | unattended: push results hourly while jobs matching the pattern run, once more when they end, "FINISHED" in `/workspace/finisher.log` |
 | `provision_atari_box.sh [restore]` | box | Atari box: **HF reachability check first**, deps, the B15 diagnostics state file (HF `diag/b15_states_512.npy`), optionally the 16 B35 checkpoints |
 | `provision_eval.sh` | box | eval-only CARLA box: CARLA + venv_carla + checkpoints from HF (sha-checked) + `PROVISION_DONE` marker |
-| `launch_lanes_nokill.sh BOX LANEFILE` | box (stdin) | start one `queue_A9c.sh` lane per `BOX PORT GPU JOBS...` line; stops stray evaluators first |
 | `followon.sh BOX CAP NGPU PORT0 ROUTE...` | box | single-route lanes started as GPU slots free up (CAP lanes per GPU) |
-| `gen_rep.py` | home | builds the S-115 repeat-eval lane files (60 routes x E15 a/b + arm J seeds 0-3) |
 | `restore_b35_checkpoints.py` | box | the 16 B35 env30000 checkpoints from HF (`b35_*`, `b35_100k_env30000/`), sha-checked, + a 200 MB HF upload speed test |
-| `run_b24_P.sh` | box | B24: 30 episodes at 64 sims on the 16 checkpoints, one evaluator each over 4 GPUs (add `--graph`) |
-| `profile_search.py`, `tree_depth.py`, `test_graphed.py` | box, repo root | B23: search profile, tree-depth distribution, graphed-vs-eager equivalence + speed |
-| `gen_lanes_0410.py` | home | S-119: CARLA lane files for the original WoR x2 on the 60 repeat routes + arm J on the other routes, balanced by the A9 per-route wall times (`BOX:GPUS:LANES_PER_GPU`) |
+| `test_graphed.py` | box, repo root | B23: graphed-vs-eager search equivalence + speed (the profiling scripts of that day are retired) |
 | `run_eval_queue.sh NPAR` | box | S-119: a bounded queue of deferred Atari evaluations from `/workspace/eval_jobs.txt` (B24 rest, B2 sticky), round-robin over the GPUs; keep NPAR <= 3 next to training (8 slowed the trainers 1.7x) |
 | `gen_lanes.py ROUTE_DUR.json OUT BOX:GPUS:VRAM_GB:CPUS [--routes lead_obstacle\|all\|FILE] ARM...` | home | S-126: lane files sized from the box (**lanes per GPU = floor(VRAM / 5.5 GB)**, <= CPUS / 5 in total, <= 12, each job >= 8 routes), arms `LABEL=CKPT` (CKL) or `LABEL=CKPT\|K=V,...` (CKE, env switches such as `WOR_CONTACT_REFLEX=1`; a `;` inside a value stands for `,`), balanced by the A9 per-route wall times |
-| `gen_lanes_a36.py ROUTE_DUR.json OUT BOX:GPUS:LANES_PER_GPU LABEL=CKPT...` | home | S-126: the first lane generator (A36 merges on the 103 lead + obstacle routes); `gen_lanes.py` supersedes it |
 | `provision_train_box.sh` | box | S-126: training box for the pooled cache: arm J's data (6 towns + the Town12/13 obstacle archives; **>= 400 GB disk**, the download is the long pole: ~5 h at 11-12 MB/s), TF++ weights, E e15 from the relay, then `build_pooled_cache.py` per GPU shard; markers in `/workspace/train_prov/` |
 | `run_head_arms.sh GPU LABEL SEED [train_wor.py flags]` | box | S-126: one head-only arm on the pooled cache (J's recipe from E e15, epochs 16-20, ~12-15 min); `jc_s0` is the control that must match J; checkpoints under `/workspace/checkpoints/<LABEL>/` feed `CKL` / `CKE` lane jobs |
-| `run_b43_depth.sh "3 5 8 0" NPAR [SIMS]` | box | S-126: B43 step 1, the 16 restored B35 checkpoints at 64 simulations with the imagined depth capped (0 = unlimited reference) |
-| `../atari/run_b37_probe.sh GPU NAME [flags]`, `../atari/run_b36.sh` (`EXTRA="..."`) | box | S-126: the B37 2,000-update probe (one setting per GPU) and the 30k screens with extra trainer flags; **after every launch read the process command line and a log line unique to the new flag** (S-126: SGD ran for 20 min) |
 
-| `launch_lanes_extra.sh BOX LANEFILE` | box | S-131: extra lanes next to running ones (`launch_lanes_nokill.sh` kills running evaluators despite its name); lane files from `gen_lanes.py --port0 >= 9000`, VRAM sized to the free memory |
+| `launch_lanes_extra.sh [--kill] BOX LANEFILE` | box (or stdin to `bash -s`) | S-131: one `queue_A9c.sh` lane per `BOX PORT GPU JOBS...` line. Default: extra lanes next to running ones (lane files from `gen_lanes.py --port0 >= 9000`, VRAM sized to the free memory); `--kill` stops every running evaluator first (the former `launch_lanes_nokill.sh`) |
+| `box_deploy.sh PORT HOST MANIFEST` | home (Git Bash) | ship the repo + a manifest of files, sha256 on both ends, READY markers; `--check MANIFEST` checks the local files only. Manifests in `manifests/` (`${EXP}`, `${REPO}`, `${RWS}`); they replace the per-experiment `*_deploy.sh` |
+| `*_chain.sh` | box | one experiment day in order (data, audit, caches, training, lanes) on `../lib/chain.sh` (status file, `await`, `step`, render check, lane completion); `tfpp_chain.sh` takes `ARMS` (the a86 resume was `a86_chain.sh`) |
 | `hf_pull.py SUBDIR` | box | S-131: pull a relay subfolder (`snapshot_download`) and copy each arm folder into `/workspace/checkpoints/` (7 s for 400 MB on the A40 boxes); the push side is `push_verify.py` |
 | `restore_bundle.py BUNDLE_DIR PARENT SET` | box | S-131: labels-only restore: `measurements_<set>.tgz` + the cache index -> a data dir `wor_traj_m` of measurements + empty image stubs; tested: identical epoch-16 loss to the real run |
 

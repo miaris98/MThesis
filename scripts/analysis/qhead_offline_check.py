@@ -151,9 +151,8 @@ def main():
         json.dump(res, f, indent=1)
     try:  # MLflow (project rule); tracking must never fail the check
         import mlflow
-        from src.config.paths import mlruns_dir
-        os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
-        mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "file:" + str(mlruns_dir())))
+        from src.config.paths import mlflow_tracking_uri
+        mlflow.set_tracking_uri(mlflow_tracking_uri())
         mlflow.set_experiment("A71_qhead_check")
         with mlflow.start_run(run_name=os.path.basename(os.path.dirname(a.ckpt)) + "/" + os.path.basename(a.ckpt)):
             mlflow.log_params({"ckpt": a.ckpt, "q_labels": res["q_labels"]})

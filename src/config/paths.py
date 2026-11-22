@@ -28,21 +28,24 @@ WINDOWS_EXTERNAL_ROOT = Path("E:/MThesis_EXP")
 #: Repo root (this file is <repo>/src/config/paths.py).
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-#: The vast.ai layout, kept verbatim so remote tooling is unaffected. ``mlruns``
-#: sits under /workspace/MThesis because that is the store the tmux MLflow server
-#: in run_multi_carla_training.sh is launched against.
+#: The box workspace (the vast.ai volume): ``$WORKSPACE``, else ``/workspace``. The shell scripts read the same
+#: variable (scripts/lib/common.sh), so one override moves both. Box-side defaults are built from it, never spelled out.
+WORKSPACE = (os.environ.get("WORKSPACE") or "/workspace").rstrip("/") or "/"
+
+#: The vast.ai layout. ``mlruns`` sits under MThesis because that is the store the tmux MLflow server in
+#: run_multi_carla_training.sh is launched against.
 _VASTAI_LAYOUT = {
-    "runs": Path("/workspace/runs"),
-    "checkpoints": Path("/workspace/checkpoints"),
-    "mlruns": Path("/workspace/MThesis/mlruns"),
-    "videos": Path("/workspace"),
-    "root": Path("/workspace"),
+    "runs": Path(WORKSPACE) / "runs",
+    "checkpoints": Path(WORKSPACE) / "checkpoints",
+    "mlruns": Path(WORKSPACE) / "MThesis" / "mlruns",
+    "videos": Path(WORKSPACE),
+    "root": Path(WORKSPACE),
 }
 
 
 def _is_vastai() -> bool:
-    """True on the cloud instance, where /workspace is the persistent volume."""
-    return os.name != "nt" and Path("/workspace").is_dir()
+    """True on the cloud instance, where the workspace is the persistent volume."""
+    return os.name != "nt" and Path(WORKSPACE).is_dir()
 
 
 def _external_disk_available() -> bool:
@@ -99,6 +102,16 @@ def imports_dir() -> Path:
 def mlruns_uri() -> str:
     """``mlruns_dir`` as a ``file://`` URI MLflow accepts on Windows and Linux."""
     return path_to_uri(mlruns_dir())
+
+
+def mlflow_tracking_uri() -> str:
+    """The tracking URI for a script's own MLflow run: ``MLFLOW_TRACKING_URI`` if set, else the file store at ``mlruns_dir``.
+
+    Also opts in to the file store (MLflow >= 3.16 refuses a filesystem backend without ``MLFLOW_ALLOW_FILE_STORE``), which
+    every caller did on the line before.
+    """
+    os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
+    return os.environ.get("MLFLOW_TRACKING_URI", "file:" + str(mlruns_dir()))
 
 
 def path_to_uri(path) -> str:

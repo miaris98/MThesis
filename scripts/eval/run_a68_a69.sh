@@ -4,8 +4,8 @@
 #        (B2D_TELEMETRY_DIR) and the A44 collision / stand-still clips (on by default in queue_A9c.sh), Low rendering, two lanes;
 #   meanwhile venv_tfpp (setup_tfpp_env.sh, Python 3.10 from uv) and the TF++ all-towns weights;
 #   A69: TF++ on all 220 routes in our harness, Low rendering, three lanes (every third route each), after A68 has finished.
-# Markers: /workspace/a68/A68_DONE, /workspace/a69/TFPP_READY, /workspace/a69/A69_LAUNCHED. Log: /workspace/a68/run.log
-# usage: setsid nohup bash scripts/eval/run_a68_a69.sh > /workspace/a68/run.out 2>&1 < /dev/null &
+# Markers: $WORKSPACE/a68/A68_DONE, $WORKSPACE/a69/TFPP_READY, $WORKSPACE/a69/A69_LAUNCHED. Log: $WORKSPACE/a68/run.log
+# usage: setsid nohup bash scripts/eval/run_a68_a69.sh > $WORKSPACE/a68/run.out 2>&1 < /dev/null &
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
 cd "$MTHESIS_ROOT"
 mkdir -p $WORKSPACE/a68/tele $WORKSPACE/a69 $WORKSPACE/q

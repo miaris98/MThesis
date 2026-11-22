@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Launch a remote job, then verify it is alive and has not crashed before reporting success (2026-10-16: two evals died on
 # "No module named 'src'" right after launch and nobody saw it for 40 min). Use for every remote launch.
-#   usage: launch_checked.sh HOST PORT LOG_PATH "CMD ..."   (CMD runs in /workspace/MThesis with PYTHONPATH set)
+#   usage: launch_checked.sh HOST PORT LOG_PATH "CMD ..."   (CMD runs in $RWS/MThesis with PYTHONPATH set)
 # Prints LAUNCH_OK <pid> or LAUNCH_FAILED with the last log lines. Exit 0 only on LAUNCH_OK.
+RWS=${REMOTE_WORKSPACE:-/workspace}   # the boxes' workspace (the Vast layout); REMOTE_WORKSPACE overrides
 set -u
 H=$1; P=$2; LOG=$3; CMD=$4
 SSHO="-o StrictHostKeyChecking=no -o ConnectTimeout=20 -o BatchMode=yes -p $P"
-ssh $SSHO root@$H "mkdir -p \$(dirname '$LOG'); cd /workspace/MThesis; PYTHONPATH=/workspace/MThesis setsid nohup bash -c '$CMD' > '$LOG' 2>&1 < /dev/null & echo \$! > $LOG.pid; sleep 50; \
+ssh $SSHO root@$H "mkdir -p \$(dirname '$LOG'); cd $RWS/MThesis; PYTHONPATH=$RWS/MThesis setsid nohup bash -c '$CMD' > '$LOG' 2>&1 < /dev/null & echo \$! > $LOG.pid; sleep 50; \
   PID=\$(cat $LOG.pid 2>/dev/null); ERR=\$(awk '/Traceback|Error|No module named/' '$LOG' 2>/dev/null | head -n 1); \
   if [ ! -f '$LOG' ]; then echo LAUNCH_FAILED no_log_file_created_check_path; \
   elif [ -n \"\$ERR\" ]; then echo LAUNCH_FAILED \"\$ERR\"; tail -n 25 '$LOG'; \

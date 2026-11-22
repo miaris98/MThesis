@@ -13,7 +13,7 @@ harness failures, not driving outcomes - and reports:
 
 A route driven more than once contributes the mean of its runs.
 
-    py scripts/analysis/a9_merge.py E:/MThesis_EXP/live_20260928_* E:/MThesis_EXP/live_20260929_*
+    py scripts/analysis/a9_merge.py $EXP/live_20260928_* $EXP/live_20260929_*
 """
 from __future__ import annotations
 

@@ -21,6 +21,7 @@
 # on the routes both completed.
 # Several lanes may share one GPU only with Bench2Drive's evaluator patched (scripts/setup/patch_bench2drive.py, applied
 # by launch_b2d20.sh): unpatched, one lane's crash route kills every CARLA server on that GPU.
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"   # paths, kill_tree, clear_carla_ports, b2d_records
 cd "$MTHESIS_ROOT"
 # the agent needs little CPU; unbounded torch threads took ~4 cores per evaluator next to CARLA
@@ -122,7 +123,7 @@ for job in "$@"; do
       ( export WOR_SPEED_DECODE=$dec; eval_job $lab $C/$ck "$rl" ) ;;
     CKE:*) spec=${job#*:}; lab=${spec%%:*}; rest=${spec#*:}; ck=${rest%%:*}; rest=${rest#*:}
       rl=${rest%%:*}; envs=${rest#*:}; [ "$rl" = R19 ] && rl=$R19   # CKE:<label>:<ckpt>:<routes|R19>:<K=V,K=V,...> (A50 / A57 / A52 / A44 flags: WOR_CREEP_CLAMP=1,WOR_CONTACT_REFLEX=1,
-      ( IFS=, read -ra kv <<<"$envs"; for e in "${kv[@]}"; do export "$e"; done   # WOR_NEWSVENDOR=q0=0.3;T=8 uses ';' as its separator, WOR_SPEED_SCALE=0.9, B2D_CLIPS_DIR=/workspace/clips)
+      ( IFS=, read -ra kv <<<"$envs"; for e in "${kv[@]}"; do export "$e"; done   # WOR_NEWSVENDOR=q0=0.3;T=8 uses ';' as its separator, WOR_SPEED_SCALE=0.9, B2D_CLIPS_DIR=$WORKSPACE/clips)
         # 2026-11-20: ENV_FROM=<file> waits until the box chain writes that file (a checkpoint finished training, the controller screen
         # picked its winner), then exports its K=V lines; LANE_SKIP=1 in it skips the job (training failed, no winner worth driving)
         if [ -n "${ENV_FROM:-}" ]; then

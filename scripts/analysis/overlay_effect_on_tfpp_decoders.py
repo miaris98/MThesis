@@ -29,6 +29,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.dirname(os.path.dirname(_HERE)))
 from tfpp_decoders_rgb_only import link_routes, stub_modules  # noqa: E402
+WORKSPACE = os.environ.get("WORKSPACE", "/workspace").rstrip("/")   # the box workspace (src/config/paths.py: WORKSPACE)
 
 VEHICLE, PEDESTRIAN = 1, 4  # carla_garage semantic classes (config.py `classes`)
 
@@ -90,7 +91,7 @@ def main():
     ap.add_argument("--route_points", type=int, default=4)
     ap.add_argument("--stratify_ped", type=int, default=0, help="if > 0, only frames with at least this many ground-truth pedestrian pixels")
     ap.add_argument("--corridor_px", type=int, default=60, help="thickness of the corridor mask in source pixels")
-    ap.add_argument("--workdir", default="/workspace/overlay_check")
+    ap.add_argument("--workdir", default=f"{WORKSPACE}/overlay_check")
     ap.add_argument("--use_mlflow", type=int, default=1)
     a = ap.parse_args()
 

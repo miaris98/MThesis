@@ -1,0 +1,14 @@
+# Teacher ladder (2026-11-18): E15 + w8_teacher. Box script: ladder_chain.sh. SCRATCH = the folder with ids220.txt and fam_routes.txt.
+${REPO}/Carla-utils/carla_garage/Bench2Drive/leaderboard/data/bench2drive220.xml|${RWS}/ladder/bench2drive220.xml
+${SCRATCH}/ids220.txt|${RWS}/ladder/ids220.txt
+${SCRATCH}/fam_routes.txt|${RWS}/ladder/fam_routes.txt
+${REPO}/scripts/ops/carla_render_test.sh|${RWS}/carla_render_test.sh
+${EXP}/live_20261006_box0_train_3090ti/checkpoints/carla_armE_aug1_hires/model_epoch_015.pth|${RWS}/checkpoints/E15/model_epoch_015.pth
+${EXP}/live_20261006_box0_train_3090ti/checkpoints/carla_armE_aug1_hires/frozen_backbone.pth|${RWS}/checkpoints/E15/frozen_backbone.pth
+${EXP}/live_20261006_box0_train_3090ti/checkpoints/carla_armE_aug1_hires/run_config.json|${RWS}/checkpoints/E15/run_config.json
+READY ${RWS}/checkpoints/E15
+${EXP}/live_20261108_spatial2/w8_teacher/model_epoch_030.pth|${RWS}/checkpoints/w8_teacher/model_epoch_030.pth
+${EXP}/live_20261108_spatial2/w8_teacher/run_config.json|${RWS}/checkpoints/w8_teacher/run_config.json
+# w8_teacher's frozen backbone is E15's (tensor-identical; not stored next to it on E:): copied on the box, hashes compared
+CP ${RWS}/checkpoints/E15/frozen_backbone.pth ${RWS}/checkpoints/w8_teacher/frozen_backbone.pth
+READY ${RWS}/checkpoints/w8_teacher

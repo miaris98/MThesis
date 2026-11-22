@@ -2,13 +2,14 @@
 # CARLA render test for an eval box (rebuilt 2026-11-21 from the 11-20 render_test.log; the original lived in a cleared scratchpad).
 # Checks the install, then starts CARLA off-screen (Epic, port 2900), connects a client, loads Town12 and renders camera frames in
 # synchronous mode, loads Town03 and spawns the four vehicles that crashed boxes before. Prints RENDER_OK frames N on success.
-C=/workspace/carla; PYC=/workspace/venv_carla/bin/python; P=2900
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
+C=$WORKSPACE/carla; PYC=$WORKSPACE/venv_carla/bin/python; P=2900
 echo "CarlaUE4.sh: $(ls $C/CarlaUE4.sh 2>/dev/null)"
 echo "maps: $(ls $C/CarlaUE4/Content/Carla/Maps 2>/dev/null | tr '\n' ' ' | cut -c1-200)"
 echo "Town12/13 packages: $(ls -d $C/CarlaUE4/Content/Carla/Maps/Town12 $C/CarlaUE4/Content/Carla/Maps/Town13 2>/dev/null | wc -l)"
 echo "nvidia icd: $(ls /etc/vulkan/icd.d/ /usr/share/vulkan/icd.d/ 2>/dev/null | grep -i nvidia | tr '\n' ' ')"
 echo "libGLX_nvidia: $(ls /usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.0 2>/dev/null)"
-LOG=/workspace/ladder/render_test_carla.log
+LOG=$WORKSPACE/ladder/render_test_carla.log
 # CARLA refuses to run as root: start it as carlauser with its own XDG_RUNTIME_DIR and -vulkan, as run_bench2drive.sh's shim does
 X=/tmp/runtime-carlauser-render-test; mkdir -p $X; chown carlauser:carlauser $X; chmod 700 $X; touch $LOG; chmod 666 $LOG
 (setsid nohup su carlauser -c "export XDG_RUNTIME_DIR=$X; cd $C && ./CarlaUE4.sh -RenderOffScreen -nosound -carla-rpc-port=$P -vulkan -quality-level=Epic" > $LOG 2>&1 < /dev/null &)

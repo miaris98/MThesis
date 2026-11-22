@@ -11,7 +11,7 @@ A route driven more than once contributes the mean of its runs' success (the off
 
 Also reports, per ability, each arm against the reference paired on the routes both drove (bootstrap CI over routes).
 
-    py scripts/analysis/a9_abilities.py E:/MThesis_EXP/live_2026092[89]_* E:/MThesis_EXP/live_202610*_* --arms E15,WOR
+    py scripts/analysis/a9_abilities.py $EXP/live_2026092[89]_* $EXP/live_202610*_* --arms E15,WOR
 """
 from __future__ import annotations
 

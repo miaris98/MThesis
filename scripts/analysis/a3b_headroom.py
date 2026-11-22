@@ -17,7 +17,7 @@ TODO tiers depend on:
 6. **Power.** Run-to-run noise from J's four seeds -> the smallest DS difference 220 (or 103) routes can resolve with
    1 / 2 / 4 runs per arm.
 
-    py scripts/analysis/a3b_headroom.py E:/MThesis_EXP/live_2026092[89]_* E:/MThesis_EXP/live_2026093* E:/MThesis_EXP/live_2026100* \
+    py scripts/analysis/a3b_headroom.py $EXP/live_2026092[89]_* $EXP/live_2026093* $EXP/live_2026100* \
         --json-out a3b_0410.json
 """
 from __future__ import annotations

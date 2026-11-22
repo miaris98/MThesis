@@ -5,10 +5,11 @@
 #   qdef  : Qwen-small mixer, the same recipe (SGD, weight decay 1e-4 on the mixer too, zero-init output)
 #   qnowd : Qwen-small mixer, the same recipe but mixer weight decay 0 (S-116: wd shrinks the mixer under SGD)
 # usage: run_b63_queue.sh SEEDS...      (runs the three arms of each seed in parallel on GPU 0, one seed after another)
-# results: /workspace/b63/out/<label>, logs: /workspace/b63/logs/<label>.log, DONE marker: /workspace/b63/logs/queue.done
-cd /workspace/MThesis
-L=/workspace/b63/out; G=/workspace/b63/logs; mkdir -p $L $G
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True OMP_NUM_THREADS=4 MLFLOW_ALLOW_FILE_STORE=true PYTHONPATH=/workspace/MThesis CUDA_VISIBLE_DEVICES=0
+# results: $WORKSPACE/b63/out/<label>, logs: $WORKSPACE/b63/logs/<label>.log, DONE marker: $WORKSPACE/b63/logs/queue.done
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
+cd $WORKSPACE/MThesis
+L=$WORKSPACE/b63/out; G=$WORKSPACE/b63/logs; mkdir -p $L $G
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True OMP_NUM_THREADS=4 MLFLOW_ALLOW_FILE_STORE=true PYTHONPATH=$WORKSPACE/MThesis CUDA_VISIBLE_DEVICES=0
 FIX="--stagnation-explore 300 --stagnation-burst 30 --policy-target-smoothing 0.05 --audit-every 1000"
 arm_args() {  # arm -> trainer flags
   case $1 in

@@ -4,7 +4,8 @@ remaining routes of a lane = its list - driven (any restart segment) - excluded 
 minutes per route = median gap between successive route start times (timestamp inside save_name) of that lane over its last 12 routes;
 box ETA = slowest lane. Prints one summary line: LANE_ETA total=.. done=.. excluded=.. left=.. eta_min=.. worst_lane=.."""
 import glob, json, re, sys, datetime, statistics, os
-os.chdir("/workspace")
+WORKSPACE = os.environ.get("WORKSPACE", "/workspace").rstrip("/")   # the box workspace (src/config/paths.py: WORKSPACE)
+os.chdir(f"{WORKSPACE}")
 lanes = []
 for line in open(sys.argv[1]):
     p = line.split()

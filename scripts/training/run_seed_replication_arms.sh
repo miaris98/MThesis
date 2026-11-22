@@ -16,12 +16,13 @@
 # Training is GPU-bound (99-100% GPU, ~1.1s data wait per 130s epoch) while closed-loop
 # evaluation is CPU-bound, so this is intended to run *alongside* an evaluation rather than
 # instead of one - see challenges_05 5.9.
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
 set -x
 SEED="${1:?usage: scripts/training/run_seed_replication_arms.sh <seed>}"
 # The repository root, two levels up: it is what puts `src` on the import path.
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
-OUT=/workspace/checkpoints/wor_cl_arms
-DATA=/workspace/dataset/wor_trajectories
+OUT=$WORKSPACE/checkpoints/wor_cl_arms
+DATA=$WORKSPACE/dataset/wor_trajectories
 
 COMMON=(--data_dir "$DATA" --backbone resnet34 --pretrained 1 --freeze_backbone 1
         --epochs 15 --batch_size 32 --lr_backbone 1e-4 --lr_heads 3e-4 --num_workers 3
@@ -37,7 +38,7 @@ run_arm () {
     --heading_loss_weight "$heading" --curvature_loss_weight "$curv" \
     --mlflow_port "$port" \
     --run_label "$label" --save_dir "$OUT/$label" \
-    > "/workspace/train_${label}.log" 2>&1 &
+    > "$WORKSPACE/train_${label}.log" 2>&1 &
   # Stagger the launches: three processes creating the same MLflow experiment at the same
   # instant raced once already, and the loser fell back to TensorBoard. Harmless, but it
   # costs nothing to avoid.

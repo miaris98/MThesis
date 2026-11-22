@@ -3,7 +3,7 @@ external disk, so a destroyed/dropped box costs at most one interval's progress
 instead of the whole run.
 
 This is the general-purpose replacement for writing a new one-off script (like
-sync_phase4_pull_loop.py) per run: same tar-over-ssh pull() from sync_experiments.py,
+sync_phase4_pull_loop.py, retired 2026-11-22) per run: same tar-over-ssh pull() from sync_experiments.py,
 parameterized instead of hard-coded, defaulting to the two groups that matter most for
 surviving a box death - checkpoints and mlruns (see the checkpoint-sync-and-resource-usage
 memory rule: every remote training launch should have one of these running for its

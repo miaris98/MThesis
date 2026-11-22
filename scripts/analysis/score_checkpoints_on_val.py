@@ -39,7 +39,7 @@ import argparse
 import glob
 import os
 import sys
-from typing import List, Tuple
+from typing import List
 
 import torch
 
@@ -47,19 +47,12 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+from scripts.training.build_feature_cache import _parse_img_size  # noqa: E402  ('288x768' or '256')
 from src.models.world_on_rails.wor_loader import load_wor_model
 import src.training.wor_dataset  # noqa: F401  (first: wor_dataset re-exports wor_dataloaders at its bottom, so importing wor_dataloaders first is circular)
 from src.training.wor_dataloaders import create_wor_train_val_dataloaders
 from src.training.wor_eval import run_validation
 from src.training.wor_trainer import autocast
-
-
-def _parse_img_size(spec: str) -> Tuple[int, int]:
-    if "x" in spec.lower():
-        h, w = spec.lower().split("x")
-        return int(h), int(w)
-    n = int(spec)
-    return n, n
 
 
 def _expand(patterns: List[str]) -> List[str]:

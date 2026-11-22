@@ -27,6 +27,7 @@
 # scenario_runner scenarios here, so the infraction mix is different and the absolute score will
 # not match routes_validation.xml. Use it to *rank* configurations, then confirm the top one or
 # two with run_leaderboard_official.sh.
+: "${WORKSPACE:=/workspace}"; WORKSPACE=${WORKSPACE%/}   # the box layout (scripts/lib/common.sh); WORKSPACE=... overrides
 set -u
 
 LABEL="${1:?usage: scripts/eval/run_fast_eval.sh <label> <arch> <ckpt> [preset] [town] [port]}"
@@ -40,10 +41,10 @@ TOWN="${5:-Town01}"
 # "reused" a server that was still cold-booting and timed out 60 s later.
 PORT="${6:-2030}"
 
-MTHESIS=/workspace/MThesis
-REAL_CARLA=/workspace/carla
-GARAGE=/workspace/carla_garage
-OUT=/workspace/fast_eval_out
+MTHESIS=$WORKSPACE/MThesis
+REAL_CARLA=$WORKSPACE/carla
+GARAGE=$WORKSPACE/carla_garage
+OUT=$WORKSPACE/fast_eval_out
 mkdir -p "$OUT"
 
 # 2026-09-15: same pluggable-agent mechanism as run_leaderboard_official.sh's EVAL_AGENT /
@@ -51,7 +52,7 @@ mkdir -p "$OUT"
 # real Leaderboard AgentWrapper/SensorInterface contract instead of a hand-rolled camera+dict.
 # Default: our own bench2drive_agent.py, config "<arch>:<ckpt>" - unchanged behaviour for every
 # existing caller. Point EVAL_AGENT at carla_garage/team_code/sensor_agent.py (with
-# EVAL_PYTHON=/workspace/venv_tfpp/bin/python, EVAL_AGENT_CONFIG=<pretrained_models dir>) to run
+# EVAL_PYTHON=$WORKSPACE/venv_tfpp/bin/python, EVAL_AGENT_CONFIG=<pretrained_models dir>) to run
 # TF++ on these same cheap routes instead - the whole reason Tier 1 needed this refactor.
 EVAL_AGENT="${EVAL_AGENT:-}"
 EVAL_AGENT_CONFIG="${EVAL_AGENT_CONFIG:-}"

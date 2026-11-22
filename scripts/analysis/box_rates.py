@@ -9,7 +9,7 @@ Everything is read from files already on E: (nothing is run):
 * **CARLA training minutes per epoch** from the mtimes of consecutive `model_epoch_*.pth` of every arm (tar -x keeps mtimes), with the arm's image size.
 * **Atari training minutes per 1k environment steps** from the mtimes of the `checkpoint_env<N>_upd<M>.pt` files (one run per GPU vs several per GPU matters: read the box).
 
-    py scripts/analysis/box_rates.py [E:/MThesis_EXP]
+    py scripts/analysis/box_rates.py [ROOT]      (default: the experiment archive, MTHESIS_EXP_ROOT)
 """
 from __future__ import annotations
 
@@ -21,8 +21,12 @@ import os
 import re
 import statistics
 import sys
+from pathlib import Path
 
-ROOT = sys.argv[1] if len(sys.argv) > 1 else "E:/MThesis_EXP"
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from src.config.paths import exp_root  # noqa: E402  (the experiment archive: MTHESIS_EXP_ROOT, E:/MThesis_EXP on the PC)
+
+ROOT = sys.argv[1] if len(sys.argv) > 1 else exp_root().as_posix()
 START = re.compile(r"_(\d{2})_(\d{2})_(\d{2})_(\d{2})_(\d{2})$")
 
 

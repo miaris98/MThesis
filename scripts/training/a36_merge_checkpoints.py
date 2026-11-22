@@ -14,7 +14,7 @@ Checks that stop the merge: backbone tensors differ, key sets or shapes differ, 
 (`--selftest`) merges at alpha 0 and 1 and requires exact equality with the endpoints.
 
     py scripts/training/a36_merge_checkpoints.py --a E:/.../carla_armE_aug1_hires/model_epoch_015.pth \
-        --b E:/.../carla_armJ_ft_obst/model_epoch_020.pth --alpha 0.5 --out E:/MThesis_EXP/prep_20261005/a36/alpha0.50
+        --b E:/.../carla_armJ_ft_obst/model_epoch_020.pth --alpha 0.5 --out $EXP/prep_20261005/a36/alpha0.50
 """
 from __future__ import annotations
 

@@ -5,17 +5,22 @@ Usage:
     python scripts/setup/vast_fleet.py select <idx_or_id> [--direct]
 """
 
+import os
 import sys
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
-VAST_CLI = r"C:\Users\miari\anaconda3\envs\graphtools\Scripts\vastai.exe"
-if not Path(VAST_CLI).exists():
-    VAST_CLI = shutil.which("vastai") or "vastai"
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.lib.vast_cli import vast_cli  # noqa: E402
 
-SSH_KEY = r"C:\Users\miari\.ssh\id_ed25519"
+try:
+    VAST_CLI = vast_cli()
+except FileNotFoundError:
+    VAST_CLI = "vastai"
+
+# The key the Vast account knows; VAST_SSH_KEY overrides (default: ~/.ssh/id_ed25519).
+SSH_KEY = os.environ.get("VAST_SSH_KEY", str(Path.home() / ".ssh" / "id_ed25519"))
 
 
 def get_instances():

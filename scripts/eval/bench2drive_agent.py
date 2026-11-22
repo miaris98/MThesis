@@ -28,11 +28,12 @@ from leaderboard.autoagents.autonomous_agent import AutonomousAgent, Track
 from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 
 import carla
+WORKSPACE = os.environ.get("WORKSPACE", "/workspace").rstrip("/")   # the box workspace (src/config/paths.py: WORKSPACE)
 
 # This project's root, so `src.agents` and `scripts.eval.eval_wor` import. The harness runs
 # with its own cwd inside the Bench2Drive checkout, so relying on cwd would not work, and
 # this file is deployed by copy/symlink so `__file__` does not point into the repo either.
-MTHESIS_ROOT = os.environ.get("MTHESIS_ROOT", "/workspace/MThesis")
+MTHESIS_ROOT = os.environ.get("MTHESIS_ROOT", f"{WORKSPACE}/MThesis")
 if MTHESIS_ROOT not in sys.path:
     sys.path.insert(0, MTHESIS_ROOT)
 

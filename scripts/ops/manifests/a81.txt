@@ -1,0 +1,7 @@
+# TODO A81 (2026-11-12): speed-head experts on the vf_ctrl recipe. Box script: scripts/ops/a81_box.sh
+${EXP}/archive_scratch_df280e34_2026-11-11/e15_noopt/model_epoch_015.pth|${RWS}/checkpoints/E15/model_epoch_015.pth
+${EXP}/live_20261104_visionfix/checkpoints/vf_ctrl/model_epoch_030.pth|${RWS}/checkpoints/vf_ctrl/model_epoch_030.pth
+${EXP}/live_20261104_visionfix/checkpoints/vf_ctrl/frozen_backbone.pth|${RWS}/checkpoints/vf_ctrl/frozen_backbone.pth
+${EXP}/live_20261104_visionfix/checkpoints/vf_ctrl/run_config.json|${RWS}/checkpoints/vf_ctrl/run_config.json
+${EXP}/archive_scratch_df280e34_2026-11-11/obst_lanes.txt|${RWS}/obst_lanes.txt
+${REPO}/Carla-utils/carla_garage/Bench2Drive/leaderboard/data/bench2drive220.xml|${RWS}/vf/bench2drive220.xml

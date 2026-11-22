@@ -5,7 +5,6 @@ Records a trained PPO, SAC or World on Rails (WoR) policy driving in CARLA.
 import os
 import sys
 import time
-import glob
 import argparse
 import subprocess
 from typing import Optional
@@ -13,21 +12,16 @@ import numpy as np
 import cv2
 import torch
 
-carla_root = os.environ.get("CARLA_ROOT", "/workspace/carla")
-carla_dist_path = os.path.join(carla_root, "PythonAPI", "carla", "dist")
-if os.path.exists(carla_dist_path):
-    eggs = glob.glob(os.path.join(carla_dist_path, "carla-*-py3*.egg"))
-    for p in eggs:
-        if p not in sys.path:
-            sys.path.insert(0, p)
-    if os.path.join(carla_root, "PythonAPI", "carla") not in sys.path:
-        sys.path.insert(0, os.path.join(carla_root, "PythonAPI", "carla"))
-
 # Repository root, so `src.*` and sibling `scripts.*` modules resolve whether this file is
 # run directly (`python scripts/eval/record_eval_video.py`) or imported as `scripts.eval.record_eval_video`.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
+
+from src.config.carla_client import add_carla_to_path  # noqa: E402
+from src.config.paths import WORKSPACE  # noqa: E402  (the box workspace, $WORKSPACE)
+
+add_carla_to_path()
 
 try:
     import carla
@@ -92,7 +86,7 @@ def _upload_to_mlflow(video_path: str, experiment_name: str = "CARLA_PPO_RL") ->
 
 def record_eval_video(
     port: int = 2000, steps: int = 600, max_episode_steps: int = 500,
-    min_speed: float = 0.0, output_video: str = "/workspace/eval_video.mp4",
+    min_speed: float = 0.0, output_video: str = f"{WORKSPACE}/eval_video.mp4",
     num_npc_vehicles: int = 3, num_walkers: int = 10,
     checkpoint: Optional[str] = None, backbone: str = "lav",
     policy_arch: str = "qwen100m", weights_path: Optional[str] = None,
@@ -100,18 +94,18 @@ def record_eval_video(
     wor_model_type: str = "wor_nc"
 ) -> None:
     if not weights_path:
-        for wp in ["/workspace/pretrained_carla/model_0030_0.pth", "./papers_and_code/LAV/lav_pretrained.pth", "/workspace/MThesis/papers_and_code/LAV/lav_pretrained.pth"]:
+        for wp in [f"{WORKSPACE}/pretrained_carla/model_0030_0.pth", "./papers_and_code/LAV/lav_pretrained.pth", f"{WORKSPACE}/MThesis/papers_and_code/LAV/lav_pretrained.pth"]:
             if os.path.exists(wp):
                 weights_path = wp
                 break
 
     if not checkpoint:
         if algo == "wor":
-            cands = ["/workspace/checkpoints/wor_10k/best_model.pth", "/workspace/checkpoints/wor_10k/last_model.pth",
+            cands = [f"{WORKSPACE}/checkpoints/wor_10k/best_model.pth", f"{WORKSPACE}/checkpoints/wor_10k/last_model.pth",
                      "./checkpoints/wor_10k/best_model.pth"]
         else:
             prefix = "sac" if algo == "sac" else "ppo"
-            cands = [f"/workspace/checkpoints/{prefix}_carla_best.pth", f"/workspace/checkpoints/{prefix}_carla_latest.pth",
+            cands = [f"{WORKSPACE}/checkpoints/{prefix}_carla_best.pth", f"{WORKSPACE}/checkpoints/{prefix}_carla_latest.pth",
                      f"./checkpoints/{prefix}_carla_best.pth", f"./checkpoints/{prefix}_carla_latest.pth"]
         for cp in cands:
             if os.path.exists(cp):
@@ -320,7 +314,7 @@ def main():
     parser.add_argument("--steps", type=int, default=600)
     parser.add_argument("--max-episode-steps", type=int, default=500)
     parser.add_argument("--min-speed", type=float, default=0.0)
-    parser.add_argument("--output-video", type=str, default="/workspace/eval_video.mp4")
+    parser.add_argument("--output-video", type=str, default=f"{WORKSPACE}/eval_video.mp4")
     parser.add_argument("--num-vehicles", "--npc-vehicles", dest="npc_vehicles", type=int, default=3)
     parser.add_argument("--num-walkers", type=int, default=10)
     parser.add_argument("--backbone", type=str, default="lav")

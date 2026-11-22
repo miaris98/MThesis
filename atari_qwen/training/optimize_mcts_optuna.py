@@ -25,6 +25,7 @@ from pathlib import Path
 import optuna
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
+WORKSPACE = os.environ.get("WORKSPACE", "/workspace").rstrip("/")   # the box workspace (src/config/paths.py: WORKSPACE)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 TRAINER = REPO_ROOT / "atari_qwen" / "training" / "train_mcts_offpolicy.py"
@@ -128,9 +129,9 @@ def main():
     ap.add_argument("--trial-timeout-h", type=float, default=3.0)
     ap.add_argument("--target-score", type=float, default=None,
                     help="Stop the study once a completed trial reaches this 20k-step score (EfficientZero's)")
-    ap.add_argument("--storage", type=str, default="sqlite:////workspace/optuna_mcts.db")
+    ap.add_argument("--storage", type=str, default=f"sqlite:///{WORKSPACE}/optuna_mcts.db")
     ap.add_argument("--study-name", type=str, default="S055_mcts_first20k")
-    ap.add_argument("--out-dir", type=str, default="/workspace/optuna_mcts")
+    ap.add_argument("--out-dir", type=str, default=f"{WORKSPACE}/optuna_mcts")
     args = ap.parse_args()
 
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)

@@ -28,11 +28,12 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from src.training.wor_dataset import WorldOnRailsDataset
+from src.config.paths import WORKSPACE  # noqa: E402  (the box workspace, $WORKSPACE)
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Analyze WoR waypoint target distributions")
-    p.add_argument("--data_dir", type=str, default="/workspace/dataset/wor_trajectories")
+    p.add_argument("--data_dir", type=str, default=f"{WORKSPACE}/dataset/wor_trajectories")
     return p.parse_args()
 
 
