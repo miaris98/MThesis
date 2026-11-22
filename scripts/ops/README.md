@@ -1,6 +1,6 @@
 # Box operations (S-115, 2026-10-03; S-126 / S-127, 2026-10-05)
 
-Tools used on rented Vast.ai boxes; every one was run for real that day. One-off scripts of finished experiments were retired on 2026-11-22 (verbatim in `E:\MThesis_EXP\local_repo_logs_20261122etired_scripts`, with a sha256 MANIFEST). HF token only ever lives in `/dev/shm/hf_token` on the box
+Tools used on rented Vast.ai boxes; every one was run for real that day. One-off scripts of finished experiments were retired on 2026-11-22 (verbatim in `E:\MThesis_EXP\local_repo_logs_20261122\retired_scripts`, with a sha256 MANIFEST). HF token only ever lives in `/dev/shm/hf_token` on the box
 (sent over stdin, never printed). Never `pkill -f` a pattern in the same ssh command that relaunches a matching script.
 
 | Script | Where | What |

@@ -86,8 +86,11 @@ generic tools above.
 
 ## Removed on 2026-11-22
 
-65 scripts: the 17 one-offs the 2026-10-11 audit had queued, the per-run `setup/check_*.py` family (replaced by `box.py`), September
+75 scripts: the 17 one-offs the 2026-10-11 audit had queued, the per-run `setup/check_*.py` family and `live_status_report.py`
+(replaced by `box.py`), the September ssh launchers (`launch_gate1_poc.py` + `verify_gate1_ckpt.py`, `launch_gate2_trio.py`, `launch_atari_38k_resumed.py`,
+`sync_atari_resume.py`, `launch_pdm_lite_download.py`, `remote_setup_carla_and_mlflow.py`, `training/auto_launch_pipeline.py`,
+`inspect_atari_ckpts.py`), September
 pulls and uploads with hard-coded hosts and paths, the phase-4 eval family, the `live_2026-10-10/` snapshot, and copies merged into
 one script (`run_closed_loop_*`, `launch_lanes_nokill.sh`, `a86_chain.sh`, the `*_b100k_*` pair scripts, the four `*_deploy.sh` now
-manifests for `ops/box_deploy.sh`). Verbatim copies with sha256 in `E:\MThesis_EXP\local_repo_logs_20261122etired_scripts\MANIFEST.md`;
+manifests for `ops/box_deploy.sh`). Verbatim copies with sha256 in `E:\MThesis_EXP\local_repo_logs_20261122\retired_scripts\MANIFEST.md`;
 `git checkout <commit> -- <path>` restores any of them.
