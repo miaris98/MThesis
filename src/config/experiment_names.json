@@ -1,0 +1,95 @@
+{
+  "_about": "Display names of the six headline CARLA experiments (user, 2026-11-26): QwenPolicy + the components that tell them apart. Old IDs stay the run labels, the folders on E: and the log entries; use display names in the thesis, figures and reports. Shared by all six: Qwen-style transformer trunk, frozen CARLA-pretrained regnety_032 encoder (FE), waypoint predictor (WP), one front camera. Components were read from each run's run_config.json and record on 2026-11-26. Short names (figures, narrow tables) use the short_tags; expanding them gives the display name.",
+  "tags": {
+    "FE": "frozen CARLA-pretrained image encoder (regnety_032 from the TF++ release)",
+    "WP": "waypoint predictor head, followed by the controller",
+    "Overlay": "planned route drawn into the camera image (route_overlay 1)",
+    "NoOverlay": "no route drawn into the image (route_overlay 0)",
+    "Cov": "base data plus the coverage data (dataset_all)",
+    "FreshAdamW": "optimizer restarted when fine-tuning from E15 epoch 15 (reset_optimizer 1, or new tensors forcing a restart)",
+    "DetTok": "20 detector tokens (frozen DETR-style detector on the frozen encoder's map, <= 30 m, p >= 0.5)",
+    "MoE": "16 waypoint experts, top-4 routing",
+    "WD": "weight decay 0.01 instead of 1e-4",
+    "PID": "PID controller (the default before 2026-11-20)",
+    "Brake": "brake-rule controller (WOR_CONTROLLER=brake)"
+  },
+  "experiments": [
+    {
+      "display": "QwenPolicy-FE-WP-Overlay-PID",
+      "old_id": "E15",
+      "run_label": "E15",
+      "checkpoint": "arm E, epoch 15 (locate on E:; see docs/todo/TODO_ACTIVE.md A88)",
+      "controller": "PID",
+      "score": "63.4 official (Low, 220 routes); 67.6 full Epic run",
+      "record": "docs/todo/RESULTS_EPIC220_2026-11-05.md",
+      "short": "QP-OV-PID"
+    },
+    {
+      "display": "QwenPolicy-FE-WP-NoOverlay-PID",
+      "old_id": "vf_clean",
+      "run_label": "vf_clean",
+      "checkpoint": "E:\\MThesis_EXP\\live_20261104_visionfix\\checkpoints\\vf_clean\\model_epoch_030.pth",
+      "recipe": "E15 epoch 15 -> 30, route_overlay 0, optimizer kept, base data",
+      "controller": "PID",
+      "score": "70.2 (Epic, 220 routes, 2026-11-17); 68.6 (Epic, 2026-11-05)",
+      "record": "docs/ops/2026-11-18_teacher_ladder.md",
+      "short": "QP-NoOV-PID"
+    },
+    {
+      "display": "QwenPolicy-FE-WP-NoOverlay-Cov-FreshAdamW-PID",
+      "old_id": "r0ftf",
+      "run_label": "r1d_r0ftf",
+      "checkpoint": "E:\\MThesis_EXP\\live_20261120_mx\\checkpoints\\r1d_r0ftf\\model_epoch_030.pth",
+      "recipe": "E15 epoch 15 -> 30, route_overlay 0, reset_optimizer 1, dataset_all",
+      "controller": "PID",
+      "score": "70.1 (Epic, 220 routes, 2026-11-20)",
+      "record": "docs/ops/2026-11-20_controller_and_moe.md",
+      "short": "QP-NoOV-Cov-FA-PID"
+    },
+    {
+      "display": "QwenPolicy-FE-WP-NoOverlay-Cov-FreshAdamW-DetTok-Brake",
+      "old_id": "R1 + brake",
+      "run_label": "r1d_r1_s0",
+      "checkpoint": "E:\\MThesis_EXP\\live_20261119_r1\\checkpoints\\r1d_r1_s0\\model_epoch_030.pth",
+      "recipe": "r0ftf's recipe + object_tokens 20 (optimizer restarted by the new tensors)",
+      "controller": "Brake",
+      "score": "73.15 (Epic, 220 routes, 2026-11-20); the same checkpoint with PID 70.4",
+      "record": "docs/ops/2026-11-20_controller_and_moe.md",
+      "short": "QP-NoOV-Cov-FA-Det-Brk"
+    },
+    {
+      "display": "QwenPolicy-FE-WP-NoOverlay-Cov-FreshAdamW-DetTok-MoE-PID",
+      "old_id": "R1 + w4",
+      "run_label": "r1d_r1w4_s0",
+      "checkpoint": "E:\\MThesis_EXP\\live_20261120_mx\\checkpoints\\r1d_r1w4_s0\\model_epoch_030.pth",
+      "recipe": "R1 + moe_experts 16, top-4",
+      "controller": "PID",
+      "score": "69.7 (Epic, 220 routes, 2026-11-20)",
+      "record": "docs/ops/2026-11-20_controller_and_moe.md",
+      "short": "QP-NoOV-Cov-FA-Det-MoE-PID"
+    },
+    {
+      "display": "QwenPolicy-FE-WP-NoOverlay-Cov-FreshAdamW-WD-Brake",
+      "old_id": "a87_wd",
+      "run_label": "a87_wd",
+      "checkpoint": "E:\\MThesis_EXP\\live_20261121_a87\\checkpoints\\a87_wd\\",
+      "recipe": "r0ftf's recipe + weight_decay 0.01",
+      "controller": "Brake",
+      "score": "70.8 (Epic, 80 stratified routes only, 2026-11-21)",
+      "record": "E:\\MThesis_EXP\\live_20261121_eval (A87 screen)",
+      "short": "QP-NoOV-Cov-FA-WD-Brk"
+    }
+  ],
+  "short_tags": {
+    "QP": "QwenPolicy-FE-WP (Qwen-style policy, frozen encoder, waypoint predictor; shared by all six)",
+    "OV": "Overlay",
+    "NoOV": "NoOverlay",
+    "Cov": "Cov",
+    "FA": "FreshAdamW",
+    "Det": "DetTok",
+    "MoE": "MoE",
+    "WD": "WD",
+    "PID": "PID",
+    "Brk": "Brake"
+  }
+}
